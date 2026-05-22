@@ -1,0 +1,178 @@
+# .github/workflows/release.yml
+#
+# Release workflow. Triggered by pushing a tag matching v* (e.g. v1.0.0,
+# v1.0.0-rc1). Builds the container image reproducibly, pushes it to GHCR,
+# generates SLSA build provenance and SBOM attestations using GitHub's
+# native attestation actions, and creates a GitHub Release with the
+# attestation digests in the body.
+#
+# Recommended iteration path:
+#   1. First push the tag v0.0.1-rc1 (or similar) and watch this workflow
+#      run end-to-end. Pre-release tags don't get attached to the "Latest"
+#      release on the landing page.
+#   2. If it fails, fix forward, delete the tag, re-tag, push again.
+#   3. Once a pre-release tag run is clean, tag v1.0.0.
+#
+# Verification (from any machine with GitHub CLI installed):
+#   docker login ghcr.io
+#   gh attestation verify oci://ghcr.io/OWNER/REPO:v1.0.0 -R OWNER/REPO
+#
+# That confirms the image at that digest was built by *this* workflow in
+# *this* repository -- the substantive value of attestation.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write       # create the GitHub Release
+  packages: write       # push to ghcr.io
+  id-token: write       # OIDC token for keyless signing
+  attestations: write   # actions/attest-build-provenance, attest-sbom
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Build, push, attest, release
+    runs-on: ubuntu-latest
+    outputs:
+      image-digest: ${{ steps.build.outputs.digest }}
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        # fetch-depth: 0 so `git describe` and `git log -1 --pretty=%ct` see
+        # full history. The default shallow clone breaks both.
+        with:
+          fetch-depth: 0
+
+      - name: Derive reproducibility inputs
+        # Same two values that build.sh derives locally:
+        #   - SOURCE_DATE_EPOCH: the commit timestamp. Used by the Dockerfile
+        #     and by BuildKit's rewrite-timestamp to make the image envelope
+        #     reproducible across machines.
+        #   - SERVER_VERSION: the tag itself (e.g. "v1.0.0"), embedded in the
+        #     binary so `mcp-searxng-relay --version` (or the startup banner)
+        #     reports something useful.
+        run: |
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct HEAD)"
+            echo "SERVER_VERSION=${GITHUB_REF_NAME}"
+          } >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # tags=:
+          #   - the literal tag (v1.0.0)
+          #   - "latest" only for non-prerelease tags (v1.0.0-rc1 stays out
+          #     of the "latest" channel; v1.0.0 promotes into it)
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          labels: |
+            org.opencontainers.image.title=mcp-searxng-relay
+            org.opencontainers.image.description=MCP relay for SearXNG with content extraction and prompt fencing
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ env.SERVER_VERSION }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          # outputs= rather than push=true so we can also pass
+          # rewrite-timestamp=true to BuildKit. rewrite-timestamp pins every
+          # layer's file timestamps to SOURCE_DATE_EPOCH so the resulting
+          # OCI manifest is byte-identical on rebuild.
+          outputs: |
+            type=image,push=true,rewrite-timestamp=true,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SERVER_VERSION=${{ env.SERVER_VERSION }}
+          # BuildKit-generated provenance is set to max so the attestation
+          # contains the full build environment (the GitHub-issued OIDC
+          # token lets a verifier connect the image back to this workflow).
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest build provenance
+        # GitHub-native SLSA build provenance, signed by the workflow's
+        # OIDC token. Verifiable with `gh attestation verify`.
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Install Syft (for SBOM)
+        # Syft generates a CycloneDX SBOM directly from the pushed image.
+        # The native SBOM attestation from build-push-action already attests
+        # to BuildKit's SBOM; this adds a CycloneDX one which is the format
+        # most consumers (Dependency-Track, Grype, etc.) actually parse.
+        uses: anchore/sbom-action/download-syft@v0
+
+      - name: Generate CycloneDX SBOM
+        run: |
+          syft \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" \
+            -o cyclonedx-json="sbom.cyclonedx.json"
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.cyclonedx.json
+          push-to-registry: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # prerelease is auto-true for anything with a hyphen (rc1, beta, etc.)
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: |
+            sbom.cyclonedx.json
+          body: |
+            Container image: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`
+            Image digest: `${{ steps.build.outputs.digest }}`
+
+            **Verify build provenance:**
+            ```bash
+            gh attestation verify \
+              oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }} \
+              -R ${{ github.repository }}
+            ```
+
+            **Pull the image:**
+            ```bash
+            podman pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+            ```
+
+            See [`docs/supply-chain.md`](docs/supply-chain.md) for the full
+            provenance and verification story.

@@ -1,0 +1,137 @@
+# .github/workflows/ci.yml
+#
+# Continuous-integration workflow. Runs on every push to any branch and on
+# every pull request targeting main.
+#
+# What it does:
+#   - lint:    golangci-lint over the Go code; actionlint over the workflow
+#              files themselves (catches YAML / Action-syntax bugs locally).
+#   - test:    go test with -race, -count=1 (no caching), and govulncheck.
+#   - build:   builds the container image to confirm the Dockerfile is still
+#              healthy. Does NOT push and does NOT attest -- those only happen
+#              on tagged release builds (see release.yml).
+#
+# Triggers are intentionally conservative: skip-ci on documentation-only pushes
+# would be nice-to-have but is omitted here so doc-impacting changes (link
+# anchors, example commands) still get the build sanity check.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Cancel any in-progress run when a new push to the same branch arrives.
+# Saves runner minutes on rapid iteration; harmless because CI is read-only.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+          # --timeout because the WASM-backed transitive deps make first-run
+          # analysis a bit slow on cold cache. Tune downward later if you want.
+          args: --timeout=5m
+
+      - name: actionlint
+        # Linting the workflow files themselves catches a class of bug that
+        # only surfaces when GitHub tries to schedule the run. Pinning to a
+        # released SHA would be stricter; ubuntu-latest's pre-installed
+        # actionlint is fine for a starting point.
+        run: |
+          bash <(curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install pdf_oxide native library
+        run: |
+          PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)"
+          echo "Installing pdf_oxide ${PDF_OXIDE_VERSION}"
+          go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}"
+          # The installer puts the library at a predictable path. Constructing
+          # the cgo flags here (instead of forwarding the installer's stdout
+          # to $GITHUB_ENV) avoids a quoting pitfall: $GITHUB_ENV treats every
+          # `KEY=VALUE` as a single value and does not re-tokenize on spaces,
+          # so the multi-flag CGO_LDFLAGS value arrives at gcc as one blob.
+          INSTALL_DIR="${HOME}/.cache/pdf_oxide/${PDF_OXIDE_VERSION}"
+          {
+            echo "CGO_CFLAGS=-I${INSTALL_DIR}/include"
+            echo "CGO_LDFLAGS=${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
+          } >> "$GITHUB_ENV"
+          
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        # -race catches data races in the fence + rate-limit packages, which is
+        # where you'd most want to know. -count=1 disables Go's test result
+        # cache so a green CI means the tests actually ran on this revision.
+        run: go test -race -count=1 -v ./...
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  build:
+    name: Build container (sanity)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Derive build args
+        # Same derivation as build.sh -- SOURCE_DATE_EPOCH from the commit,
+        # SERVER_VERSION from the tag-or-commit description. On a non-tag
+        # build these end up as a commit short-SHA, which is fine for a
+        # sanity check (we never push these).
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct HEAD)" >> "$GITHUB_ENV"
+          echo "SERVER_VERSION=$(git describe --tags --always --dirty)" >> "$GITHUB_ENV"
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: false
+          load: false
+          build-args: |
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            SERVER_VERSION=${{ env.SERVER_VERSION }}
+          tags: mcp-searxng-relay:ci
