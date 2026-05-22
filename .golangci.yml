@@ -1,0 +1,18 @@
+version: "2"
+
+linters:
+  settings:
+    staticcheck:
+      checks:
+        - all
+        - -QF1001  # De Morgan rewrite — original form is more readable
+
+    errcheck:
+      exclude-functions:
+        # Close() on already-read bodies / parsed documents. The read
+        # already succeeded; an error closing is a network blip we can't
+        # recover from. Well-known errcheck noise pattern. Real Close()
+        # error handling (e.g. file writes that flush on close) should
+        # use an explicit if-err check anyway, which this exclusion
+        # doesn't touch.
+        - (io.Closer).Close
