@@ -1,0 +1,14 @@
+https://searxng.domain.tld:443 {
+   tls admin@domain.tld {
+     ca https://acme.domain.tld:9000/acme/acme/directory
+   }
+
+   handle_path /mcp* {
+     reverse_proxy mcp-searxng-relay:3000 {
+       flush_interval -1	
+     }
+   }
+
+   reverse_proxy searxng:8080
+}
+

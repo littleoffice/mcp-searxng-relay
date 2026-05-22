@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-searxng
+  labels:
+    app: mcp-searxng
+spec:
+  # Default to one replica + stateful mode (audit-friendly).  See
+  # deploy/kubernetes/README.md "Deployment shapes" for when to scale out
+  # and what that costs you in session semantics.
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mcp-searxng
+  template:
+    metadata:
+      labels:
+        app: mcp-searxng
+    spec:
+      # Pod-level security context.  The container also has its own — see
+      # below.  Pod-level controls things like fsGroup that apply across
+      # all containers; container-level locks down what each one can do.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mcp-searxng
+          # Pin a specific tag in production rather than tracking :latest —
+          # rolling restarts need a known image, and "latest" silently shifts.
+          image: ghcr.io/your-org/mcp-searxng-relay:v1.6.0
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: MCP_PORT
+              value: "8080"
+            - name: MCP_AUTH_TOKEN_FILE
+              value: /etc/mcp-auth/tokens
+            - name: SEARXNG_URL
+              # Replace with your in-cluster SearXNG Service.  The shape
+              # below assumes a SearXNG Deployment named "searxng" in the
+              # "searxng" namespace serving on port 8080.
+              value: http://searxng.searxng.svc.cluster.local:8080
+            - name: LOG_FORMAT
+              # JSON makes the audit lines parseable by log aggregators
+              # without per-deployment regex work.  Drop to "text" if you
+              # only ever read logs with kubectl logs.
+              value: json
+            # Uncomment to switch to stateless mode (see README "Deployment
+            # shapes"):
+            # - name: MCP_STATELESS
+            #   value: "true"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: auth
+              mountPath: /etc/mcp-auth
+              readOnly: true
+          # Liveness uses a TCP probe deliberately: the /health endpoint
+          # checks the upstream SearXNG, and we don't want a transient
+          # SearXNG outage to cascade into K8s killing this pod.  Liveness
+          # asks "is the process listening at all"; readiness asks "is it
+          # actually able to serve requests".
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # No CPU limit on purpose — Go's GC and goroutine scheduler
+              # do not respond well to CPU throttling and this is a low
+              # base-load service.  Memory IS capped because the LRU cache
+              # plus session map plus base runtime can drift up.
+              memory: 512Mi
+      volumes:
+        - name: auth
+          secret:
+            secretName: mcp-auth
+            # 0400 = readable only by the container's UID.  Combined with
+            # runAsNonRoot + runAsUser:1001 above, this means even if
+            # something else ever ran in the pod it couldn't read the
+            # token file.
+            defaultMode: 0400
