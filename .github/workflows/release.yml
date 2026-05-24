@@ -121,7 +121,7 @@ jobs:
       - name: Attest build provenance
         # GitHub-native SLSA build provenance, signed by the workflow's
         # OIDC token. Verifiable with `gh attestation verify`.
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           subject-digest: ${{ steps.build.outputs.digest }}
