@@ -520,42 +520,42 @@ All log output goes to **stderr**. Set `LOG_FORMAT=json` for structured logging 
 On startup the server prints a configuration banner to stderr regardless of log level. The banner lists all active settings with secrets redacted. `AUTH_USERNAME` is only shown when it is set.
 
 ```
-##################################################
+######################################################################################################################
 
-mcp-searxng-relay   v1.6.0
+mcp-searxng-relay v1.0.0
+
+######################################################################################################################
+
 mode             streamable-http
-address          :8080
-searxng          https://search.example.com
-username         admin
-password         [set]
-user-agent       mcp-searxng-relay/v1.6.0
+address          :3000
+searxng          http://searxng:8080
+password         [not set]
+user-agent       Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36
 cache ttl        5m0s
 cache entries    1000 max
 body limit       500000 bytes
-pdf limit        50000000 bytes
+pdf limit        100000000 bytes
 image limit      7500000 bytes
 log level        info
 log format       text
-session mode     stateful
-session max age  168h0m0s
-janitor interval 15m0s
+session mode     stateless
+auth tokens      3 configured (3 identities)
 rate limit       5 rps, burst 10
-auth tokens      3 configured (2 identities)
-fence key        Ed25519 fp:a3f7e2c14b8d6f31
+fence key        3e21267250e41cbb
 
-##################################################
+######################################################################################################################
 ```
 
 Once the server is running, typical log lines look like this (stateful mode, `LOG_FORMAT=text`):
 
 ```
-time=2026-05-13T20:00:00.001Z level=INFO msg="session janitor started" interval=15m0s max_age=168h0m0s
-time=2026-05-13T20:14:22.118Z level=INFO msg="session initialized" session_id=JF7PTMDNI65MP5HNGE6XSZIKGB identity=alice
-time=2026-05-13T20:14:25.402Z level=INFO msg="search completed" query="quantum computing breakthroughs 2026" page=1 results=10 categories=news identity=alice session_id=JF7PTMDNI65MP5HNGE6XSZIKGB
-time=2026-05-13T20:14:31.815Z level=INFO msg="fetch completed" url="https://arxiv.org/abs/2511.19727" kind=text identity=alice session_id=JF7PTMDNI65MP5HNGE6XSZIKGB
-time=2026-05-13T20:18:47.220Z level=WARN msg="unauthorized request" method=POST path=/ remote=203.0.113.42:51234
-time=2026-05-13T23:14:22.103Z level=INFO msg="janitor closing idle session" session_id=JF7PTMDNI65MP5HNGE6XSZIKGB
-time=2026-05-13T20:14:55.612Z level=WARN msg="rate limit exceeded" method=POST path=/ remote=192.168.1.23:51234 identity=alice retry_after=1s
+time=2026-05-24T07:41:10.301Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks content_type="text/html; charset=utf-8" bytes_raw=372821 chars_extracted=5469
+time=2026-05-24T07:41:10.302Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
+time=2026-05-24T07:43:39.212Z level=INFO msg="search completed" query="site:github.com/asgeirtj/system_prompts_leaks \"Claude Code\" system prompt" page=1 results=10 categories="" identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
+time=2026-05-24T07:43:52.249Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md content_type="text/html; charset=utf-8" bytes_raw=500000 chars_extracted=185
+time=2026-05-24T07:43:52.253Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
+time=2026-05-24T07:44:07.656Z level=INFO msg="url fetched" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md content_type="text/plain; charset=utf-8" bytes_raw=58874 chars_extracted=58873
+time=2026-05-24T07:44:07.657Z level=INFO msg="fetch completed" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
 ```
 
 The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
