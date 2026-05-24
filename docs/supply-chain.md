@@ -264,10 +264,6 @@ trustworthy:
 - **No signed releases.** Release artifacts and container images are not
   currently cryptographically signed (e.g. with Sigstore/cosign). Planned, not
   yet implemented.
-- **No published SBOM.** A Software Bill of Materials (CycloneDX or SPDX) is not
-  currently generated or published per release. The `go.mod` / `go.sum` pair is
-  the closest equivalent today and is complete for the Go portion, but it is not
-  a formal SBOM and does not cover the `pdf_oxide` precompiled library. Planned.
 - **The `pdf_oxide` precompiled library** — see
   [the section above](#the-pdf_oxide-build-step). Source-to-binary provenance
   for that one artifact depends on trusting the upstream build. In practice the

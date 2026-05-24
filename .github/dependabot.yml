@@ -8,3 +8,10 @@ updates:
     labels:
       - dependencies
       - security
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    labels:
+      - dependencies
