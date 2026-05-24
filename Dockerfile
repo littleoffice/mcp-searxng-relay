@@ -64,7 +64,8 @@ RUN go mod download
 # version and verified through the Go module proxy and checksum database;
 # the precompiled libpdf_oxide.a it deposits in /pdf_oxide_lib is an upstream
 # artifact whose source-to-binary provenance is documented in supply-chain.md.
-RUN go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v0.3.43 -dir /pdf_oxide_lib
+RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
+    go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib
 
 COPY . .
 
