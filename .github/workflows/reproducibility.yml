@@ -1,0 +1,107 @@
+# .github/workflows/reproducibility.yml
+#
+# Manual reproducibility verification. Builds the container image twice in
+# the same job (no cache, no push) and compares the resulting OCI tarball
+# hashes. This is the operational counterpart to the reproducibility claim
+# made in docs/supply-chain.md -- it's the proof.
+#
+# Trigger: workflow_dispatch only. Don't run this on every push -- it doubles
+# CI time and the result is the same every commit. Run it:
+#   - before tagging a release, as a smoke test
+#   - if you suspect a Dockerfile change has broken determinism
+#   - periodically (monthly?) to catch transitive non-determinism
+#
+# How to run: GitHub UI -> Actions -> Reproducibility verification -> Run.
+# Or via gh CLI: `gh workflow run reproducibility.yml`.
+#
+# A failure here doesn't necessarily mean someone tampered with the build;
+# it means SOURCE_DATE_EPOCH + rewrite-timestamp + the pinned toolchain are
+# no longer enough to constrain the build to a single output. Common
+# culprits: an unpinned `apt-get install` in the Dockerfile that updated,
+# a Go toolchain pin that moved, a transitive dep with embedded timestamps.
+
+name: Reproducibility verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref to verify (branch, tag, or SHA). Defaults to main.'
+        required: false
+        default: 'main'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Build twice and compare
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Derive reproducibility inputs
+        run: |
+          {
+            echo "SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct HEAD)"
+            echo "SERVER_VERSION=$(git describe --tags --always)"
+          } >> "$GITHUB_ENV"
+
+      - name: Build attempt 1
+        # OCI tarball output is the canonical thing to hash. The image-store
+        # output is non-deterministic across Docker versions due to
+        # storage-driver metadata; the OCI tarball is the manifest as
+        # BuildKit emits it, which is what reproducibility actually means.
+        run: |
+          docker buildx build \
+            --no-cache \
+            --build-arg SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+            --build-arg SERVER_VERSION="${SERVER_VERSION}" \
+            --output type=oci,dest=/tmp/build1.tar,rewrite-timestamp=true \
+            .
+
+      - name: Build attempt 2
+        # Same flags, fresh container layers (--no-cache). If the build is
+        # reproducible these two tarballs hash identically.
+        run: |
+          docker buildx build \
+            --no-cache \
+            --build-arg SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH}" \
+            --build-arg SERVER_VERSION="${SERVER_VERSION}" \
+            --output type=oci,dest=/tmp/build2.tar,rewrite-timestamp=true \
+            .
+
+      - name: Compare
+        run: |
+          HASH1=$(sha256sum /tmp/build1.tar | awk '{print $1}')
+          HASH2=$(sha256sum /tmp/build2.tar | awk '{print $1}')
+          echo "Build 1: ${HASH1}"
+          echo "Build 2: ${HASH2}"
+          {
+            echo "## Reproducibility check"
+            echo ""
+            echo "| | SHA-256 |"
+            echo "|---|---|"
+            echo "| Build 1 | \`${HASH1}\` |"
+            echo "| Build 2 | \`${HASH2}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${HASH1}" != "${HASH2}" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "**❌ Builds are NOT reproducible.** See logs for tarball diff." >> "$GITHUB_STEP_SUMMARY"
+            # Best-effort diagnostic: extract both tarballs and diff the
+            # manifest. Helpful for spotting which layer drifted.
+            mkdir -p /tmp/b1 /tmp/b2
+            tar -xf /tmp/build1.tar -C /tmp/b1
+            tar -xf /tmp/build2.tar -C /tmp/b2
+            diff -r /tmp/b1 /tmp/b2 || true
+            exit 1
+          fi
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**✅ Builds are reproducible.**" >> "$GITHUB_STEP_SUMMARY"
