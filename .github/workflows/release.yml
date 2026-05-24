@@ -148,6 +148,20 @@ jobs:
           sbom-path: sbom.cyclonedx.json
           push-to-registry: true
 
+      - name: Generate SPDX SBOM
+        run: |
+          syft \
+            "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}" \
+            -o spdx-json="sbom.spdx.json"
+
+      - name: Attest SPDX SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom.spdx.json
+          push-to-registry: true
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
@@ -158,6 +172,7 @@ jobs:
           generate_release_notes: true
           files: |
             sbom.cyclonedx.json
+            sbom.spdx.json
           body: |
             Container image: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`
             Image digest: `${{ steps.build.outputs.digest }}`
