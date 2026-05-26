@@ -31,7 +31,7 @@ spec:
         - name: mcp-searxng
           # Pin a specific tag in production rather than tracking :latest —
           # rolling restarts need a known image, and "latest" silently shifts.
-          image: ghcr.io/your-org/mcp-searxng-relay:v1.6.0
+          image: ghcr.io/littleoffice/mcp-searxng-relay:sha256-5bf29fa65b9743ad4715b42d22a038e65da5d5475c4fe013774b1d5bcc7d2240
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
