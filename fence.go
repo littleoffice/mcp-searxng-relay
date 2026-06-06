@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -197,19 +198,32 @@ const fenceSigDomain = "PromptFence/v1.0"
 // message, then the EdDSA signing operation.  Verifiers must call
 // ed25519.Verify with the same raw serialisation — no prehashing on
 // either side.
-func computeFenceSignature(privKey ed25519.PrivateKey, content, canonicalMetadata string) string {
-	msg := buildFenceSigningInput(content, canonicalMetadata)
+func computeFenceSignature(privKey ed25519.PrivateKey, content, canonicalMetadata string) (string, error) {
+	msg, err := buildFenceSigningInput(content, canonicalMetadata)
+	if err != nil {
+		return "", err
+	}
 	sig := ed25519.Sign(privKey, msg)
-	return base64.StdEncoding.EncodeToString(sig)
+	return base64.StdEncoding.EncodeToString(sig), nil
 }
 
 // buildFenceSigningInput constructs the byte string that
 // computeFenceSignature signs.  Exposed (package-internal) so the test
 // suite and any future verifier built in the same package can produce the
 // canonical input without re-implementing the format.
-func buildFenceSigningInput(content, canonicalMetadata string) []byte {
+func buildFenceSigningInput(content, canonicalMetadata string) ([]byte, error) {
 	// Pre-size the buffer: domain tag + 1 NUL + 8 length bytes + content + metadata.
-	msg := make([]byte, 0, len(fenceSigDomain)+1+8+len(content)+len(canonicalMetadata))
+	total := len(fenceSigDomain) + 1 + 8
+	if len(content) > math.MaxInt-total {
+		return nil, fmt.Errorf("fence signing input too large")
+	}
+	total += len(content)
+	if len(canonicalMetadata) > math.MaxInt-total {
+		return nil, fmt.Errorf("fence signing input too large")
+	}
+	total += len(canonicalMetadata)
+
+	msg := make([]byte, 0, total)
 	msg = append(msg, fenceSigDomain...)
 	msg = append(msg, 0x00)
 	var lenBuf [8]byte
@@ -217,7 +231,7 @@ func buildFenceSigningInput(content, canonicalMetadata string) []byte {
 	msg = append(msg, lenBuf[:]...)
 	msg = append(msg, content...)
 	msg = append(msg, canonicalMetadata...)
-	return msg
+	return msg, nil
 }
 
 // generateFenceNonce returns 32 hex characters (128 bits) of cryptographic
@@ -274,7 +288,10 @@ func (s *Server) wrapFence(content string, contentType FenceContentType, rating 
 	// pre-escape form means a verifier can xml-unescape the parsed element
 	// body and feed the result straight to ed25519.Verify, without having to
 	// reproduce our exact escape function byte-for-byte.
-	signature := computeFenceSignature(s.fenceSigningKey, content, canonical)
+	signature, err := computeFenceSignature(s.fenceSigningKey, content, canonical)
+	if err != nil {
+		return "", fmt.Errorf("failed to compute fence signature: %w", err)
+	}
 	escapedContent := xmlContentEscape(content)
 
 	var sb strings.Builder
