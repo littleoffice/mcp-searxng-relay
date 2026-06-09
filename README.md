@@ -509,7 +509,7 @@ If you see tool calls failing with truncated SSE streams in a reverse-proxy depl
 docker build -t mcp-searxng-relay .
 ```
 
-The multi-stage build compiles the binary on `golang:1.26` (Debian) and copies only the static binary and CA certificates into a `scratch` runtime image.
+The multi-stage build compiles the binary on the digest-pinned `golang:1.26.3-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
 
 ---
 
@@ -534,7 +534,7 @@ user-agent       Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like
 cache ttl        5m0s
 cache entries    1000 max
 body limit       500000 bytes
-pdf limit        100000000 bytes
+pdf limit        50000000 bytes
 image limit      7500000 bytes
 log level        info
 log format       text
