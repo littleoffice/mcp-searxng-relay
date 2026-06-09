@@ -278,10 +278,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		// so the model doesn't get malformed UTF-8.
 		s.metrics.FetchPlain.Add(1)
 		body = toUTF8(body, contentType)
-		content = strings.TrimSpace(string(body))
-		if len(content) > maxRenderedChars {
-			content = content[:maxRenderedChars] + "\n\n[content truncated]"
-		}
+		content = truncateBytes(strings.TrimSpace(string(body)), "\n\n[content truncated]", maxRenderedChars)
 	default:
 		// Decode to UTF-8 before HTML parsing so non-Latin pages render correctly.
 		// Same toUTF8 helper is used for plain text above.
@@ -374,10 +371,7 @@ func extractPDF(body []byte) (string, error) {
 	}
 
 	result := strings.TrimSpace(text)
-	if len(result) > maxRenderedChars {
-		result = result[:maxRenderedChars] + "\n\n[content truncated]"
-	}
-	return result, nil
+	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars), nil
 }
 
 // ── Image detection ───────────────────────────────────────────────────────────

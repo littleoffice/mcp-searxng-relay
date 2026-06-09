@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/markusmobius/go-trafilatura"
 	"golang.org/x/net/html"
@@ -119,12 +120,27 @@ func firstNonEmpty(a, b string) string {
 	return b
 }
 
+// truncateBytes returns s truncated to at most max bytes, never splitting a
+// multibyte UTF-8 rune.  If truncation occurs, suffix is appended; otherwise
+// s is returned unchanged with no suffix.  The byte budget is honoured
+// strictly (body length before suffix is <= max): we walk back from the
+// max-byte offset to the nearest rune boundary so the cut never lands inside
+// an encoded rune, which would otherwise emit invalid UTF-8 into JSON
+// metadata or rendered output.
+func truncateBytes(s, suffix string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + suffix
+}
+
 func truncateField(s string, max int) string {
 	s = strings.TrimSpace(s)
-	if len(s) > max {
-		return s[:max] + "…"
-	}
-	return s
+	return truncateBytes(s, "…", max)
 }
 
 // ── Markdown renderer ─────────────────────────────────────────────────────────
@@ -380,10 +396,7 @@ func renderMarkdown(root *html.Node) string {
 	}
 
 	result := strings.TrimSpace(strings.Join(out, "\n"))
-	if len(result) > maxRenderedChars {
-		result = result[:maxRenderedChars] + "\n\n[content truncated]"
-	}
-	return result
+	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars)
 }
 
 // isSpace reports whether b is an ASCII whitespace byte.

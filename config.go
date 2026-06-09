@@ -254,26 +254,32 @@ func countIdentities(m map[tokenDigest]string) int {
 }
 
 // parseDuration reads an integer number of seconds from s, returning
-// defaultVal if s is empty or cannot be parsed.
+// defaultVal if s is empty, malformed, or non-positive.  Uses
+// strconv.ParseInt (not fmt.Sscan) so trailing garbage like "300abc" is
+// rejected rather than silently parsed as 300 — matching the
+// "fall back to safe default on garbage" pattern of the other helpers.
 func parseDuration(s string, defaultVal time.Duration) time.Duration {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return defaultVal
 	}
-	var n int64
-	if _, err := fmt.Sscan(s, &n); err != nil || n <= 0 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
 		return defaultVal
 	}
 	return time.Duration(n)
 }
 
-// parseInt64 reads an integer from s, returning defaultVal if s is empty
-// or cannot be parsed.
+// parseInt64 reads an integer from s, returning defaultVal if s is empty,
+// malformed, or non-positive.  Uses strconv.ParseInt (not fmt.Sscan) so a
+// value like "1000xyz" is rejected rather than truncated to 1000.
 func parseInt64(s string, defaultVal int64) int64 {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return defaultVal
 	}
-	var n int64
-	if _, err := fmt.Sscan(s, &n); err != nil || n <= 0 {
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil || n <= 0 {
 		return defaultVal
 	}
 	return n
