@@ -152,13 +152,19 @@ func TestComputeFenceSignature_VerifiesWithPublicKey(t *testing.T) {
 	content := "the quick brown fox jumps over the lazy dog"
 	canonical := `nonce="abc" rating="untrusted" timestamp="2026-05-09T14:30:00Z" type="content"`
 
-	sigB64 := computeFenceSignature(priv, content, canonical)
+	sigB64, err := computeFenceSignature(priv, content, canonical)
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	sig, err := base64.StdEncoding.DecodeString(sigB64)
 	if err != nil {
 		t.Fatalf("decode signature: %v", err)
 	}
 
-	msg := buildFenceSigningInput(content, canonical)
+	msg, err := buildFenceSigningInput(content, canonical)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
 	if !ed25519.Verify(pub, msg, sig) {
 		t.Errorf("signature did not verify with the matching public key")
 	}
@@ -169,10 +175,16 @@ func TestComputeFenceSignature_DetectsContentTamper(t *testing.T) {
 	pub, priv := generateFenceKeypair()
 	canonical := `nonce="abc" rating="untrusted" timestamp="2026-05-09T14:30:00Z" type="content"`
 
-	sigB64 := computeFenceSignature(priv, "original content", canonical)
+	sigB64, err := computeFenceSignature(priv, "original content", canonical)
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	sig, _ := base64.StdEncoding.DecodeString(sigB64)
 
-	tampered := buildFenceSigningInput("modified content", canonical)
+	tampered, err := buildFenceSigningInput("modified content", canonical)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
 	if ed25519.Verify(pub, tampered, sig) {
 		t.Error("verification should have failed after content tamper")
 	}
@@ -185,14 +197,20 @@ func TestComputeFenceSignature_DetectsMetadataTamper(t *testing.T) {
 	original := `nonce="abc" rating="untrusted" timestamp="2026-05-09T14:30:00Z" type="content"`
 	tampered := `nonce="abc" rating="trusted" timestamp="2026-05-09T14:30:00Z" type="content"`
 
-	sigB64 := computeFenceSignature(priv, "data", original)
+	sigB64, err := computeFenceSignature(priv, "data", original)
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	sig, _ := base64.StdEncoding.DecodeString(sigB64)
 
-	if ed25519.Verify(pub, buildFenceSigningInput("data", tampered), sig) {
+	msg, err := buildFenceSigningInput("data", tampered)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
+	if ed25519.Verify(pub, msg, sig) {
 		t.Error("verification should have failed after rating downgrade")
 	}
 }
-
 // A signature produced by one server's key must not verify against another
 // server's key.  This is properly a property of Ed25519, but we exercise it
 // here so generateFenceKeypair does not silently regress to a fixed key.
@@ -203,10 +221,17 @@ func TestComputeFenceSignature_RejectsWrongPublicKey(t *testing.T) {
 	content := "shared content"
 	canonical := `nonce="n" rating="untrusted" timestamp="t" type="content"`
 
-	sigB64 := computeFenceSignature(privA, content, canonical)
+	sigB64, err := computeFenceSignature(privA, content, canonical)
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	sig, _ := base64.StdEncoding.DecodeString(sigB64)
 
-	if ed25519.Verify(pubB, buildFenceSigningInput(content, canonical), sig) {
+	msg, err := buildFenceSigningInput(content, canonical)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
+	if ed25519.Verify(pubB, msg, sig) {
 		t.Error("signature from key A should not verify against key B")
 	}
 }
@@ -224,15 +249,26 @@ func TestComputeFenceSignature_RejectsWrongPublicKey(t *testing.T) {
 // differently and must produce different signatures.
 func TestComputeFenceSignature_LengthPrefixDisambiguatesBoundary(t *testing.T) {
 	_, priv := generateFenceKeypair()
-	sig1 := computeFenceSignature(priv, "ab", "cd")
-	sig2 := computeFenceSignature(priv, "abc", "d")
+	sig1, err := computeFenceSignature(priv, "ab", "cd")
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
+	sig2, err := computeFenceSignature(priv, "abc", "d")
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	if sig1 == sig2 {
 		t.Error("length prefix did not disambiguate the content/metadata boundary; signatures collided")
 	}
 
-	// The corresponding signing inputs must also be distinct byte strings.
-	in1 := buildFenceSigningInput("ab", "cd")
-	in2 := buildFenceSigningInput("abc", "d")
+	in1, err := buildFenceSigningInput("ab", "cd")
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
+	in2, err := buildFenceSigningInput("abc", "d")
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
 	if string(in1) == string(in2) {
 		t.Error("buildFenceSigningInput produced identical bytes for inputs that differ only in the boundary")
 	}
@@ -249,14 +285,18 @@ func TestComputeFenceSignature_DomainSeparated(t *testing.T) {
 	canonical := `nonce="a" rating="untrusted" timestamp="t" type="content"`
 
 	bareSig := ed25519.Sign(priv, []byte(content+canonical))
-	if ed25519.Verify(pub, buildFenceSigningInput(content, canonical), bareSig) {
+	msg, err := buildFenceSigningInput(content, canonical)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
+	if ed25519.Verify(pub, msg, bareSig) {
 		t.Error("bare-concatenation signature should not validate as a fence signature")
 	}
 
-	// And the reverse: a fence signature must not validate as a bare-concat
-	// signature.  This catches the case where someone removes the domain tag
-	// from the verifier but not the signer.
-	fenceSigB64 := computeFenceSignature(priv, content, canonical)
+	fenceSigB64, err := computeFenceSignature(priv, content, canonical)
+	if err != nil {
+		t.Fatalf("computeFenceSignature: %v", err)
+	}
 	fenceSig, _ := base64.StdEncoding.DecodeString(fenceSigB64)
 	if ed25519.Verify(pub, []byte(content+canonical), fenceSig) {
 		t.Error("fence signature should not validate against bare concatenation")
@@ -307,8 +347,12 @@ func TestWrapFence_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("decode signature: %v", err)
 	}
-	canonical := reconstructCanonical(openTag)
-	msg := buildFenceSigningInput(content, canonical)
+
+  canonical := reconstructCanonical(openTag)
+	msg, err := buildFenceSigningInput(content, canonical)
+	if err != nil {
+		t.Fatalf("buildFenceSigningInput: %v", err)
+	}
 	if !ed25519.Verify(s.fencePublicKey, msg, sig) {
 		t.Error("end-to-end signature verification failed")
 	}
