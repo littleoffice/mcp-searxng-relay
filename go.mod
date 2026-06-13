@@ -6,7 +6,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/markusmobius/go-trafilatura v1.12.2
 	github.com/modelcontextprotocol/go-sdk v1.6.1
-	github.com/yfedoseev/pdf_oxide/go v0.3.63
+	github.com/yfedoseev/pdf_oxide/go v0.3.64
 	golang.org/x/net v0.56.0
 )
 
