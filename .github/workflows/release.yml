@@ -47,7 +47,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         # fetch-depth: 0 so `git describe` and `git log -1 --pretty=%ct` see
         # full history. The default shallow clone breaks both.
         with:
