@@ -48,6 +48,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **URL fetching** with structured Markdown output — headings, lists, tables, code blocks, and inline emphasis all preserved
 - **URL metadata triage** — `searxng_url_metadata` returns just title, author, publish date, language, site name, description, image, categories, and tags as JSON, at roughly an order of magnitude lower token cost than fetching the full body. Useful for picking which of several candidate URLs to read in full. Cache is shared with `searxng_read_url`, so a metadata fetch followed by a content fetch (or vice versa) costs one upstream HTTP request, not two.
 - **PDF text extraction** from fetched URLs
+- **Office document extraction** — DOCX, XLSX, PPTX plus legacy DOC, XLS, PPT. Documents render to Markdown rather than flat text so headings, tables, and list structure survive into the model's context (spreadsheets in particular benefit — a Markdown table is far more useful than CSV-flattened cells)
 - **Image responses** — JPEG, PNG, GIF, and WebP URLs come back as MCP `ImageContent` blocks for vision-model consumption (the SDK base64-encodes the raw bytes on the wire). SVG is intentionally excluded — more useful to the model as text than as a binary blob. Raw size is capped by `MAX_IMAGE_BYTES`, separately from `MAX_BODY_BYTES`, so image and text limits can be tuned independently.
 - **Automatic charset detection** — non-UTF-8 pages (Shift-JIS, windows-1252, ISO-8859-1, …) are decoded correctly before parsing
 - **Readability-style content extraction** — navigation bars, footers, sidebars, and cookie banners are stripped automatically
@@ -174,6 +175,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `CACHE_MAX_ENTRIES` | no | `1000` | Maximum number of URLs held in the in-memory cache. Oldest entries are evicted automatically when the cap is reached |
 | `MAX_BODY_BYTES` | no | `500000` | Maximum response body size read from fetched URLs (bytes) |
 | `MAX_PDF_BYTES` | no | `50000000` | Maximum response body size for PDF URLs (bytes). PDFs get a separate, larger limit since a multi-hundred-page document can easily be 50 MB |
+| `MAX_OFFICE_BYTES` | no | `50000000` | Maximum response body size for Office document URLs (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT) (bytes). Modern OOXML files are ZIP archives that routinely embed images, fonts, and chart data, so they get their own cap separate from `MAX_BODY_BYTES` |
 | `MAX_IMAGE_BYTES` | no | `7500000` | Maximum raw size for image responses (bytes). The wire form is ~33% larger after base64 encoding |
 | `LOG_LEVEL` | no | `info` | Log verbosity: `debug`, `info`, `warn`, `error`, `off` |
 | `LOG_FORMAT` | no | `text` | Log format: `text` or `json` |
@@ -271,7 +273,7 @@ The `Engines` line is omitted when SearXNG didn't return the field (older SearXN
 
 ### `searxng_read_url`
 
-Fetch a URL and return its content. Handles HTML (converted to structured Markdown), PDF (text extracted via `pdf_oxide`), plain text (charset-decoded), and images (JPEG, PNG, GIF, WebP returned as MCP `ImageContent` blocks for vision-model consumption — SVG is intentionally excluded, since it is more useful to the model as text than as a base64-encoded binary blob). Caches results by default; image responses bypass the text cache.
+Fetch a URL and return its content. Handles HTML (converted to structured Markdown), PDF (text extracted via `pdf_oxide`), Office documents (DOCX, XLSX, PPTX, plus legacy DOC, XLS, PPT — converted to Markdown via `office_oxide`), plain text (charset-decoded), and images (JPEG, PNG, GIF, WebP returned as MCP `ImageContent` blocks for vision-model consumption — SVG is intentionally excluded, since it is more useful to the model as text than as a base64-encoded binary blob). Caches results by default; image responses bypass the text cache.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
@@ -414,7 +416,7 @@ Both checks run before any byte hits the wire, and the redirect chain is revalid
 
 **Container hardening.** The Docker image runs as a non-root user (UID 1001) on a minimal `scratch` base — the runtime image contains only the statically linked binary and CA certificates, with no shell, package manager, or OS userland.
 
-**PDF safety.** PDF extraction uses pdf_oxide, whose Rust core guarantees zero panics and zero timeouts across all inputs. A malformed or adversarially crafted PDF will return an error, not crash the server process.
+**PDF and Office safety.** PDF extraction uses `pdf_oxide` and Office extraction (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) uses `office_oxide`, both of which are Rust cores that guarantee zero panics and zero timeouts across all inputs. A malformed or adversarially crafted document will return an error, not crash the server process.
 
 **Reporting and provenance.** Security issues should be reported privately — see [`docs/SECURITY.md`](docs/SECURITY.md) for the disclosure process and scope. The codebase is primarily AI-generated and reviewed, built, and tested by a single human maintainer before release; [`docs/supply-chain.md`](docs/supply-chain.md) is the full dependency, build-provenance, and development-process statement, written for reviewers evaluating the project for a controlled environment.
 
@@ -495,7 +497,7 @@ The server's stdlib `http.Server` is configured with three deliberate values:
 
 When fronting the server with a reverse proxy (recommended for any non-local deployment — see [Security notes](#security-notes)), the proxy's own timeouts must accommodate streaming responses:
 
-- **nginx.** Set `proxy_read_timeout` and `proxy_send_timeout` to at least the longest tool-call wall time you expect — a reasoning agent over a large PDF can take 30+ seconds. Disable `proxy_buffering` for the MCP route so SSE chunks reach the client immediately.
+- **nginx.** Set `proxy_read_timeout` and `proxy_send_timeout` to at least the longest tool-call wall time you expect — a reasoning agent over a large PDF or Office document can take 30+ seconds. Disable `proxy_buffering` for the MCP route so SSE chunks reach the client immediately.
 - **Caddy.** The bundled [`Caddyfile`](Caddyfile) sets `flush_interval -1` on the MCP reverse_proxy directive, which is what disables Caddy's response buffering for streaming.
 - **Traefik.** Use the `forwardingTimeouts.responseHeaderTimeout` field and ensure the entrypoint is not configured with an aggressive idle timeout.
 
@@ -535,6 +537,7 @@ cache ttl        5m0s
 cache entries    1000 max
 body limit       500000 bytes
 pdf limit        50000000 bytes
+office limit     50000000 bytes
 image limit      7500000 bytes
 log level        info
 log format       text
@@ -576,7 +579,7 @@ The exposed series are:
 | `mcp_metadata_errors_total` | — | Subset of the above that returned an error |
 | `mcp_fetches_total` | — | All calls to `searxng_read_url` |
 | `mcp_fetch_errors_total` | — | Subset that returned an error |
-| `mcp_fetches_by_type_total` | `type=html\|pdf\|plain\|image` | Successful fetches by extractor used |
+| `mcp_fetches_by_type_total` | `type=html\|pdf\|office\|plain\|image` | Successful fetches by extractor used |
 | `mcp_fetches_by_domain_total` | `domain=<host>`, `outcome=success\|error` | Per-domain success/failure counters |
 | `mcp_cache_hits_total` | — | `searxng_read_url` requests served from cache |
 | `mcp_cache_misses_total` | — | Requests that fell through to a network fetch |

@@ -286,6 +286,7 @@ func logConfig(server *Server, mode, port string) {
 		row("cache entries", fmt.Sprintf("%d max", cfg.CacheMaxEntries)),
 		row("body limit", fmt.Sprintf("%d bytes", cfg.MaxBodyBytes)),
 		row("pdf limit", fmt.Sprintf("%d bytes", cfg.MaxPDFBytes)),
+		row("office limit", fmt.Sprintf("%d bytes", cfg.MaxOfficeBytes)),
 		row("image limit", fmt.Sprintf("%d bytes", cfg.MaxImageBytes)),
 		row("log level", cfg.LogLevel),
 		row("log format", cfg.LogFormat),

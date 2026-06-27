@@ -35,6 +35,7 @@ type Config struct {
 	CacheMaxEntries        int
 	MaxBodyBytes           int64
 	MaxPDFBytes            int64
+	MaxOfficeBytes         int64
 	MaxImageBytes          int64
 	RateLimitRPS           float64  // MCP_RATE_LIMIT_RPS: per-caller sustained rate (requests/sec); 0 disables
 	RateLimitBurst         int      // MCP_RATE_LIMIT_BURST: token-bucket capacity
@@ -63,6 +64,12 @@ func configFromEnv() Config {
 	c.CacheMaxEntries = int(parseInt64(os.Getenv("CACHE_MAX_ENTRIES"), 1_000))
 	c.MaxBodyBytes = parseInt64(os.Getenv("MAX_BODY_BYTES"), 500_000)
 	c.MaxPDFBytes = parseInt64(os.Getenv("MAX_PDF_BYTES"), 50_000_000)
+	// MaxOfficeBytes caps the response body for Office documents (DOCX,
+	// XLSX, PPTX + legacy DOC, XLS, PPT). Modern OOXML files are ZIP
+	// archives whose payload routinely includes embedded images, fonts,
+	// and chart data — a deck or workbook can easily push past 50 MB even
+	// when its extracted text is modest. The default mirrors PDF.
+	c.MaxOfficeBytes = parseInt64(os.Getenv("MAX_OFFICE_BYTES"), 50_000_000)
 	// MaxImageBytes is the raw on-disk size limit. The SDK base64-encodes
 	// image bytes into the JSON-RPC response, which expands data by ~4/3, so
 	// 7.5 MB raw fits inside ~10 MB on the wire. Operators with vision

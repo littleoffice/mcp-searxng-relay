@@ -66,7 +66,8 @@ documentation bug worth reporting.
 | `github.com/modelcontextprotocol/go-sdk` | The official Model Context Protocol SDK. Owns the JSON-RPC framing, the stdio and Streamable HTTP transports, session handling, and tool registration. This is the largest single dependency by surface area and the one most worth a reviewer's attention. Pinned at v1.6.1. The fixes for CVE-2026-27896 (case-sensitivity), GHSA-q382-vc8q-7jhj (null-byte JSON key collision), and CVE-2026-33252 (cross-site tool execution) landed by v1.4.1 and are carried forward in the current pin. |
 | `github.com/markusmobius/go-trafilatura` | HTML-to-Markdown extraction: identifies the main article subtree, strips boilerplate (navigation, sidebars, footers, cookie banners), and pulls structured metadata from `<meta>`, OpenGraph, and JSON-LD. Pinned at v1.12.2. See [The trafilatura trade-off](#the-trafilatura-trade-off) below — this dependency brings most of the transitive tree. |
 | `github.com/hashicorp/golang-lru/v2` | The bounded in-memory LRU cache used for fetched URL content and for the rate-limiter's per-caller token buckets. Small, single-purpose, widely used. Pinned at v2.0.7. |
-| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is the one dependency with a non-standard installation path. Pinned at v0.3.61. |
+| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is one of the two dependencies with a non-standard installation path. Pinned at v0.3.61. |
+| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.2. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.55.0. |
 
 ### Transitive dependencies
@@ -115,7 +116,7 @@ worth knowing about are:
 The codebase itself uses **only the Go standard library** for HTTP serving,
 logging (`log/slog`), configuration (env vars parsed by hand), and JSON
 (`encoding/json`). There is no web framework, no ORM, no DI container, no
-configuration library. The five direct dependencies are each there for a
+configuration library. The six direct dependencies are each there for a
 specific reason:
 
 - The protocol SDK because we implement that protocol.
@@ -124,6 +125,11 @@ specific reason:
 - `pdf_oxide` because pure-Go PDF parsing of attacker-controlled input is
   hard to make panic- and timeout-bounded; see [the build-step section
   below](#the-pdf_oxide-build-step).
+- `office_oxide` for the same reason as `pdf_oxide`, applied to the Office
+  format family. Pure-Go DOCX / XLSX / PPTX parsers exist but generally
+  lack panic-free, timeout-bounded guarantees against malformed input,
+  and legacy DOC / XLS / PPT support in pure Go is essentially absent.
+  See [the build-step section below](#the-office_oxide-build-step).
 - `go-trafilatura` because the HTML-extraction problem (correctly
   identifying the article subtree across AMP wrappers, lazy-loaded
   sections, multi-page articles, and the hundred other shapes the modern
@@ -284,9 +290,68 @@ build then links against it via CGO. Two things follow from this:
 This is a deliberate trade-off: `pdf_oxide`'s Rust core provides panic-free,
 timeout-bounded PDF parsing that would be difficult to match with a pure-Go
 library, and PDF parsing of attacker-controlled input is exactly the kind of
-code where those guarantees matter. But it is the single point in the supply
-chain that deviates from "everything is Go source pinned in `go.sum`," and a
-reviewer should know that.
+code where those guarantees matter. But it is one of the two points in the
+supply chain that deviates from "everything is Go source pinned in `go.sum`,"
+and a reviewer should know that.
+
+## The office_oxide build step
+
+`office_oxide` is the Office-format counterpart to `pdf_oxide`: a Rust core
+with Go bindings, supplying text extraction for DOCX / XLSX / PPTX and the
+legacy DOC / XLS / PPT formats. The dependency model is identical to
+`pdf_oxide` — Go bindings link against a precompiled static archive
+(`liboffice_oxide.a`) at build time — but the install mechanism currently
+differs in one respect worth flagging.
+
+The upstream `go run github.com/yfedoseev/office_oxide/go/cmd/install`
+installer is presently broken: it constructs an asset URL of the form
+`native-linux-x86_64-${VERSION}.tar.gz`, but the release pipeline publishes
+the archive at `native-linux-x86_64.tar.gz` (no version suffix). Until
+upstream ships a fixed installer, the `Dockerfile` (and the CI workflow)
+fetch the archive directly:
+
+```dockerfile
+RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)" && \
+    GOARCH="$(go env GOARCH)" && \
+    case "${GOARCH}" in \
+        amd64) OFFICE_ARCH=x86_64 ;; \
+        arm64) OFFICE_ARCH=aarch64 ;; \
+        *) echo "office_oxide: unsupported arch ${GOARCH}" >&2; exit 1 ;; \
+    esac && \
+    curl --proto =https --tlsv1.2 -fsSL \
+        "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
+        -o /tmp/office_oxide.tar.gz && \
+    ...
+```
+
+Same observations apply as for `pdf_oxide`:
+
+- The version is **derived from `go.mod` at build time** (currently v0.1.2)
+  rather than hardcoded. Bumping the module in `go.mod` is the single
+  source of truth for both the Go binding and the downloaded archive.
+- The `liboffice_oxide.a` binary blob in the archive is precompiled upstream.
+  A reviewer who wants full source-to-binary provenance would need to build
+  the library from its Rust source themselves.
+
+There are two differences from `pdf_oxide` to be aware of:
+
+- **No checksum-database verification of the installer.** With `pdf_oxide`
+  the installer module is fetched through the Go module proxy and verified
+  against the checksum database before it runs. With the direct-download
+  workaround there is no equivalent intermediate verification step — the
+  build trusts GitHub Releases as the source of truth for the archive
+  itself, the same way it does for the Go binding via `go.sum`. The
+  archive's content is still version-pinned (the URL embeds the tag), so
+  the bytes are stable for a given version; what we lose is the
+  belt-and-braces second verification path.
+- **The Go binding (`github.com/yfedoseev/office_oxide/go`) IS still
+  verified** through the Go module proxy and `go.sum`, the same as every
+  other Go dependency. The deviation is limited to how the precompiled
+  native library reaches the build environment.
+
+Once upstream ships a fixed installer the `Dockerfile` and CI steps can be
+replaced with a one-liner mirroring `pdf_oxide`. The Go source-level
+integration in this repository does not need to change.
 
 ## Known gaps
 
@@ -301,6 +366,13 @@ trustworthy:
   Rust source to `.a` blob is upstream's, not this repository's, and a
   reproducible build of *this* image still depends on the pinned version's
   artifact (currently v0.3.61) remaining byte-stable on GitHub Releases.
+- **The `office_oxide` precompiled library** — same provenance gap as
+  `pdf_oxide`, plus the additional caveat that the install path is
+  currently a direct `curl` of the release archive rather than the
+  upstream installer, so the second verification step that `pdf_oxide`
+  gets via the Go module proxy is not present for `office_oxide` at this
+  time. See [the section above](#the-office_oxide-build-step). The Go
+  binding itself remains verified through `go.sum`.
 
 If any of these gaps is a blocker for your environment, that is worth raising
 before adoption rather than after — some are straightforward to close and

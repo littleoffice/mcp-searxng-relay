@@ -45,11 +45,22 @@ WORKDIR /app
 #   apt-cache policy ca-certificates
 # and pin it here. Bump deliberately.
 #
+# curl is required for the office_oxide library install step further down:
+# upstream's `go run .../cmd/install` is broken at the time of writing (asset
+# URL mismatch — installer fetches `${name}-${ver}.tar.gz`, GitHub serves
+# `${name}.tar.gz`; tracking issue filed upstream), so this Dockerfile
+# downloads the release archive directly. Once upstream ships a fixed
+# installer this `curl` line and the manual download below can be replaced
+# with a `go run` similar to the pdf_oxide step. Resolve the version with:
+#   apt-cache policy curl
+# and pin here.
+#
 # git is intentionally NOT installed: SERVER_VERSION is now passed in as an
 # ARG, so the builder does not need .git in the context to stamp the binary.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates=20250419\
+        ca-certificates=20250419 \
+        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch dependencies as a separate step from the source copy so this layer
@@ -66,6 +77,40 @@ RUN go mod download
 # artifact whose source-to-binary provenance is documented in supply-chain.md.
 RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
     go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib
+
+# Install the office_oxide static library.
+#
+# Unlike pdf_oxide we cannot use the upstream `go run .../cmd/install`
+# because that installer constructs `${name}-${ver}.tar.gz` while the
+# release artifact is published as `${name}.tar.gz` (no version suffix)
+# — issue filed upstream, this block reverts to a `go run` once a fixed
+# installer ships. Until then we fetch the same archive the installer
+# would and lay it out at the same prefix layout.
+#
+# Version is sourced from go.mod (single source of truth) and the archive
+# is staged under /office_oxide_lib with the conventional layout:
+#   /office_oxide_lib/lib/linux_<arch>/liboffice_oxide.a
+#   /office_oxide_lib/include/office_oxide_c/office_oxide.h
+#
+# Upstream's archive layout (./lib/lib*.{a,so} + ./include/office_oxide_c/)
+# bundles BOTH the shared library and the static archive. We only need
+# the static archive for this build — the final binary is statically
+# linked into a scratch image — and discard the .so during repack.
+RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)" && \
+    GOARCH="$(go env GOARCH)" && \
+    case "${GOARCH}" in \
+        amd64) OFFICE_ARCH=x86_64 ;; \
+        arm64) OFFICE_ARCH=aarch64 ;; \
+        *) echo "office_oxide: unsupported arch ${GOARCH}" >&2; exit 1 ;; \
+    esac && \
+    mkdir -p "/office_oxide_lib/lib/linux_${GOARCH}" /office_oxide_lib/include /tmp/office_oxide_unpack && \
+    curl --proto =https --tlsv1.2 -fsSL \
+        "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
+        -o /tmp/office_oxide.tar.gz && \
+    tar -xzf /tmp/office_oxide.tar.gz -C /tmp/office_oxide_unpack && \
+    cp /tmp/office_oxide_unpack/lib/liboffice_oxide.a "/office_oxide_lib/lib/linux_${GOARCH}/liboffice_oxide.a" && \
+    cp -r /tmp/office_oxide_unpack/include/office_oxide_c /office_oxide_lib/include/ && \
+    rm -rf /tmp/office_oxide.tar.gz /tmp/office_oxide_unpack
 
 COPY . .
 
@@ -88,8 +133,8 @@ COPY . .
 # static counterparts in the Debian gcc package.
 RUN GOARCH="$(go env GOARCH)" && \
     CGO_ENABLED=1 \
-    CGO_CFLAGS="-I/pdf_oxide_lib/include" \
-    CGO_LDFLAGS="/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_eh -lgcc -lutil -lc" \
+    CGO_CFLAGS="-I/pdf_oxide_lib/include -I/office_oxide_lib/include/office_oxide_c" \
+    CGO_LDFLAGS="/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a /office_oxide_lib/lib/linux_${GOARCH}/liboffice_oxide.a -lm -lpthread -ldl -lrt -lgcc_eh -lgcc -lutil -lc" \
     go build \
         -trimpath \
         -buildvcs=false \
@@ -118,6 +163,7 @@ ENV CACHE_TTL_SECONDS="300"
 ENV CACHE_MAX_ENTRIES="1000"
 ENV MAX_BODY_BYTES="500000"
 ENV MAX_PDF_BYTES="50000000"
+ENV MAX_OFFICE_BYTES="50000000"
 ENV MAX_IMAGE_BYTES="7500000"
 ENV LOG_LEVEL="info"
 ENV LOG_FORMAT="text"

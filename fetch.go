@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	officeoxide "github.com/yfedoseev/office_oxide/go"
 	pdfoxide "github.com/yfedoseev/pdf_oxide/go"
 	"golang.org/x/net/html/charset"
 )
@@ -227,13 +228,17 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// Choose the body size limit based on content type.
 	// Images get their own cap (MaxImageBytes) — large enough for high-res
 	// photos that vision models can process, but separate from the PDF cap
-	// so operators can tune them independently.
+	// so operators can tune them independently. Office documents get a
+	// third cap so a slide deck full of embedded media doesn't compete
+	// with the PDF budget.
 	var bodyLimit int64
 	switch {
 	case isImage(contentType, targetURL):
 		bodyLimit = s.config.MaxImageBytes
 	case isPDF(contentType, targetURL):
 		bodyLimit = s.config.MaxPDFBytes
+	case officeFormat(contentType, targetURL) != "":
+		bodyLimit = s.config.MaxOfficeBytes
 	default:
 		bodyLimit = s.config.MaxBodyBytes
 	}
@@ -271,6 +276,18 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		content, err = extractPDF(body)
 		if err != nil {
 			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", err)
+		}
+	case officeFormat(contentType, targetURL) != "":
+		// Office documents (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) render to
+		// Markdown rather than flat text. The structural fidelity (headings,
+		// tables, lists) is a meaningful uplift for retrieval/RAG callers,
+		// and the Markdown path falls back to plain text inside the
+		// extractor if it errors on a given file.
+		format := officeFormat(contentType, targetURL)
+		s.metrics.FetchOffice.Add(1)
+		content, err = extractOffice(body, format)
+		if err != nil {
+			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, err)
 		}
 	case isPlainText(contentType):
 		// Plain-text responses can declare a non-UTF-8 charset just like HTML
@@ -368,6 +385,101 @@ func extractPDF(body []byte) (string, error) {
 	text, err := doc.ExtractAllText()
 	if err != nil {
 		return "", fmt.Errorf("could not extract PDF text: %w", err)
+	}
+
+	result := strings.TrimSpace(text)
+	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars), nil
+}
+
+// ── Office extraction ────────────────────────────────────────────────────────
+
+// officeFormat returns the office_oxide format hint ("docx", "xlsx", "pptx",
+// "doc", "xls", "ppt") for an office document response, or an empty string
+// when the response is not a supported Office format.
+//
+// The check is Content-Type first, then URL extension fallback — same shape
+// as isPDF/isImage. Modern OOXML files (.docx/.xlsx/.pptx) are ZIP archives
+// with stable, registered MIME types; legacy Office (.doc/.xls/.ppt) are
+// CFB/OLE containers whose MIME types are equally well-known. Servers do
+// occasionally serve them as application/octet-stream or with no Content-Type
+// at all, hence the extension fallback.
+func officeFormat(contentType, rawURL string) string {
+	// Strip parameters (e.g. "application/...; charset=...") before matching.
+	ct := strings.ToLower(strings.TrimSpace(contentType))
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	switch ct {
+	case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+		return "docx"
+	case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+		return "xlsx"
+	case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+		return "pptx"
+	case "application/msword":
+		return "doc"
+	case "application/vnd.ms-excel":
+		return "xls"
+	case "application/vnd.ms-powerpoint":
+		return "ppt"
+	}
+
+	// Fall back to URL file extension when the server omits or mislabels
+	// the Content-Type. This matches isPDF's behaviour and catches static
+	// files served from S3/CDN endpoints that hand back octet-stream.
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	path := strings.ToLower(u.Path)
+	switch {
+	case strings.HasSuffix(path, ".docx"):
+		return "docx"
+	case strings.HasSuffix(path, ".xlsx"):
+		return "xlsx"
+	case strings.HasSuffix(path, ".pptx"):
+		return "pptx"
+	case strings.HasSuffix(path, ".doc"):
+		return "doc"
+	case strings.HasSuffix(path, ".xls"):
+		return "xls"
+	case strings.HasSuffix(path, ".ppt"):
+		return "ppt"
+	}
+	return ""
+}
+
+// extractOffice extracts text from an Office document using office_oxide.
+// Format is one of "docx", "xlsx", "pptx", "doc", "xls", "ppt" and is
+// supplied by the caller (already resolved via officeFormat).
+//
+// Markdown is the primary output because the structural cues — headings,
+// tables, list nesting — are exactly what retrieval/RAG callers want, and
+// for XLSX in particular a Markdown table is dramatically more useful than
+// the same data flattened to plain text. PlainText is a fallback: if the
+// Markdown renderer trips on an unusual document, we still return something
+// useful rather than failing the whole fetch.
+//
+// The Rust core provides the same panic-free, timeout-bounded guarantees
+// as pdf_oxide — adversarial input returns an error rather than crashing
+// the server process.
+func extractOffice(body []byte, format string) (string, error) {
+	doc, err := officeoxide.OpenFromBytes(body, format)
+	if err != nil {
+		return "", fmt.Errorf("could not open %s document: %w", format, err)
+	}
+	defer func() { _ = doc.Close() }()
+
+	text, err := doc.ToMarkdown()
+	if err != nil {
+		// Markdown failure is unusual but not fatal — fall back to plain
+		// text. If that also fails, surface the underlying error so the
+		// fetch tool returns a clear diagnostic rather than an empty body.
+		var ptErr error
+		text, ptErr = doc.PlainText()
+		if ptErr != nil {
+			return "", fmt.Errorf("could not extract %s text (markdown: %v; plain: %w)", format, err, ptErr)
+		}
 	}
 
 	result := strings.TrimSpace(text)
