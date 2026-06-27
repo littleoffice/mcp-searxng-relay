@@ -46,6 +46,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install office_oxide header for cgo typecheck
+        # office_oxide's Go binding does `#include "office_oxide.h"` in its
+        # cgo preamble — unlike pdf_oxide, which inlines its C function
+        # prototypes in the preamble itself and therefore needs no custom
+        # header at typecheck time. golangci-lint runs cgo with the default
+        # CGO_ENABLED=1, so the preamble must compile, which means the
+        # header has to be on the include path even though lint never links
+        # against the library.
+        #
+        # We only fetch the header (~12 KB), not the full release tarball
+        # or the static archive — the test job below installs the complete
+        # library because it actually builds and links. This keeps the
+        # lint job fast and avoids dragging the upstream-installer
+        # workaround into a job that doesn't need it.
+        run: |
+          OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"
+          HEADER_DIR="${HOME}/.cache/office_oxide_header"
+          mkdir -p "${HEADER_DIR}"
+          curl --proto =https --tlsv1.2 -fsSL \
+            "https://raw.githubusercontent.com/yfedoseev/office_oxide/${OFFICE_OXIDE_VERSION}/include/office_oxide_c/office_oxide.h" \
+            -o "${HEADER_DIR}/office_oxide.h"
+          echo "CGO_CFLAGS=-I${HEADER_DIR}" >> "$GITHUB_ENV"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
@@ -88,11 +111,37 @@ jobs:
           # `KEY=VALUE` as a single value and does not re-tokenize on spaces,
           # so the multi-flag CGO_LDFLAGS value arrives at gcc as one blob.
           INSTALL_DIR="${HOME}/.cache/pdf_oxide/${PDF_OXIDE_VERSION}"
+          echo "PDF_OXIDE_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
+
+      - name: Install office_oxide native library
+        # Upstream's `go run .../cmd/install` is currently broken (asset URL
+        # mismatch — installer fetches `${name}-${ver}.tar.gz`, GitHub
+        # publishes `${name}.tar.gz`), so we download the release archive
+        # directly. The archive layout (`./lib/lib*.{a,so}`, `./include/...`)
+        # is documented in office_oxide's release.yml. Revert to a `go run`
+        # once a fixed installer ships upstream.
+        run: |
+          OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"
+          echo "Installing office_oxide ${OFFICE_OXIDE_VERSION}"
+          INSTALL_DIR="${HOME}/.cache/office_oxide/${OFFICE_OXIDE_VERSION}"
+          mkdir -p "${INSTALL_DIR}/lib" "${INSTALL_DIR}/include" /tmp/office_oxide_unpack
+          curl --proto =https --tlsv1.2 -fsSL \
+            "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-x86_64.tar.gz" \
+            -o /tmp/office_oxide.tar.gz
+          tar -xzf /tmp/office_oxide.tar.gz -C /tmp/office_oxide_unpack
+          cp /tmp/office_oxide_unpack/lib/liboffice_oxide.a "${INSTALL_DIR}/lib/liboffice_oxide.a"
+          cp -r /tmp/office_oxide_unpack/include/office_oxide_c "${INSTALL_DIR}/include/"
+          echo "OFFICE_OXIDE_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
+
+      - name: Compose CGO flags
+        # Build CGO_CFLAGS / CGO_LDFLAGS from both library install dirs in
+        # one step so each prior step can stay focused on a single library.
+        run: |
           {
-            echo "CGO_CFLAGS=-I${INSTALL_DIR}/include"
-            echo "CGO_LDFLAGS=${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
+            echo "CGO_CFLAGS=-I${PDF_OXIDE_INSTALL_DIR}/include -I${OFFICE_OXIDE_INSTALL_DIR}/include/office_oxide_c"
+            echo "CGO_LDFLAGS=${PDF_OXIDE_INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a ${OFFICE_OXIDE_INSTALL_DIR}/lib/liboffice_oxide.a -lm -lpthread -ldl -lrt -lgcc_s -lutil -lc"
           } >> "$GITHUB_ENV"
-          
+
       - name: go vet
         run: go vet ./...
 

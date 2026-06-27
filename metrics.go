@@ -38,6 +38,7 @@ type Metrics struct {
 	FetchErrors atomic.Int64 // calls that returned an error
 	FetchHTML   atomic.Int64 // responses dispatched to the HTML extractor
 	FetchPDF    atomic.Int64 // responses dispatched to the PDF extractor
+	FetchOffice atomic.Int64 // responses dispatched to the Office extractor (DOCX/XLSX/PPTX + legacy)
 	FetchPlain  atomic.Int64 // responses dispatched as text/plain
 	FetchImage  atomic.Int64 // responses returned as image content blocks
 
@@ -178,6 +179,7 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetches_by_type_total counter\n")
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"html\"} %d\n", m.FetchHTML.Load())
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"pdf\"} %d\n", m.FetchPDF.Load())
+	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"office\"} %d\n", m.FetchOffice.Load())
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"plain\"} %d\n", m.FetchPlain.Load())
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"image\"} %d\n\n", m.FetchImage.Load())
 

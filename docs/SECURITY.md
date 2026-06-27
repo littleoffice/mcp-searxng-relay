@@ -90,10 +90,10 @@ instead:
 - **SearXNG itself.** This project is a client of SearXNG, not a fork of it.
   Vulnerabilities in SearXNG go to <https://github.com/searxng/searxng>.
 - **Third-party dependencies** — the MCP Go SDK, `go-trafilatura`,
-  `golang-lru`, `pdf_oxide`, `golang.org/x/net`, and their transitive
-  dependencies. Report those to their respective projects. A heads-up here is
-  still appreciated so the maintainer can pin or patch on this side, but the
-  fix belongs upstream. The full dependency list is in
+  `golang-lru`, `pdf_oxide`, `office_oxide`, `golang.org/x/net`, and their
+  transitive dependencies. Report those to their respective projects. A
+  heads-up here is still appreciated so the maintainer can pin or patch on
+  this side, but the fix belongs upstream. The full dependency list is in
   [supply-chain.md](supply-chain.md).
 - **Deployment-specific issues** arising from configurations the documentation
   explicitly warns against — for example, running the HTTP transport without a
