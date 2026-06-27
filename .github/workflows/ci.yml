@@ -46,6 +46,29 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install office_oxide header for cgo typecheck
+        # office_oxide's Go binding does `#include "office_oxide.h"` in its
+        # cgo preamble — unlike pdf_oxide, which inlines its C function
+        # prototypes in the preamble itself and therefore needs no custom
+        # header at typecheck time. golangci-lint runs cgo with the default
+        # CGO_ENABLED=1, so the preamble must compile, which means the
+        # header has to be on the include path even though lint never links
+        # against the library.
+        #
+        # We only fetch the header (~12 KB), not the full release tarball
+        # or the static archive — the test job below installs the complete
+        # library because it actually builds and links. This keeps the
+        # lint job fast and avoids dragging the upstream-installer
+        # workaround into a job that doesn't need it.
+        run: |
+          OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"
+          HEADER_DIR="${HOME}/.cache/office_oxide_header"
+          mkdir -p "${HEADER_DIR}"
+          curl --proto =https --tlsv1.2 -fsSL \
+            "https://raw.githubusercontent.com/yfedoseev/office_oxide/${OFFICE_OXIDE_VERSION}/include/office_oxide_c/office_oxide.h" \
+            -o "${HEADER_DIR}/office_oxide.h"
+          echo "CGO_CFLAGS=-I${HEADER_DIR}" >> "$GITHUB_ENV"
+
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
