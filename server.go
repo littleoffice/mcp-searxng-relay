@@ -90,9 +90,18 @@ func NewServer(cfg Config) *Server {
 	// to validate destination IPs in a way that survives indirection (e.g.
 	// allow-list the proxy and require destinations through it match the same
 	// policy), not to re-enable ProxyFromEnvironment here.
+	// The fetch ACL widens the default public-only SSRF policy with any
+	// operator-configured allowed hosts/CIDRs. It is compiled and validated
+	// in main(); a Server built directly in tests may leave it nil, in which
+	// case we fall back to an empty ACL == the original strict behaviour.
+	acl := cfg.FetchACL
+	if acl == nil {
+		acl = emptyFetchACL()
+	}
+
 	fetchTransport := &http.Transport{
 		Proxy:               nil,
-		DialContext:         safeDialContext,
+		DialContext:         acl.safeDialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
 
@@ -113,7 +122,7 @@ func NewServer(cfg Config) *Server {
 		fetchClient: &http.Client{
 			Timeout:       30 * time.Second,
 			Transport:     fetchTransport,
-			CheckRedirect: safeCheckRedirect,
+			CheckRedirect: acl.safeCheckRedirect,
 		},
 		cache:           cache,
 		cacheTTL:        cfg.CacheTTL,
