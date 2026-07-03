@@ -57,6 +57,27 @@ func main() {
 	}
 	cfg.AuthTokens = tokens
 
+	// Compile the fetch allow-list (FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS).
+	// A malformed CIDR fails startup with a clear message — the same
+	// fail-loud stance as the auth-token parser, since this is a security
+	// control and a typo must not silently widen or narrow it.
+	acl, err := newFetchACL(cfg.FetchAllowedHosts, cfg.FetchAllowedCIDRs)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.FetchACL = acl
+
+	// Leave an audit line when the default public-only SSRF policy has been
+	// widened, so it is obvious from the logs that the fetch tool can reach
+	// internal resources and exactly which ones.
+	if !acl.isEmpty() {
+		slog.Warn("fetch SSRF policy widened by operator config",
+			"allowed_hosts", cfg.FetchAllowedHosts,
+			"allowed_cidrs", cfg.FetchAllowedCIDRs,
+			"hint", "the fetch tool can now reach these internal hosts/ranges; keep the lists tight")
+	}
+
 	// Warn (don't fail) if basic-auth credentials would travel in plaintext.
 	// Hard-failing would break legitimate dev/internal setups where the
 	// operator knowingly accepts the risk on a trusted LAN; an audit-trail
@@ -303,6 +324,22 @@ func logConfig(server *Server, mode, port string) {
 			row("session max age", cfg.SessionMaxAge.String()),
 			row("janitor interval", cfg.SessionJanitorInterval.String()),
 		)
+	}
+	// Fetch SSRF policy. The default is public-only; show that explicitly so
+	// an operator can confirm at a glance that the fetch tool cannot reach
+	// internal targets. When widened via FETCH_ALLOWED_HOSTS /
+	// FETCH_ALLOWED_CIDRS, list exactly what was allowed — the raw operator
+	// input (order and text preserved), so the banner matches what they set.
+	if len(cfg.FetchAllowedHosts) == 0 && len(cfg.FetchAllowedCIDRs) == 0 {
+		rows = append(rows, row("fetch policy", "public only"))
+	} else {
+		rows = append(rows, row("fetch policy", "widened (internal targets allowed)"))
+		if len(cfg.FetchAllowedHosts) > 0 {
+			rows = append(rows, row("allowed hosts", strings.Join(cfg.FetchAllowedHosts, ", ")))
+		}
+		if len(cfg.FetchAllowedCIDRs) > 0 {
+			rows = append(rows, row("allowed cidrs", strings.Join(cfg.FetchAllowedCIDRs, ", ")))
+		}
 	}
 	rows = append(rows,
 		// Token count and identity count: tokens >= identities, because an

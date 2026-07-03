@@ -40,6 +40,15 @@ type Config struct {
 	RateLimitRPS           float64  // MCP_RATE_LIMIT_RPS: per-caller sustained rate (requests/sec); 0 disables
 	RateLimitBurst         int      // MCP_RATE_LIMIT_BURST: token-bucket capacity
 	RateLimitExempt        []string // MCP_RATE_LIMIT_EXEMPT: identities bypassed entirely (e.g. monitoring)
+
+	// Fetch allow-list (opt-in SSRF widening). Both empty by default, which
+	// keeps the fetch tool restricted to public IPs. Raw values are read here;
+	// FetchACL is the compiled, validated form populated in main() (see
+	// newFetchACL). Storing the raw lists too keeps the startup banner and any
+	// future /config introspection honest about what was configured.
+	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: hostnames exempt from the public-IP check
+	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: IP ranges treated as reachable
+	FetchACL          *fetchACL // compiled form; nil until main() validates the two lists
 }
 
 func configFromEnv() Config {
@@ -122,6 +131,12 @@ func configFromEnv() Config {
 	defaultBurst := int(math.Max(1, math.Ceil(c.RateLimitRPS*2)))
 	c.RateLimitBurst = int(parseInt64(os.Getenv("MCP_RATE_LIMIT_BURST"), int64(defaultBurst)))
 	c.RateLimitExempt = parseCSV(os.Getenv("MCP_RATE_LIMIT_EXEMPT"))
+	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
+	// CIDRs are compiled and validated in main() via newFetchACL so a bad
+	// entry fails startup with a clear message instead of being silently
+	// dropped. Empty (the default) leaves the strict public-only policy.
+	c.FetchAllowedHosts = parseCSV(os.Getenv("FETCH_ALLOWED_HOSTS"))
+	c.FetchAllowedCIDRs = parseCSV(os.Getenv("FETCH_ALLOWED_CIDRS"))
 	return c
 }
 

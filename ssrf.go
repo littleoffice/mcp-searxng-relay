@@ -29,8 +29,125 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 )
+
+// ── Fetch allow-list (operator-widened SSRF policy) ───────────────────────────
+//
+// By default the fetch tool may only reach globally-routable public unicast
+// addresses (see assertPublicIP).  That is the correct default for a service
+// that fetches attacker-influenced URLs.  Some operators, however, run the
+// relay inside a trusted network and *want* it to read internal resources —
+// a self-hosted Confluence, Jira, GitLab, wiki, or an internal docs host.
+//
+// fetchACL carries two opt-in allowances, both empty by default (so the
+// default behaviour is byte-for-byte unchanged):
+//
+//   - allowedHosts: exact hostnames whose fetches skip the public-IP check
+//     entirely.  Matched against the *request* hostname (and re-checked on
+//     every redirect hop), not against a resolved IP, so an operator can
+//     name an internal host without pinning its address.  The caller cannot
+//     forge this — the hostname comes from the URL an authenticated caller
+//     asked for — and the operator controls DNS for their own names, so
+//     this does not reopen the DNS-rebinding hole the dialer closes for the
+//     default path.
+//
+//   - allowedCIDRs: IP ranges that are treated as reachable even though the
+//     default policy (IsPrivate / reserved / etc.) would block them.  This
+//     is checked against the *resolved* IP at dial time and on each redirect
+//     hop, so it is robust against rebinding: an attacker who rebinds a
+//     public-looking name to a private IP is still blocked unless that exact
+//     IP falls inside a range the operator explicitly listed.
+//
+// The two are independent (OR semantics): a fetch is permitted if its host
+// is allow-listed OR its resolved IP is public OR its resolved IP is inside
+// an allowed CIDR.  An allowed CIDR overrides *all* default blocks for the
+// addresses it covers, including loopback/link-local — listing a range is an
+// explicit operator statement that the range is safe to reach.  Keep the
+// ranges tight; in particular do not list 169.254.0.0/16 unless you truly
+// intend to expose the cloud metadata endpoint.
+type fetchACL struct {
+	allowedHosts map[string]struct{} // lower-cased, trailing-dot-stripped exact matches
+	allowedCIDRs []*net.IPNet
+}
+
+// newFetchACL compiles the operator-supplied host and CIDR allow-lists.
+// Hostnames are normalised (trimmed, lower-cased, trailing FQDN dot removed).
+// Every CIDR must parse; a malformed entry returns an error so startup fails
+// loudly rather than silently leaving a range unconfigured — a typo in a
+// security control should stop the server, not degrade it quietly.
+func newFetchACL(hosts, cidrs []string) (*fetchACL, error) {
+	a := &fetchACL{allowedHosts: make(map[string]struct{}, len(hosts))}
+	for _, h := range hosts {
+		if h = normaliseHost(h); h != "" {
+			a.allowedHosts[h] = struct{}{}
+		}
+	}
+	for _, c := range cidrs {
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			return nil, fmt.Errorf("FETCH_ALLOWED_CIDRS: invalid CIDR %q: %w", c, err)
+		}
+		a.allowedCIDRs = append(a.allowedCIDRs, n)
+	}
+	return a, nil
+}
+
+// emptyFetchACL returns an ACL with no allowances — identical behaviour to
+// the original public-only policy.  Used as the nil-safe default so a Server
+// constructed directly in tests (with a zero Config) keeps strict semantics.
+func emptyFetchACL() *fetchACL {
+	return &fetchACL{allowedHosts: map[string]struct{}{}}
+}
+
+// isEmpty reports whether any allowance is configured. Used by the startup
+// banner to decide whether to emit the "SSRF policy widened" audit warning.
+func (a *fetchACL) isEmpty() bool {
+	return len(a.allowedHosts) == 0 && len(a.allowedCIDRs) == 0
+}
+
+// normaliseHost lower-cases, trims, and strips a single trailing FQDN dot so
+// that "Confluence.Internal." and "confluence.internal" compare equal.
+func normaliseHost(h string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+}
+
+// hostAllowed reports whether host was explicitly allow-listed by the operator.
+func (a *fetchACL) hostAllowed(host string) bool {
+	if len(a.allowedHosts) == 0 {
+		return false
+	}
+	_, ok := a.allowedHosts[normaliseHost(host)]
+	return ok
+}
+
+// ipInAllowedCIDR reports whether ip falls inside any operator-allowed range.
+// net.IPNet.Contains normalises v4/v6 representations internally, matching the
+// behaviour matchReservedCIDR already relies on.
+func (a *fetchACL) ipInAllowedCIDR(ip net.IP) bool {
+	for _, n := range a.allowedCIDRs {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// assertReachable is the per-IP gate for the default (non-host-allow-listed)
+// path.  An operator-allowed CIDR wins over every default block; otherwise the
+// standard public-only policy applies.
+func (a *fetchACL) assertReachable(ip net.IP) error {
+	if a.ipInAllowedCIDR(ip) {
+		slog.Debug("SSRF: address in operator-allowed CIDR", "ip", ip)
+		return nil
+	}
+	return assertPublicIP(ip)
+}
 
 // safeDialContext is used as http.Transport.DialContext for the fetchClient.
 // It resolves the hostname itself and rejects any address that is not a
@@ -40,7 +157,7 @@ import (
 // Placing the check here (rather than in a pre-flight before http.Client.Do)
 // closes the DNS-rebinding window: an attacker cannot swap the DNS answer
 // between our check and the actual TCP connection.
-func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+func (a *fetchACL) safeDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
@@ -54,9 +171,18 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 		return nil, fmt.Errorf("no addresses resolved for host %q", host)
 	}
 
-	for _, ia := range addrs {
-		if err := assertPublicIP(ia.IP); err != nil {
-			return nil, err
+	// An operator-allow-listed hostname skips the per-IP public-address
+	// check: the operator has explicitly declared this name reachable (e.g.
+	// an internal Confluence/Jira/wiki host).  We still resolve here and dial
+	// a concrete IP below rather than re-resolving, preserving the
+	// no-rebinding-window discipline of the default path.
+	if a.hostAllowed(host) {
+		slog.Debug("SSRF: host on allow-list, skipping public-IP check", "host", host)
+	} else {
+		for _, ia := range addrs {
+			if err := a.assertReachable(ia.IP); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -69,17 +195,24 @@ func safeDialContext(ctx context.Context, network, addr string) (net.Conn, error
 // It re-validates the redirect destination before following, so an open
 // redirect on a public host cannot be used to pivot to an internal service.
 // Uses the request context so the lookup is cancelled if the parent times out.
-func safeCheckRedirect(req *http.Request, via []*http.Request) error {
+func (a *fetchACL) safeCheckRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) >= 5 {
 		return fmt.Errorf("stopped after 5 redirects")
 	}
 	host := req.URL.Hostname()
+	// Same allow-list semantics as the dialer: a redirect *to* an
+	// allow-listed host is permitted regardless of the IP it resolves to,
+	// while every other host is re-validated per resolved IP so an open
+	// redirect on a public host still cannot pivot to a blocked internal one.
+	if a.hostAllowed(host) {
+		return nil
+	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(req.Context(), host)
 	if err != nil {
 		return fmt.Errorf("failed to resolve redirect host: %w", err)
 	}
 	for _, ia := range addrs {
-		if err := assertPublicIP(ia.IP); err != nil {
+		if err := a.assertReachable(ia.IP); err != nil {
 			return fmt.Errorf("redirect blocked: %w", err)
 		}
 	}
