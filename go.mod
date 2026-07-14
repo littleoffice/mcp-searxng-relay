@@ -8,7 +8,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/yfedoseev/office_oxide/go v0.1.6
 	github.com/yfedoseev/pdf_oxide/go v0.3.73
-	golang.org/x/net v0.56.0
+	golang.org/x/net v0.57.0
 )
 
 require (
@@ -41,6 +41,6 @@ require (
 	github.com/yosssi/gohtml v0.0.0-20201013000340-ee4748c638f4 // indirect
 	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/text v0.38.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/text v0.40.0 // indirect
 )
