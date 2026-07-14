@@ -35,6 +35,13 @@ type URLMetadata struct {
 	Image       string     `json:"image,omitempty"`
 	Categories  []string   `json:"categories,omitempty"`
 	Tags        []string   `json:"tags,omitempty"`
+	// PageCount is populated for PDFs only, so agents can triage document
+	// size ("3-page memo or 400-page report?") before committing to a full
+	// read.  Deliberately not populated for Office documents: DOCX has no
+	// intrinsic page count (pagination is computed at render time), and
+	// reporting a slide/sheet count under a field named page_count would
+	// mislead more than it informs.
+	PageCount int `json:"page_count,omitempty"`
 }
 
 // cacheEntry is what we store in the in-memory LRU keyed by URL.  Holds both
@@ -44,6 +51,12 @@ type cacheEntry struct {
 	content   string
 	metadata  URLMetadata
 	expiresAt time.Time
+	// truncated records whether content was cut at the MaxExtractedChars
+	// extraction cap.  Carried alongside the text (rather than encoded as
+	// a sentinel inside it) so the pagination layer can tell the agent
+	// "there was more, but the server didn't extract it" only when the
+	// window actually reaches the end of what was kept.
+	truncated bool
 }
 
 // sessionInfo is the per-session metadata we track for audit correlation

@@ -46,6 +46,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 
 - **Web search** via SearXNG with full control over language, category, time range, safe-search level, and result count
 - **URL fetching** with structured Markdown output — headings, lists, tables, code blocks, and inline emphasis all preserved
+- **Pagination for long documents** — responses are windowed at 100k characters, and a truncated response ends with a notice naming the total size and the exact `start_index` for the next call. The full extracted text (up to `MAX_EXTRACTED_CHARS`) is cached, so paging through a large PDF costs one upstream fetch, not one per page
 - **URL metadata triage** — `searxng_url_metadata` returns just title, author, publish date, language, site name, description, image, categories, and tags as JSON, at roughly an order of magnitude lower token cost than fetching the full body. Useful for picking which of several candidate URLs to read in full. Cache is shared with `searxng_read_url`, so a metadata fetch followed by a content fetch (or vice versa) costs one upstream HTTP request, not two.
 - **PDF text extraction** from fetched URLs
 - **Office document extraction** — DOCX, XLSX, PPTX plus legacy DOC, XLS, PPT. Documents render to Markdown rather than flat text so headings, tables, and list structure survive into the model's context (spreadsheets in particular benefit — a Markdown table is far more useful than CSV-flattened cells)
@@ -177,6 +178,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `MAX_PDF_BYTES` | no | `50000000` | Maximum response body size for PDF URLs (bytes). PDFs get a separate, larger limit since a multi-hundred-page document can easily be 50 MB |
 | `MAX_OFFICE_BYTES` | no | `50000000` | Maximum response body size for Office document URLs (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT) (bytes). Modern OOXML files are ZIP archives that routinely embed images, fonts, and chart data, so they get their own cap separate from `MAX_BODY_BYTES` |
 | `MAX_IMAGE_BYTES` | no | `7500000` | Maximum raw size for image responses (bytes). The wire form is ~33% larger after base64 encoding |
+| `MAX_EXTRACTED_CHARS` | no | `1000000` | Cap on *extracted text* kept (and cached) per URL, as distinct from the `MAX_*_BYTES` caps on the raw response body. This is what `searxng_read_url` pagination pages through; each response returns at most 100k characters of it. Memory note: worst case the cache holds `CACHE_MAX_ENTRIES × MAX_EXTRACTED_CHARS` bytes of content (~1 GB at defaults, though real pages rarely approach the cap) — lower either value on tight memory budgets, raise this one to page deeper into very large documents |
 | `FETCH_ALLOWED_HOSTS` | no | — | Comma-separated hostnames whose fetches bypass the public-IP SSRF check, so the fetch tool can reach named internal resources (e.g. `confluence.corp,wiki.internal`). Matched exactly on the request hostname (case- and trailing-dot-insensitive; no subdomain wildcards) and re-checked on every redirect hop. See [SSRF protection](#security-notes) |
 | `FETCH_ALLOWED_CIDRS` | no | — | Comma-separated IP ranges treated as reachable even though the default policy would block them (e.g. `10.0.0.0/8,192.168.0.0/16`). Checked against the *resolved* IP at dial time and on each redirect, so it stays robust against DNS rebinding. A malformed entry fails startup. See [SSRF protection](#security-notes) |
 | `LOG_LEVEL` | no | `info` | Log verbosity: `debug`, `info`, `warn`, `error`, `off` |
@@ -277,10 +279,18 @@ The `Engines` line is omitted when SearXNG didn't return the field (older SearXN
 
 Fetch a URL and return its content. Handles HTML (converted to structured Markdown), PDF (text extracted via `pdf_oxide`), Office documents (DOCX, XLSX, PPTX, plus legacy DOC, XLS, PPT — converted to Markdown via `office_oxide`), plain text (charset-decoded), and images (JPEG, PNG, GIF, WebP returned as MCP `ImageContent` blocks for vision-model consumption — SVG is intentionally excluded, since it is more useful to the model as text than as a base64-encoded binary blob). Caches results by default; image responses bypass the text cache.
 
+Long documents are paginated. Each response returns a window of at most 100,000 characters of the extracted text; when there is more, the response ends with a notice like `[content truncated — showing chars 0-100000 of 348211; call searxng_read_url again with start_index=100000 to continue]`. The full extracted text (up to `MAX_EXTRACTED_CHARS`) is cached on the first fetch, so follow-up pages are cache hits and cost no upstream request. Offsets in the notice are exact — the agent echoes them back verbatim; the server snaps any offset that would split a multibyte character and guarantees each page advances, so following continuation hints always terminates.
+
+PDF text is delimited by `--- [PDF page N of M] ---` marker lines, one per page, so agents can answer "what's on page 47", cite page numbers, and orient themselves inside any pagination window. The markers are advisory: they sit inside the untrusted content fence, and a malicious PDF can embed lookalike text (see [SECURITY.md](docs/SECURITY.md)). Office documents get no page markers — DOCX has no intrinsic pages (pagination is computed at render time, not stored in the file), so the Markdown headings preserved by the converter are the navigational anchors there; PPTX slides and XLSX sheets surface as heading breaks.
+
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|
 | `url` | string | **yes** | — | The URL to fetch (http/https only) |
 | `force_refresh` | boolean | no | `false` | Bypass the cache and fetch a fresh copy |
+| `start_index` | integer | no | `0` | Offset into the extracted text to start from. Use the value from a previous response's truncation notice |
+| `max_chars` | integer | no | `100000` | Characters of extracted text to return in this response (ceiling: 100000) |
+
+Both pagination parameters are ignored for image URLs, which are returned whole as image content blocks.
 
 **Example — force a fresh fetch:**
 ```json
@@ -290,11 +300,19 @@ Fetch a URL and return its content. Handles HTML (converted to structured Markdo
 }
 ```
 
+**Example — continue reading a long document from where the last response stopped:**
+```json
+{
+  "url": "https://example.com/big-report.pdf",
+  "start_index": 100000
+}
+```
+
 ---
 
 ### `searxng_url_metadata`
 
-Fetch only the structured metadata for a URL — title, author, publish date, language, site name, description, image, categories, and tags — without returning the page body. Roughly an order of magnitude cheaper in tokens than `searxng_read_url`, and intended as a triage step before committing to read a candidate URL in full. Results are cached and the cache is shared with `searxng_read_url`: a metadata fetch followed by a content fetch (or vice versa) costs one upstream HTTP request, not two.
+Fetch only the structured metadata for a URL — title, author, publish date, language, site name, description, image, categories, and tags — without returning the page body. For PDFs, `page_count` is also returned, so an agent can gauge whether a candidate is a 3-page memo or a 400-page report before committing to a full read (it is deliberately absent for Office documents: DOCX has no intrinsic page count, since pagination is computed at render time). Roughly an order of magnitude cheaper in tokens than `searxng_read_url`, and intended as a triage step before committing to read a candidate URL in full. Results are cached and the cache is shared with `searxng_read_url`: a metadata fetch followed by a content fetch (or vice versa) costs one upstream HTTP request, not two.
 
 | Parameter | Type | Required | Default | Description |
 |---|---|---|---|---|

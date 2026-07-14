@@ -37,6 +37,7 @@ type Config struct {
 	MaxPDFBytes            int64
 	MaxOfficeBytes         int64
 	MaxImageBytes          int64
+	MaxExtractedChars      int // MAX_EXTRACTED_CHARS: cap on extracted text cached per URL
 	RateLimitRPS           float64  // MCP_RATE_LIMIT_RPS: per-caller sustained rate (requests/sec); 0 disables
 	RateLimitBurst         int      // MCP_RATE_LIMIT_BURST: token-bucket capacity
 	RateLimitExempt        []string // MCP_RATE_LIMIT_EXEMPT: identities bypassed entirely (e.g. monitoring)
@@ -85,6 +86,21 @@ func configFromEnv() Config {
 	// models that handle larger inputs can bump this — just remember the
 	// encoded form is what the agent receives.
 	c.MaxImageBytes = parseInt64(os.Getenv("MAX_IMAGE_BYTES"), 7_500_000)
+	// MaxExtractedChars caps how much *extracted text* is kept (and cached)
+	// per URL, as distinct from the Max*Bytes knobs above which cap the raw
+	// response body read off the wire.  The per-response window returned to
+	// the agent is separately bounded by maxRenderedChars (100k) and paged
+	// via the read tool's start_index / max_chars parameters — this cap is
+	// what pagination can page *through*.
+	//
+	// Memory math for operators: worst case the text cache holds
+	// CACHE_MAX_ENTRIES × MAX_EXTRACTED_CHARS bytes of content (defaults:
+	// 1,000 × 1,000,000 = ~1 GB).  In practice almost no page extracts to
+	// anywhere near the cap — the worst case requires 1,000 distinct
+	// megabyte-plus documents resident at once.  Deployments on tight
+	// memory budgets should lower CACHE_MAX_ENTRIES or this value; raising
+	// it lets pagination reach deeper into very large PDFs.
+	c.MaxExtractedChars = int(parseInt64(os.Getenv("MAX_EXTRACTED_CHARS"), 1_000_000))
 	c.Stateless = parseBool(os.Getenv("MCP_STATELESS"))
 	// Stateful-mode janitor tuning.  Two knobs, two reasons:
 	//

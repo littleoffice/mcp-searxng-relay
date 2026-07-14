@@ -37,9 +37,12 @@ import (
 // this exhausts the goroutine stack.
 const maxDOMDepth = 1000
 
-// maxRenderedChars is the upper bound on rendered markdown returned to the
-// agent.  Pages beyond this are truncated with a sentinel rather than
-// dropped, because partial content is usually more useful than none.
+// maxRenderedChars is the upper bound on the content window returned to the
+// agent in a single searxng_read_url response.  It is both the default and
+// the ceiling for the tool's max_chars parameter.  Content beyond the window
+// is not dropped: extraction keeps up to Config.MaxExtractedChars in the
+// cache, and the agent pages through it with start_index (see
+// paginateContent in fetch.go).
 const maxRenderedChars = 100_000
 
 // ── Extraction ────────────────────────────────────────────────────────────────
@@ -143,17 +146,36 @@ func truncateField(s string, max int) string {
 	return truncateBytes(s, "…", max)
 }
 
+// clampChars returns s cut to at most max bytes (never splitting a UTF-8
+// rune) and reports whether a cut happened.  Unlike truncateBytes it appends
+// no sentinel — extraction-cap truncation is signalled out-of-band via the
+// returned flag so the pagination layer in fetch.go can phrase the notice
+// with accurate offsets, and so the sentinel text never pollutes the cache.
+// max <= 0 disables clamping (defensive: a Server built directly in tests
+// may carry a zero-valued Config).
+func clampChars(s string, max int) (string, bool) {
+	if max <= 0 || len(s) <= max {
+		return s, false
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
+}
+
 // ── Markdown renderer ─────────────────────────────────────────────────────────
 
 // renderMarkdown walks an HTML node tree and emits structured markdown.
 // Subtrees that are never article content (script, style, nav, footer) are
-// skipped wholesale.  Output is capped at maxRenderedChars with a sentinel
-// rather than dropped — partial content is more useful than none.
+// skipped wholesale.  Output is capped at maxChars (Config.MaxExtractedChars
+// in production); the boolean reports whether the cap cut anything, so the
+// caller can surface "there was more" to the agent with accurate offsets.
 //
 // A nil root (e.g. trafilatura returned no content) yields an empty string.
-func renderMarkdown(root *html.Node) string {
+func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
 	if root == nil {
-		return ""
+		return "", false
 	}
 	var sb strings.Builder
 
@@ -396,7 +418,7 @@ func renderMarkdown(root *html.Node) string {
 	}
 
 	result := strings.TrimSpace(strings.Join(out, "\n"))
-	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars)
+	return clampChars(result, maxChars)
 }
 
 // isSpace reports whether b is an ASCII whitespace byte.

@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	officeoxide "github.com/yfedoseev/office_oxide/go"
@@ -31,6 +32,10 @@ type urlFetchResult struct {
 	metadata      URLMetadata
 	imageData     []byte
 	imageMimeType string
+	// truncated: text was cut at the MaxExtractedChars extraction cap.
+	// Distinct from response-window truncation, which is applied later by
+	// paginateContent and is recoverable via start_index.
+	truncated bool
 }
 
 func (r urlFetchResult) isImage() bool { return r.imageData != nil }
@@ -40,6 +45,8 @@ func (r urlFetchResult) isImage() bool { return r.imageData != nil }
 type fetchInput struct {
 	URL          string `json:"url" jsonschema:"the URL to fetch"`
 	ForceRefresh bool   `json:"force_refresh,omitempty" jsonschema:"bypass the cache and fetch a fresh copy (default: false)"`
+	StartIndex   int    `json:"start_index,omitempty" jsonschema:"offset into the extracted text to start from (default: 0). When a response ends with a truncation notice, pass the start_index it suggests to continue reading. Ignored for image URLs"`
+	MaxChars     int    `json:"max_chars,omitempty" jsonschema:"maximum characters of extracted text to return in this response (default and maximum: 100000). Ignored for image URLs"`
 }
 
 func (s *Server) toolReadURL(
@@ -82,17 +89,114 @@ func (s *Server) toolReadURL(
 		}, nil, nil
 	}
 
-	fenced, err := s.wrapFence(result.text, FenceTypeContent, FenceUntrusted, in.URL)
+	// Apply the response window.  The cache holds the full extracted text
+	// (up to MaxExtractedChars); windowing happens here at response time,
+	// so follow-up pages are cache hits and cost no upstream request.
+	windowed, start, end, err := paginateContent(
+		result.text, in.StartIndex, in.MaxChars,
+		result.truncated, s.config.MaxExtractedChars)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	fenced, err := s.wrapFence(windowed, FenceTypeContent, FenceUntrusted, in.URL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
 	slog.Info("fetch completed",
 		"url", in.URL, "kind", "text",
+		"start_index", start, "end_index", end,
+		"total_chars", len(result.text),
 		"identity", identityFromContext(ctx),
 		"session_id", sessionIDOf(req))
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fenced}},
 	}, nil, nil
+}
+
+// ── Response-window pagination ────────────────────────────────────────────────
+
+// paginateContent cuts a window out of the full extracted text and appends
+// the notices the agent needs to navigate the rest.
+//
+// Contract with the agent:
+//
+//   - Offsets are 0-based indices into the extracted text, exactly as
+//     produced by extraction and stored in the cache. The agent never needs
+//     to interpret them — it echoes back the start_index a truncation notice
+//     suggests. (Internally they are byte offsets into UTF-8 text, snapped
+//     to rune boundaries so a window never splits an encoded rune.)
+//   - A window that ends before the end of the text always carries a notice
+//     naming the exact continuation offset.
+//   - Forward progress is guaranteed: the window always contains at least
+//     one full rune, so following continuation hints always terminates even
+//     for adversarially small max_chars values.
+//   - extractionTruncated is only surfaced when the window reaches the end
+//     of the kept text — before that it would be noise the agent can't act
+//     on yet.
+//
+// start beyond the end of the text is an error (with the total included so
+// the agent can recover); this can legitimately happen when the cache entry
+// expired between pages and re-extraction yielded shorter content.
+func paginateContent(text string, startIndex, maxChars int, extractionTruncated bool, extractionCap int) (windowed string, start, end int, err error) {
+	total := len(text)
+
+	start = startIndex
+	if start < 0 {
+		start = 0
+	}
+	if start > 0 {
+		if start >= total {
+			return "", 0, 0, fmt.Errorf(
+				"start_index %d is beyond the end of the extracted content (%d chars total); the page may have changed since the previous fetch",
+				start, total)
+		}
+		// Snap backwards to a rune boundary in case the agent invented an
+		// offset rather than echoing one of ours.
+		for start > 0 && !utf8.RuneStart(text[start]) {
+			start--
+		}
+	}
+
+	window := maxChars
+	if window <= 0 || window > maxRenderedChars {
+		window = maxRenderedChars
+	}
+
+	end = start + window
+	if end >= total {
+		end = total
+	} else {
+		for end > start && !utf8.RuneStart(text[end]) {
+			end--
+		}
+		if end == start {
+			// window was smaller than the first rune at start; include it
+			// whole so the continuation offset always advances.
+			_, size := utf8.DecodeRuneInString(text[start:])
+			end = start + size
+		}
+	}
+
+	body := text[start:end]
+	var notes []string
+	if end < total {
+		notes = append(notes, fmt.Sprintf(
+			"[content truncated — showing chars %d-%d of %d; call searxng_read_url again with start_index=%d to continue]",
+			start, end, total, end))
+	} else if start > 0 {
+		notes = append(notes, fmt.Sprintf(
+			"[showing chars %d-%d of %d — end of content]", start, end, total))
+	}
+	if end == total && extractionTruncated {
+		notes = append(notes, fmt.Sprintf(
+			"[note: the source document was longer than the server's extraction cap (%d chars); the remainder was not extracted. The operator can raise MAX_EXTRACTED_CHARS to capture more]",
+			extractionCap))
+	}
+	if len(notes) > 0 {
+		body = body + "\n\n" + strings.Join(notes, "\n")
+	}
+	return body, start, end, nil
 }
 
 // ── Tool: URL metadata ────────────────────────────────────────────────────────
@@ -174,7 +278,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 			if time.Now().Before(entry.expiresAt) {
 				slog.Debug("cache hit", "url", targetURL)
 				s.metrics.CacheHits.Add(1)
-				return urlFetchResult{text: entry.content, metadata: entry.metadata}, nil
+				return urlFetchResult{text: entry.content, metadata: entry.metadata, truncated: entry.truncated}, nil
 			}
 			s.cache.Remove(targetURL)
 		}
@@ -268,24 +372,37 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 
 	// ── Text paths ────────────────────────────────────────────────────────────
 	var content string
+	var truncated bool
 	metadata := URLMetadata{URL: targetURL}
 
 	switch {
 	case isPDF(contentType, targetURL):
 		s.metrics.FetchPDF.Add(1)
-		content, err = extractPDF(body)
+		var pageCount int
+		content, truncated, pageCount, err = extractPDF(body, s.config.MaxExtractedChars)
 		if err != nil {
 			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", err)
 		}
+		metadata.PageCount = pageCount
 	case officeFormat(contentType, targetURL) != "":
 		// Office documents (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) render to
 		// Markdown rather than flat text. The structural fidelity (headings,
 		// tables, lists) is a meaningful uplift for retrieval/RAG callers,
 		// and the Markdown path falls back to plain text inside the
 		// extractor if it errors on a given file.
+		//
+		// Unlike the PDF path, no page/slide markers are inserted here.
+		// office_oxide's Go binding exposes only whole-document extraction
+		// (PlainText/ToMarkdown/ToIRJSON, no per-slide or per-sheet call),
+		// and re-rendering markdown from the IR JSON ourselves would
+		// duplicate the library's renderer for little gain.  The markdown
+		// headings ToMarkdown already emits are the honest navigational
+		// anchor anyway: DOCX has no intrinsic pages (page breaks are
+		// computed by the renderer, not stored in the file), while PPTX
+		// slides and XLSX sheets surface as heading breaks.
 		format := officeFormat(contentType, targetURL)
 		s.metrics.FetchOffice.Add(1)
-		content, err = extractOffice(body, format)
+		content, truncated, err = extractOffice(body, format, s.config.MaxExtractedChars)
 		if err != nil {
 			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, err)
 		}
@@ -295,7 +412,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		// so the model doesn't get malformed UTF-8.
 		s.metrics.FetchPlain.Add(1)
 		body = toUTF8(body, contentType)
-		content = truncateBytes(strings.TrimSpace(string(body)), "\n\n[content truncated]", maxRenderedChars)
+		content, truncated = clampChars(strings.TrimSpace(string(body)), s.config.MaxExtractedChars)
 	default:
 		// Decode to UTF-8 before HTML parsing so non-Latin pages render correctly.
 		// Same toUTF8 helper is used for plain text above.
@@ -309,21 +426,23 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 			slog.Debug("html extraction failed",
 				"url", targetURL, "error", extractErr)
 		}
-		content = renderMarkdown(contentNode)
+		content, truncated = renderMarkdown(contentNode, s.config.MaxExtractedChars)
 		metadata = extractedMeta
 	}
 
 	slog.Info("url fetched", "url", targetURL,
 		"content_type", contentType,
 		"bytes_raw", len(body),
-		"chars_extracted", len(content))
+		"chars_extracted", len(content),
+		"extraction_truncated", truncated)
 
 	s.cache.Add(targetURL, cacheEntry{
 		content:   content,
 		metadata:  metadata,
 		expiresAt: time.Now().Add(s.cacheTTL),
+		truncated: truncated,
 	})
-	return urlFetchResult{text: content, metadata: metadata}, nil
+	return urlFetchResult{text: content, metadata: metadata, truncated: truncated}, nil
 }
 
 // ── Encoding detection ────────────────────────────────────────────────────────
@@ -370,25 +489,71 @@ func isPlainText(contentType string) bool {
 	return strings.HasPrefix(ct, "text/plain")
 }
 
-// extractPDF extracts plain text from a PDF byte slice using pdf_oxide.
-// The Rust core guarantees zero panics and zero timeouts across all inputs,
-// so no subprocess, goroutine wrapper, or recover() block is needed.
-// Scanned/image-only PDFs return sparse or empty output — OCR is out of scope.
-func extractPDF(body []byte) (string, error) {
+// pdfPageMarker is the navigational anchor inserted between PDF pages.  Its
+// format is part of the tool's response contract: the read tool's description
+// tells agents to look for these lines, so treat changes as breaking.
+//
+// The marker is server-generated but sits inside untrusted extracted content
+// — a malicious PDF can embed text that imitates it.  Everything inside the
+// content fence is untrusted by definition (see docs/SECURITY.md), so the
+// markers are advisory: good enough for navigation and citation, not an
+// integrity claim.  We deliberately do not rewrite lookalike lines in the
+// page text; mutating untrusted content creates worse problems (silent
+// corruption of quoted material) than the spoof it would prevent.
+func pdfPageMarker(page, total int) string {
+	return fmt.Sprintf("--- [PDF page %d of %d] ---", page, total)
+}
+
+// extractPDF extracts text from a PDF byte slice using pdf_oxide, page by
+// page, inserting a pdfPageMarker line before each page so agents can answer
+// "what's on page N" and cite page numbers.  Output is capped at maxChars;
+// the boolean reports whether the cap cut anything.  pageCount is returned
+// for the page_count metadata field regardless of truncation.
+//
+// Per-page extraction (ExtractText) uses the same tagged-PDF reading-order
+// logic as the whole-document call it replaced, so text quality is
+// unchanged; the loop just adds one FFI call per page at sub-millisecond
+// per-document extraction speeds.  The Rust core guarantees zero panics and
+// zero timeouts across all inputs, so no subprocess, goroutine wrapper, or
+// recover() block is needed.  Scanned/image-only pages return sparse or
+// empty output under their marker — OCR is out of scope.
+func extractPDF(body []byte, maxChars int) (text string, truncated bool, pageCount int, err error) {
 	doc, err := pdfoxide.OpenFromBytes(body)
 	if err != nil {
-		return "", fmt.Errorf("could not open PDF: %w", err)
+		return "", false, 0, fmt.Errorf("could not open PDF: %w", err)
 	}
 
 	defer func() { _ = doc.Close() }()
 
-	text, err := doc.ExtractAllText()
+	pageCount, err = doc.PageCount()
 	if err != nil {
-		return "", fmt.Errorf("could not extract PDF text: %w", err)
+		return "", false, 0, fmt.Errorf("could not read PDF page count: %w", err)
 	}
 
-	result := strings.TrimSpace(text)
-	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars), nil
+	var sb strings.Builder
+	for i := 0; i < pageCount; i++ {
+		// Stop extracting once the cap is already exceeded: on a
+		// multi-hundred-page document with a small cap there is no point
+		// paying FFI calls for pages that clampChars will discard anyway.
+		// clampChars below still enforces the exact byte budget.
+		if maxChars > 0 && sb.Len() > maxChars {
+			truncated = true
+			break
+		}
+		pageText, pageErr := doc.ExtractText(i)
+		if pageErr != nil {
+			return "", false, 0, fmt.Errorf("could not extract text from PDF page %d: %w", i+1, pageErr)
+		}
+		if i > 0 {
+			sb.WriteString("\n\n")
+		}
+		sb.WriteString(pdfPageMarker(i+1, pageCount))
+		sb.WriteString("\n\n")
+		sb.WriteString(strings.TrimSpace(pageText))
+	}
+
+	result, clamped := clampChars(strings.TrimSpace(sb.String()), maxChars)
+	return result, truncated || clamped, pageCount, nil
 }
 
 // ── Office extraction ────────────────────────────────────────────────────────
@@ -463,10 +628,10 @@ func officeFormat(contentType, rawURL string) string {
 // The Rust core provides the same panic-free, timeout-bounded guarantees
 // as pdf_oxide — adversarial input returns an error rather than crashing
 // the server process.
-func extractOffice(body []byte, format string) (string, error) {
+func extractOffice(body []byte, format string, maxChars int) (string, bool, error) {
 	doc, err := officeoxide.OpenFromBytes(body, format)
 	if err != nil {
-		return "", fmt.Errorf("could not open %s document: %w", format, err)
+		return "", false, fmt.Errorf("could not open %s document: %w", format, err)
 	}
 	defer func() { _ = doc.Close() }()
 
@@ -478,12 +643,12 @@ func extractOffice(body []byte, format string) (string, error) {
 		var ptErr error
 		text, ptErr = doc.PlainText()
 		if ptErr != nil {
-			return "", fmt.Errorf("could not extract %s text (markdown: %v; plain: %w)", format, err, ptErr)
+			return "", false, fmt.Errorf("could not extract %s text (markdown: %v; plain: %w)", format, err, ptErr)
 		}
 	}
 
-	result := strings.TrimSpace(text)
-	return truncateBytes(result, "\n\n[content truncated]", maxRenderedChars), nil
+	result, truncated := clampChars(strings.TrimSpace(text), maxChars)
+	return result, truncated, nil
 }
 
 // ── Image detection ───────────────────────────────────────────────────────────
