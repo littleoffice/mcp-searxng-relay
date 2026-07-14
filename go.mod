@@ -1,6 +1,6 @@
 module mcp-searxng-relay
 
-go 1.26
+go 1.26.5
 
 require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
