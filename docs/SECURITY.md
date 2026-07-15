@@ -126,6 +126,15 @@ starting points:
 - **Prompt fencing** of all tool output, implementing the scheme from
   arXiv:2511.19727, with an honest statement of what that does and does not
   provide in the README.
+- **PDF page markers are advisory.** The `--- [PDF page N of M] ---` lines
+  inserted between extracted PDF pages are server-generated, but they sit
+  inside untrusted extracted content: a malicious PDF can embed lookalike
+  text to misrepresent where content appears in the document. The markers
+  are navigational aids under the same trust status as everything else
+  inside the content fence — not an integrity claim. The extractor
+  deliberately does not rewrite lookalike lines in page text, because
+  silently mutating untrusted content (and any material an agent later
+  quotes from it) is a worse failure mode than the spoof it would prevent.
 - **Dependency hygiene** — a deliberately small dependency tree, a pinned build
   toolchain, and a minimal `scratch`-based runtime image. Detailed in
   [supply-chain.md](supply-chain.md).

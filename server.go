@@ -173,7 +173,13 @@ func (s *Server) buildMCPServer() *mcp.Server {
 			"specific URLs in full. Handles HTML and PDF including large multi-" +
 			"hundred-page documents. Non-UTF-8 encodings are detected and converted " +
 			"automatically. Image URLs (jpeg/png/gif/webp) are returned as image " +
-			"content blocks for vision models. Results are cached; use force_refresh " +
+			"content blocks for vision models. PDF text is delimited by " +
+			"'--- [PDF page N of M] ---' marker lines, so you can locate and " +
+			"cite specific pages. Long documents are paginated: a " +
+			"response ending in a truncation notice tells you the total size and " +
+			"the exact start_index to pass on the next call to continue reading. " +
+			"Follow-up pages are served from cache, so paging through a document " +
+			"costs one upstream fetch. Results are cached; use force_refresh " +
 			"to bypass the cache.",
 	}, s.toolReadURL)
 
@@ -182,6 +188,8 @@ func (s *Server) buildMCPServer() *mcp.Server {
 		Description: "When deciding which of several URLs to read in full, call " +
 			"this tool first for each candidate to get title, author, publish date, " +
 			"language, site name, description, image, categories, and tags as JSON. " +
+			"For PDFs it also returns page_count, so you can gauge document size " +
+			"before committing to a full read. " +
 			"It is ~10x cheaper in tokens than searxng_read_url. After reviewing " +
 			"metadata, call searxng_read_url only on the URLs you've decided are " +
 			"worth full content. Also use this tool standalone for citation building " +
