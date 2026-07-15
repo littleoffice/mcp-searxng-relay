@@ -621,6 +621,8 @@ The exposed series are:
 | `mcp_cache_force_refresh_total` | — | Requests with `force_refresh=true` |
 | `mcp_rate_limit_rejections_total` | — | HTTP requests rejected by the per-caller rate limiter (429 responses). Rejection details — identity, remote, retry — are in the structured WARN log; no per-identity label here by design |
 | `mcp_active_sessions` | — | Gauge: current live MCP sessions (stateful mode only) |
+| `mcp_search_duration_seconds` | `le` | Histogram: SearXNG search round-trip latency. Buckets from 50ms to 30s |
+| `mcp_fetch_duration_seconds` | `le` | Histogram: URL fetch pipeline latency (dial through extraction), observed for both `searxng_read_url` and `searxng_url_metadata`. Includes cache hits, which land in the lowest bucket — alert on upper quantiles (e.g. `histogram_quantile(0.99, ...)`) and read the p50 alongside `mcp_cache_hits_total`. The top bucket matches the 30s fetch client timeout, so `+Inf` observations are timeout-adjacent requests |
 
 ### Per-domain cardinality
 

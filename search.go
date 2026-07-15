@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -97,7 +98,9 @@ func (s *Server) toolSearch(
 	// field, but users typing by hand won't always match case.
 	engines := strings.Join(parseCSV(strings.ToLower(in.Engines)), ",")
 
+	searchStart := time.Now()
 	results, err := s.search(ctx, in.Query, pageno, in.Categories, language, in.TimeRange, safesearch, engines)
+	s.metrics.SearchDuration.Observe(time.Since(searchStart))
 	if err != nil {
 		s.metrics.SearchErrors.Add(1)
 		slog.Error("search failed",

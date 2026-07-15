@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/http"
 	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // ── Metrics ───────────────────────────────────────────────────────────────────
@@ -23,6 +25,69 @@ const maxTrackedDomains = 512
 type domainStats struct {
 	successes atomic.Int64
 	failures  atomic.Int64
+}
+
+// latencyBuckets are the upper bounds (seconds) for the duration histograms.
+// Coarse on purpose: these exist for alerting ("upstream is slow"), not for
+// profiling.  The top bucket sits at 30s to match the fetch client timeout —
+// anything above it lands in +Inf and means a timeout-adjacent request.
+// Changing bucket bounds mid-deployment resets the usefulness of historical
+// quantile queries, so treat the set as stable.
+var latencyBuckets = [...]float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+
+// histogram is a fixed-bucket Prometheus histogram safe for concurrent use
+// without a mutex.  Internally each bucket counts only its own range
+// (non-cumulative), so Observe touches exactly one bucket counter plus sum
+// and count; the cumulative form Prometheus requires is computed at
+// exposition time.  The sum is kept in integer nanoseconds rather than a
+// CAS-looped float64 — at a 30s per-observation ceiling, int64 nanoseconds
+// take centuries of cumulative latency to overflow.
+type histogram struct {
+	buckets  [len(latencyBuckets)]atomic.Int64
+	overflow atomic.Int64 // observations above the last bucket (le="+Inf")
+	sumNanos atomic.Int64
+	count    atomic.Int64
+}
+
+// Observe records one duration.
+func (h *histogram) Observe(d time.Duration) {
+	secs := d.Seconds()
+	placed := false
+	for i, ub := range latencyBuckets {
+		if secs <= ub {
+			h.buckets[i].Add(1)
+			placed = true
+			break
+		}
+	}
+	if !placed {
+		h.overflow.Add(1)
+	}
+	h.sumNanos.Add(int64(d))
+	h.count.Add(1)
+}
+
+// write emits the histogram in Prometheus text exposition format.
+//
+// The le="+Inf" bucket and _count are both computed from the same cumulative
+// sum over the bucket counters, which preserves the Prometheus invariant
+// (+Inf == _count) even when Observe runs concurrently with exposition.  The
+// independently loaded count/sum fields may momentarily lag the buckets by
+// an in-flight observation; that skew is bounded to a scrape's instant and
+// is the standard trade-off of lock-free collection, so count is derived
+// rather than loaded.
+func (h *histogram) write(w io.Writer, name, help string) {
+	_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
+	_, _ = fmt.Fprintf(w, "# TYPE %s histogram\n", name)
+	var cum int64
+	for i, ub := range latencyBuckets {
+		cum += h.buckets[i].Load()
+		_, _ = fmt.Fprintf(w, "%s_bucket{le=\"%g\"} %d\n", name, ub, cum)
+	}
+	cum += h.overflow.Load()
+	_, _ = fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", name, cum)
+	_, _ = fmt.Fprintf(w, "%s_sum %g\n", name, float64(h.sumNanos.Load())/1e9)
+	_, _ = fmt.Fprintf(w, "%s_count %d\n\n", name, cum)
 }
 
 // Metrics holds all in-process counters exposed at /metrics in Prometheus
@@ -65,6 +130,19 @@ type Metrics struct {
 	// ── metadata tool ────────────────────────────────────────────────────────
 	MetadataTotal  atomic.Int64 // all calls to searxng_url_metadata
 	MetadataErrors atomic.Int64 // calls that returned an error
+
+	// ── latency ──────────────────────────────────────────────────────────────
+	// Duration histograms for the two upstream operations an operator
+	// alerts on.  "Upstream is slow" is a more common incident than
+	// "upstream is down", and counters alone cannot express it.
+	//
+	// SearchDuration measures the SearXNG round-trip inside toolSearch.
+	// FetchDuration measures the readURL pipeline (dial through
+	// extraction) and therefore includes cache hits, which observe as
+	// sub-millisecond values in the lowest bucket; alert on upper
+	// quantiles, and read the p50 alongside mcp_cache_hits_total.
+	SearchDuration histogram
+	FetchDuration  histogram
 
 	// ── rate limiting ────────────────────────────────────────────────────────
 	// Single counter — no per-identity label.  The rejection event is
@@ -228,6 +306,12 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Rate limiting
 	writeCounter("mcp_rate_limit_rejections_total",
 		"Total number of HTTP requests rejected by the per-caller rate limiter.", &m.RateLimitRejections)
+
+	// Latency histograms
+	m.SearchDuration.write(w, "mcp_search_duration_seconds",
+		"Duration of SearXNG search round-trips, in seconds.")
+	m.FetchDuration.write(w, "mcp_fetch_duration_seconds",
+		"Duration of the URL fetch pipeline (dial through extraction), in seconds. Includes cache hits, which observe as sub-millisecond values.")
 
 	// Sessions (gauge — current live count, snapshotted from the SDK)
 	writeGauge("mcp_active_sessions",
