@@ -71,7 +71,7 @@ func configFromEnv() Config {
 		c.LogFormat = "text"
 	}
 	c.CacheTTL = parseDuration(os.Getenv("CACHE_TTL_SECONDS"), 300) * time.Second
-	c.CacheMaxEntries = int(parseInt64(os.Getenv("CACHE_MAX_ENTRIES"), 1_000))
+	c.CacheMaxEntries = parseInt(os.Getenv("CACHE_MAX_ENTRIES"), 1_000)
 	c.MaxBodyBytes = parseInt64(os.Getenv("MAX_BODY_BYTES"), 500_000)
 	c.MaxPDFBytes = parseInt64(os.Getenv("MAX_PDF_BYTES"), 50_000_000)
 	// MaxOfficeBytes caps the response body for Office documents (DOCX,
@@ -100,7 +100,7 @@ func configFromEnv() Config {
 	// megabyte-plus documents resident at once.  Deployments on tight
 	// memory budgets should lower CACHE_MAX_ENTRIES or this value; raising
 	// it lets pagination reach deeper into very large PDFs.
-	c.MaxExtractedChars = int(parseInt64(os.Getenv("MAX_EXTRACTED_CHARS"), 1_000_000))
+	c.MaxExtractedChars = parseInt(os.Getenv("MAX_EXTRACTED_CHARS"), 1_000_000)
 	c.Stateless = parseBool(os.Getenv("MCP_STATELESS"))
 	// Stateful-mode janitor tuning.  Two knobs, two reasons:
 	//
@@ -145,7 +145,7 @@ func configFromEnv() Config {
 	// concurrent tool calls inside a single agent turn.  Operators who
 	// want strict pacing set burst == ceil(rate).
 	defaultBurst := int(math.Max(1, math.Ceil(c.RateLimitRPS*2)))
-	c.RateLimitBurst = int(parseInt64(os.Getenv("MCP_RATE_LIMIT_BURST"), int64(defaultBurst)))
+	c.RateLimitBurst = parseInt(os.Getenv("MCP_RATE_LIMIT_BURST"), defaultBurst)
 	c.RateLimitExempt = parseCSV(os.Getenv("MCP_RATE_LIMIT_EXEMPT"))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
 	// CIDRs are compiled and validated in main() via newFetchACL so a bad
@@ -321,6 +321,26 @@ func parseInt64(s string, defaultVal int64) int64 {
 		return defaultVal
 	}
 	return n
+}
+
+// parseInt is parseInt64 for config fields typed as int.  bitSize 0 tells
+// strconv.ParseInt to bound the parse to the platform's int width, so a
+// value that would not fit becomes a parse error and falls back to the
+// default — the same "safe default on garbage" behaviour as the other
+// helpers — instead of the silent truncation an int(parseInt64(...))
+// conversion would perform on 32-bit platforms (CodeQL:
+// incorrect-integer-conversion).  On the 64-bit deployment targets the
+// two are behaviourally identical.
+func parseInt(s string, defaultVal int) int {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultVal
+	}
+	n, err := strconv.ParseInt(s, 10, 0)
+	if err != nil || n <= 0 {
+		return defaultVal
+	}
+	return int(n)
 }
 
 // parseFloat64 reads a floating-point value from s, returning defaultVal
