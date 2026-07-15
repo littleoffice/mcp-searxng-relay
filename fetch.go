@@ -269,6 +269,15 @@ func (s *Server) toolURLMetadata(
 // ── Shared fetch pipeline ─────────────────────────────────────────────────────
 
 func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh bool) (urlFetchResult, error) {
+	// One observation per readURL call, covering cache lookup through
+	// extraction.  Placed here rather than in the tool handlers so both
+	// searxng_read_url and searxng_url_metadata feed the same histogram —
+	// they share this pipeline and an operator alerting on fetch latency
+	// wants both.  Cache hits observe as sub-millisecond values by design;
+	// see the FetchDuration field comment.
+	fetchStart := time.Now()
+	defer func() { s.metrics.FetchDuration.Observe(time.Since(fetchStart)) }()
+
 	// Cache check — skipped when force_refresh is set.
 	// The cache stores text + metadata together so that the read-url and
 	// url-metadata tools share a single upstream fetch.  Image fetches

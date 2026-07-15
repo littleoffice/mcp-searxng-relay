@@ -160,8 +160,11 @@ func (s *Server) buildMCPServer() *mcp.Server {
 	)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name:        "searxng_web_search",
-		Description: "Execute web searches using a SearXNG instance. Returns titles, URLs, and snippets.",
+		Name: "searxng_web_search",
+		Description: "Execute web searches using a SearXNG instance. Returns titles, " +
+			"URLs, and snippets, with engine attribution per result. To re-query " +
+			"a specific backend, pass its name (as seen in a result's engine " +
+			"field) via the engines parameter, e.g. engines='wikipedia,github'.",
 	}, s.toolSearch)
 
 	mcp.AddTool(server, &mcp.Tool{

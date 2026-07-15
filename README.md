@@ -53,7 +53,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Image responses** — JPEG, PNG, GIF, and WebP URLs come back as MCP `ImageContent` blocks for vision-model consumption (the SDK base64-encodes the raw bytes on the wire). SVG is intentionally excluded — more useful to the model as text than as a binary blob. Raw size is capped by `MAX_IMAGE_BYTES`, separately from `MAX_BODY_BYTES`, so image and text limits can be tuned independently.
 - **Automatic charset detection** — non-UTF-8 pages (Shift-JIS, windows-1252, ISO-8859-1, …) are decoded correctly before parsing
 - **Readability-style content extraction** — navigation bars, footers, sidebars, and cookie banners are stripped automatically
-- **Engine attribution on search results** — each result includes the list of SearXNG backend engines that returned it. A URL surfaced by three engines is a different signal than one surfaced by one, and the agent can weigh that without the server imposing a ranking on top.
+- **Engine attribution on search results** — each result includes the list of SearXNG backend engines that returned it. A URL surfaced by three engines is a different signal than one surfaced by one, and the agent can weigh that without the server imposing a ranking on top. The `engines` search parameter closes the loop: an agent can re-query the specific backend that surfaced a promising result.
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
 - **Response caching** with configurable TTL and per-request cache bypass
 - **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`.
@@ -252,6 +252,7 @@ Execute a web search and return titles, URLs, and snippets.
 | `language` | string | no | `all` | Language code e.g. `en`, `de`, `fr` |
 | `time_range` | string | no | — | Filter by recency: `day`, `month`, or `year` |
 | `safesearch` | number | no | `0` | Safe-search level: `0` = off, `1` = moderate, `2` = strict |
+| `engines` | string | no | instance default | Comma-separated SearXNG engine names to query, e.g. `wikipedia,github`. Names match the engine attribution on prior results, so an agent can re-query the backend that surfaced a promising hit. Input is lowercased and whitespace-trimmed; names the instance doesn't run are silently ignored by SearXNG (a query naming only unknown engines returns no results rather than an error) |
 
 **Example — recent news in English:**
 ```json
@@ -620,6 +621,8 @@ The exposed series are:
 | `mcp_cache_force_refresh_total` | — | Requests with `force_refresh=true` |
 | `mcp_rate_limit_rejections_total` | — | HTTP requests rejected by the per-caller rate limiter (429 responses). Rejection details — identity, remote, retry — are in the structured WARN log; no per-identity label here by design |
 | `mcp_active_sessions` | — | Gauge: current live MCP sessions (stateful mode only) |
+| `mcp_search_duration_seconds` | `le` | Histogram: SearXNG search round-trip latency. Buckets from 50ms to 30s |
+| `mcp_fetch_duration_seconds` | `le` | Histogram: URL fetch pipeline latency (dial through extraction), observed for both `searxng_read_url` and `searxng_url_metadata`. Includes cache hits, which land in the lowest bucket — alert on upper quantiles (e.g. `histogram_quantile(0.99, ...)`) and read the p50 alongside `mcp_cache_hits_total`. The top bucket matches the 30s fetch client timeout, so `+Inf` observations are timeout-adjacent requests |
 
 ### Per-domain cardinality
 

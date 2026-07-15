@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -31,6 +32,7 @@ type searchInput struct {
 	Categories string `json:"categories,omitempty"  jsonschema:"comma-separated SearXNG categories e.g. 'news', 'science', 'files', 'images' (default: general web)"`
 	Language   string `json:"language,omitempty"    jsonschema:"language code e.g. 'en', 'de', or 'all' (default: all)"`
 	TimeRange  string `json:"time_range,omitempty"  jsonschema:"filter by time: 'day', 'month', or 'year'"`
+	Engines    string `json:"engines,omitempty"     jsonschema:"comma-separated SearXNG engine names to query, e.g. 'wikipedia,github' — engine names appear in the engine field of prior results; unknown names are silently ignored by SearXNG (default: instance's configured engines)"`
 	Safesearch int    `json:"safesearch,omitempty"  jsonschema:"safe search level: 0 = off, 1 = moderate, 2 = strict (default: 0)"`
 }
 
@@ -88,7 +90,17 @@ func (s *Server) toolSearch(
 		safesearch = 2
 	}
 
-	results, err := s.search(ctx, in.Query, pageno, in.Categories, language, in.TimeRange, safesearch)
+	// Normalize the engines list the same way config CSV values are
+	// handled: trim entries, drop empties.  " Wikipedia, github " becomes
+	// "wikipedia,github".  Lowercasing matters because SearXNG engine
+	// names are lowercase identifiers and a case-mismatched name would be
+	// silently ignored — the agent copied the name from a result's engine
+	// field, but users typing by hand won't always match case.
+	engines := strings.Join(parseCSV(strings.ToLower(in.Engines)), ",")
+
+	searchStart := time.Now()
+	results, err := s.search(ctx, in.Query, pageno, in.Categories, language, in.TimeRange, safesearch, engines)
+	s.metrics.SearchDuration.Observe(time.Since(searchStart))
 	if err != nil {
 		s.metrics.SearchErrors.Add(1)
 		slog.Error("search failed",
@@ -107,6 +119,7 @@ func (s *Server) toolSearch(
 	slog.Info("search completed",
 		"query", in.Query, "page", pageno,
 		"results", len(results), "categories", in.Categories,
+		"engines", engines,
 		"identity", identityFromContext(ctx),
 		"session_id", sessionIDOf(req))
 
@@ -142,6 +155,7 @@ func (s *Server) search(
 	page int,
 	categories, lang, timeRange string,
 	safesearch int,
+	engines string,
 ) ([]SearchResult, error) {
 	u, err := url.Parse(s.config.SearxngURL + "/search")
 	if err != nil {
@@ -161,6 +175,9 @@ func (s *Server) search(
 	}
 	if timeRange != "" {
 		q.Set("time_range", timeRange)
+	}
+	if engines != "" {
+		q.Set("engines", engines)
 	}
 	u.RawQuery = q.Encode()
 
