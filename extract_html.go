@@ -57,7 +57,18 @@ const maxRenderedChars = 100_000
 // for relative-link resolution and gives metadata URLs precedence over it;
 // we also use it as a fallback for URLMetadata.URL when the page contains no
 // canonical <link> or og:url.
-func extractHTMLDocument(body []byte, originalURL string) (*html.Node, URLMetadata, error) {
+//
+// includeLinks keeps <a> elements in the extracted subtree.  It must be true
+// for renderMarkdown to have any hrefs to emit: with the library default
+// (false) trafilatura removes anchors in BOTH extraction paths — the main
+// path omits "a" from potentialTags, and the fallback path (which this
+// codebase enables via EnableFallback) calls StripTags(tree, "a") in
+// sanitizeTree.  The same option also gates trafilatura's relative → absolute
+// href rewriting against OriginalURL, so with it false the URL below is used
+// for metadata only.
+func extractHTMLDocument(
+	body []byte, originalURL string, includeLinks bool, pruneSelector string,
+) (*html.Node, URLMetadata, error) {
 	// Parse the URL best-effort: trafilatura accepts a nil OriginalURL and
 	// the caller (readURL) has already validated the scheme, so a parse
 	// failure here is not worth aborting on.
@@ -73,6 +84,18 @@ func extractHTMLDocument(body []byte, originalURL string) (*html.Node, URLMetada
 		// for these packages either way, so the slower-but-better trade
 		// is the one that justifies the swap in the first place.
 		EnableFallback: true,
+		// Upstream marks this "experimental", which in practice means the
+		// anchors are preserved but no extra cleaning is applied to them —
+		// hence the scheme allow-list and resolution in resolveHref rather
+		// than trusting whatever the page supplied.
+		IncludeLinks: includeLinks,
+		// Applied before subtree selection, which is the whole point: it
+		// removes boilerplate containers while the extractor is still
+		// deciding what the article is, rather than cleaning up after it
+		// has already decided wrongly.  A malformed selector is silently
+		// ignored by the library (core.go:127), so it is validated at
+		// startup instead — see main().
+		PruneSelector: pruneSelector,
 	}
 
 	result, err := trafilatura.Extract(bytes.NewReader(body), opts)
@@ -173,11 +196,15 @@ func clampChars(s string, max int) (string, bool) {
 // caller can surface "there was more" to the agent with accurate offsets.
 //
 // A nil root (e.g. trafilatura returned no content) yields an empty string.
-func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
+//
+// linkBase is the URL that relative hrefs are resolved against.  A nil
+// linkBase disables link annotation entirely, which is how EXTRACT_LINKS=false
+// is expressed to the renderer.
+func renderMarkdown(root *html.Node, maxChars int, linkBase *url.URL) (string, bool) {
 	if root == nil {
 		return "", false
 	}
-	var sb strings.Builder
+	var sb bytes.Buffer
 
 	type walkState struct {
 		inPre        bool
@@ -332,18 +359,74 @@ func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
 				return st
 
 			case "th", "td":
-				var cell strings.Builder
-				var collectText func(*html.Node)
-				collectText = func(cn *html.Node) {
+				// Cells are collected by a separate mini-walk rather than the
+				// main one, because everything in a cell has to end up on a
+				// single line inside "| … |".  Fragments are gathered and
+				// space-joined: concatenating raw text nodes would run
+				// adjacent inline elements together ("Hello <em>world</em>"
+				// → "Helloworld").
+				//
+				// Anchors are annotated here exactly as in the prose path.  A
+				// table of references is the case where dropping targets
+				// hurts most, so it gets the same treatment.
+				// Fragments are kept raw until the final join so that link
+				// labels (built from the fragments an <a> produced) are
+				// escaped exactly once, by markdownLinkLabel.  Fragments
+				// flagged literal are already-final markdown and are joined
+				// untouched.
+				type cellFrag struct {
+					text    string
+					literal bool
+				}
+				var frags []cellFrag
+				var collect func(*html.Node)
+				collect = func(cn *html.Node) {
 					if cn.Type == html.TextNode {
-						cell.WriteString(strings.TrimSpace(cn.Data))
+						if t := strings.TrimSpace(cn.Data); t != "" {
+							frags = append(frags, cellFrag{text: t})
+						}
+						return
+					}
+					if cn.Type == html.ElementNode && cn.Data == "a" && linkBase != nil {
+						mark := len(frags)
+						for c := cn.FirstChild; c != nil; c = c.NextSibling {
+							collect(c)
+						}
+						href := resolveHref(cn, linkBase)
+						if href == "" {
+							return
+						}
+						parts := make([]string, 0, len(frags)-mark)
+						for _, f := range frags[mark:] {
+							parts = append(parts, f.text)
+						}
+						label := strings.Join(parts, " ")
+						frags = frags[:mark]
+						if label == "" || label == href {
+							frags = append(frags,
+								cellFrag{text: markdownSafeURL(href), literal: true})
+							return
+						}
+						frags = append(frags, cellFrag{
+							text:    "[" + markdownLinkLabel(label) + "](" + markdownSafeURL(href) + ")",
+							literal: true,
+						})
+						return
 					}
 					for c := cn.FirstChild; c != nil; c = c.NextSibling {
-						collectText(c)
+						collect(c)
 					}
 				}
-				collectText(n)
-				st.tableRow = append(st.tableRow, strings.TrimSpace(cell.String()))
+				collect(n)
+				parts := make([]string, 0, len(frags))
+				for _, f := range frags {
+					if f.literal {
+						parts = append(parts, f.text)
+						continue
+					}
+					parts = append(parts, markdownCellText(f.text))
+				}
+				st.tableRow = append(st.tableRow, strings.Join(parts, " "))
 				return st
 
 			case "strong", "b":
@@ -363,8 +446,44 @@ func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
 				return st
 
 			case "a":
+				start := sb.Len()
 				for c := n.FirstChild; c != nil; c = c.NextSibling {
 					walk(c, st, depth+1)
+				}
+				if linkBase == nil {
+					return st
+				}
+				href := resolveHref(n, linkBase)
+				if href == "" {
+					return st
+				}
+				// sb.Bytes() is a view over the buffer; copy the slice to a
+				// string before any further write can reallocate it.
+				label := strings.TrimSpace(string(sb.Bytes()[start:]))
+				switch {
+				case label == "":
+					// No visible anchor text (empty <a>, or one wrapping only
+					// an image, which this renderer does not emit).  Injecting
+					// a naked URL here would splice it into the middle of the
+					// surrounding sentence, so emit nothing.
+					return st
+				case label == href:
+					// The anchor text already IS the target — emit it once
+					// rather than duplicating it as label and destination.
+					sb.Truncate(start)
+					sb.WriteString(markdownSafeURL(href))
+				case strings.ContainsRune(label, '\n'):
+					// The anchor wraps block-level content (card links, image
+					// tiles, a heading inside an <a>).  Folding that into a
+					// one-line markdown label would swallow the paragraph
+					// breaks, so keep the block and append the target.
+					if b := sb.Bytes(); len(b) > 0 && !isSpace(b[len(b)-1]) {
+						sb.WriteByte(' ')
+					}
+					sb.WriteString("(" + markdownSafeURL(href) + ")")
+				default:
+					sb.Truncate(start)
+					sb.WriteString("[" + markdownLinkLabel(label) + "](" + markdownSafeURL(href) + ")")
 				}
 				return st
 
@@ -383,6 +502,15 @@ func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
 				hadTrailing := len(text) > 0 && isSpace(text[len(text)-1])
 				parts := strings.Fields(text)
 				if len(parts) == 0 {
+					// Whitespace-only node.  It still carries meaning when it
+					// separates two inline elements — dropping it entirely
+					// welds them together ("<em>a</em> <em>b</em>" became
+					// "_a__b_", and adjacent links became unreadable).  Emit
+					// a single space unless the buffer already ends in
+					// whitespace or nothing has been written yet.
+					if b := sb.Bytes(); len(b) > 0 && !isSpace(b[len(b)-1]) {
+						sb.WriteByte(' ')
+					}
 					goto children
 				}
 				text = strings.Join(parts, " ")
@@ -424,4 +552,91 @@ func renderMarkdown(root *html.Node, maxChars int) (string, bool) {
 // isSpace reports whether b is an ASCII whitespace byte.
 func isSpace(b byte) bool {
 	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// ── Link handling ─────────────────────────────────────────────────────────────
+
+// resolveHref returns the absolute http(s) target of an <a> element, or ""
+// when there is nothing worth surfacing.
+//
+// Rules, in order:
+//   - no href, or an empty one            → ""
+//   - a pure fragment ("#section")        → "" (same page; the fetch tool
+//     ignores fragments as navigation targets, so it would be noise)
+//   - unparseable                         → ""
+//   - resolved against base, then any scheme other than http/https → ""
+//
+// The scheme allow-list is the load-bearing part.  javascript:, data:, and
+// vbscript: hrefs are not fetchable by this server and are precisely how a
+// hostile page would dress up an instruction to look like a navigable link.
+// Fragments on otherwise-absolute URLs are preserved — they carry real
+// citation value ("see §3") and cost nothing.
+func resolveHref(n *html.Node, base *url.URL) string {
+	var raw string
+	for _, a := range n.Attr {
+		if strings.EqualFold(a.Key, "href") {
+			raw = strings.TrimSpace(a.Val)
+			break
+		}
+	}
+	if raw == "" || strings.HasPrefix(raw, "#") {
+		return ""
+	}
+	ref, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	if base != nil {
+		ref = base.ResolveReference(ref)
+	}
+	switch strings.ToLower(ref.Scheme) {
+	case "http", "https":
+	default:
+		return ""
+	}
+	return ref.String()
+}
+
+// markdownLinkLabel flattens and escapes page-supplied anchor text so it
+// cannot break out of the "[...]" of a markdown link, or out of the column
+// it sits in.  Whitespace is collapsed (a label has to stay on one line);
+// backslashes and square brackets are escaped so a label like "Report [2024]"
+// or a trailing "\" cannot terminate the label early; and "|" is escaped
+// because an unescaped one inside a table cell silently splits the row into
+// extra columns.
+func markdownLinkLabel(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "[", `\[`)
+	s = strings.ReplaceAll(s, "]", `\]`)
+	s = strings.ReplaceAll(s, "|", `\|`)
+	return s
+}
+
+// markdownCellText escapes a plain (non-link) text fragment destined for a
+// table cell.  Only "|" matters: an unescaped pipe in cell text splits the
+// row into more columns than the header declares, which corrupts every
+// subsequent column.  This is a pre-existing hazard the link work exposes
+// more often, since reference tables are exactly where pipes show up.
+func markdownCellText(s string) string {
+	return strings.ReplaceAll(s, "|", `\|`)
+}
+
+// markdownSafeURL percent-encodes the characters that would otherwise
+// terminate the structure containing the URL: parentheses close a markdown
+// link destination, and "|" ends a table column.  url.URL.String() already
+// encodes spaces and control characters, so these are the remainder.
+//
+// Both parens are encoded, not just the closing one, so the result stays
+// balanced and legible rather than "Go_(name%29".  "|" is not a legal URI
+// character under RFC 3986 at all, so %7C is the correct spelling rather
+// than a substitution.  Parens are sub-delimiters, where percent-encoding is
+// not universally a no-op — but they occur almost exclusively inside path
+// segments (Wikipedia disambiguation suffixes being the common case) where
+// servers treat the two forms identically, and the alternative is emitting a
+// URL that is definitely truncated.
+func markdownSafeURL(u string) string {
+	u = strings.ReplaceAll(u, "(", "%28")
+	u = strings.ReplaceAll(u, ")", "%29")
+	return strings.ReplaceAll(u, "|", "%7C")
 }

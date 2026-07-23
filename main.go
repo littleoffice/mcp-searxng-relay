@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/andybalholm/cascadia"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -67,6 +68,20 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.FetchACL = acl
+
+	// Validate the pre-extraction prune selector.  go-trafilatura parses it
+	// with cascadia and silently skips pruning when the parse fails
+	// (core.go:127), so a typo would quietly restore the content-selection
+	// bug this setting exists to prevent — with correct-looking output and
+	// no error anywhere.  Fail loudly at startup instead, matching the
+	// stance taken for auth tokens and the fetch allow-list above.
+	if cfg.PruneSelector != "" {
+		if _, err := cascadia.ParseGroup(cfg.PruneSelector); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr,
+				"Error: PRUNE_SELECTOR is not a valid CSS selector: %v\n", err)
+			os.Exit(1)
+		}
+	}
 
 	// Leave an audit line when the default public-only SSRF policy has been
 	// widened, so it is obvious from the logs that the fetch tool can reach
@@ -353,6 +368,14 @@ func logConfig(server *Server, mode, port string) {
 		// Rate limit: shown unconditionally so it's obvious whether the
 		// throttle is engaged.  "disabled" appears when RPS == 0.
 		row("rate limit", server.rateLimiter.describe()),
+		// Whether hyperlink targets from fetched HTML are surfaced to the
+		// agent.  Shown unconditionally: it changes what the model sees,
+		// so it belongs in the same at-a-glance view as the fetch policy.
+		row("link extraction", enabledLabel(cfg.ExtractLinks)),
+		// Pre-extraction pruning changes which subtree is treated as the
+		// article, so an operator debugging odd extraction output needs to
+		// see the active selector, not just whether it is on.
+		row("prune selector", prunePolicyLabel(cfg.PruneSelector)),
 		// Fingerprint of the per-process fence signing key. Rotates each
 		// restart; full key material is never logged.
 		row("fence key", fenceKeyFingerprint(server.fencePublicKey)),
@@ -391,6 +414,23 @@ func redactSecret(s string) string {
 		return "[set]"
 	}
 	return "[not set]"
+}
+
+// prunePolicyLabel renders the prune selector for the banner, making the
+// disabled state explicit rather than showing a blank value.
+func prunePolicyLabel(sel string) string {
+	if strings.TrimSpace(sel) == "" {
+		return "disabled (no pre-extraction pruning)"
+	}
+	return sel
+}
+
+// enabledLabel renders a feature toggle as a banner-friendly word.
+func enabledLabel(b bool) string {
+	if b {
+		return "enabled"
+	}
+	return "disabled"
 }
 
 // sessionModeLabel renders the cfg.Stateless bool as the human-readable
