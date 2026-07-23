@@ -428,14 +428,23 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		s.metrics.FetchHTML.Add(1)
 		body = toUTF8(body, contentType)
 
-		contentNode, extractedMeta, extractErr := extractHTMLDocument(body, targetURL)
+		contentNode, extractedMeta, extractErr := extractHTMLDocument(
+			body, targetURL, s.config.ExtractLinks, s.config.PruneSelector)
 		if extractErr != nil {
 			// Extraction failure is non-fatal: log and proceed with what
 			// we have.  The metadata at minimum carries the URL.
 			slog.Debug("html extraction failed",
 				"url", targetURL, "error", extractErr)
 		}
-		content, truncated = renderMarkdown(contentNode, s.config.MaxExtractedChars)
+		// A nil linkBase switches off link annotation in the renderer.
+		// targetURL has already been parsed and scheme-checked upstream, so
+		// the parse below only fails in cases where we would not want to be
+		// resolving relative links anyway.
+		var linkBase *url.URL
+		if s.config.ExtractLinks {
+			linkBase, _ = url.Parse(targetURL)
+		}
+		content, truncated = renderMarkdown(contentNode, s.config.MaxExtractedChars, linkBase)
 		metadata = extractedMeta
 	}
 

@@ -50,6 +50,25 @@ type Config struct {
 	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: hostnames exempt from the public-IP check
 	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: IP ranges treated as reachable
 	FetchACL          *fetchACL // compiled form; nil until main() validates the two lists
+
+	// ExtractLinks controls whether hyperlink targets from fetched HTML
+	// reach the model. EXTRACT_LINKS=false restores the previous behaviour
+	// (anchor text only, targets dropped) for deployments that would rather
+	// not put page-controlled URLs in front of an agent at all. Affects HTML
+	// only: Office documents carry their own links through the office_oxide
+	// converter regardless of this switch.
+	ExtractLinks bool // EXTRACT_LINKS: default true
+
+	// PruneSelector is a CSS selector whose matches are removed from the
+	// document BEFORE trafilatura chooses which subtree is the article.
+	// Without it, sites that wrap boilerplate in a container the extractor
+	// finds attractive can have that container selected instead of the
+	// article — silently, with no error and plausible-looking text. See the
+	// README for the default and how it was derived.
+	//
+	// PRUNE_SELECTOR overrides it; setting it to the empty string disables
+	// pruning entirely (unset and empty are distinguished via os.LookupEnv).
+	PruneSelector string // PRUNE_SELECTOR
 }
 
 func configFromEnv() Config {
@@ -102,6 +121,27 @@ func configFromEnv() Config {
 	// it lets pagination reach deeper into very large PDFs.
 	c.MaxExtractedChars = parseInt(os.Getenv("MAX_EXTRACTED_CHARS"), 1_000_000)
 	c.Stateless = parseBool(os.Getenv("MCP_STATELESS"))
+	// Link extraction — on by default.  Setting EXTRACT_LINKS=false
+	// restores the historical behaviour of dropping hyperlink targets
+	// entirely, which is the right call for deployments that treat any
+	// page-supplied URL as something an agent should never see.  Note
+	// that turning this on also enables trafilatura's own relative →
+	// absolute href rewriting, which is gated behind the same option.
+	c.ExtractLinks = parseBoolDefault(os.Getenv("EXTRACT_LINKS"), true)
+	// Pre-extraction pruning.  The default targets "related"-flavoured
+	// containers, which is where news templates habitually park
+	// most-popular / you-might-also-like blocks.  It was chosen by
+	// measurement rather than taste: on a Register article the extractor
+	// selected the most-popular sidebar instead of the story (the h1 never
+	// appeared in the output), and this is the narrowest selector that
+	// corrected it while leaving a heise article byte-identical.
+	//
+	// Two clauses that look equally sensible are deliberately absent:
+	// "header" and "footer" match <article><header><h1>…, which is
+	// ordinary HTML5, and pruning them decapitates articles on sites that
+	// use them (observed on heise).  Do not add them back without
+	// re-running the h1-survival check across several templates.
+	c.PruneSelector = lookupString("PRUNE_SELECTOR", `[class*="related"], [id*="related"]`)
 	// Stateful-mode janitor tuning.  Two knobs, two reasons:
 	//
 	//   - SessionMaxAge is policy: how long a session is allowed to live
@@ -166,6 +206,35 @@ func parseBool(s string) bool {
 		return true
 	}
 	return false
+}
+
+// lookupString reads an environment variable, distinguishing "unset" from
+// "set to empty".  Unset yields defaultVal; explicitly empty yields empty.
+// That distinction matters for settings whose default is non-empty and
+// whose disabled state is empty — without it there would be no way to turn
+// the setting off from the environment.
+func lookupString(key, defaultVal string) string {
+	if v, ok := os.LookupEnv(key); ok {
+		return v
+	}
+	return defaultVal
+}
+
+// parseBoolDefault is parseBool with an explicit default for the unset
+// case.  Needed for flags that default to true, where parseBool's "empty
+// means false" rule would invert the intent.  Both spellings are accepted
+// explicitly so an operator can pin either state in config management
+// rather than relying on absence; anything unrecognised falls back to
+// defaultVal, matching the "garbage means default" pattern used by the
+// other parse helpers in this file.
+func parseBoolDefault(s string, defaultVal bool) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return defaultVal
 }
 
 // parseGoDuration reads a Go time.Duration string ("30m", "12h", "168h").
