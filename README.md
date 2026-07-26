@@ -93,7 +93,7 @@ docker run -d \
   -e MCP_PORT=8080 \
   -e MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
   -p 8080:8080 \
-  ghcr.io/your-org/mcp-searxng-relay:latest
+  ghcr.io/littleoffice/mcp-searxng-relay:latest
 ```
 
 ### Docker Compose
@@ -101,7 +101,7 @@ docker run -d \
 ```yaml
 services:
   mcp-searxng:
-    image: ghcr.io/your-org/mcp-searxng-relay:latest
+    image: ghcr.io/littleoffice/mcp-searxng-relay:latest
     restart: unless-stopped
     environment:
       SEARXNG_URL: https://your-searxng-instance.example.com
@@ -148,7 +148,7 @@ Note that Docker and Podman use slightly different on-disk manifest encodings, s
 
 ### Kubernetes
 
-Ready-to-apply manifests are included in the repository root: [`deployment.yaml`](deployment.yaml) with a locked-down `securityContext`, [`service.yaml`](service.yaml), [`kustomization.yaml`](kustomization.yaml), and [`secret_example.yaml`](secret_example.yaml) as a template for `MCP_AUTH_TOKEN_FILE`. Apply with `kubectl apply -k .` after creating a real Secret out-of-band from `secret_example.yaml` — copy it to `secret.yaml`, fill in tokens generated with `openssl rand -hex 32`, and apply that file once before the `kubectl apply -k .` (it is deliberately not listed in `kustomization.yaml` so a re-apply cannot roll a real Secret back to the placeholder values). The `Deployment` defaults to a single replica in stateful mode for audit-friendly behaviour; switch to stateless multi-replica by setting `MCP_STATELESS=true` and scaling `replicas`. For integration with external secret stores (External Secrets Operator, Sealed Secrets, CSI Secrets Store), replace the Secret with the appropriate resource in your own overlay.
+Ready-to-apply manifests are included in the repository root: [`deployment.yaml`](deployment.yaml) with a locked-down `securityContext`, [`service.yaml`](deploy/kubernetes/service.yaml), [`kustomization.yaml`](deploy/kubernetes/kustomization.yaml), and [`secret_example.yaml`](deploy/kubernetes/secret_example.yaml) as a template for `MCP_AUTH_TOKEN_FILE`. Apply with `kubectl apply -k .` after creating a real Secret out-of-band from `secret_example.yaml` — copy it to `secret.yaml`, fill in tokens generated with `openssl rand -hex 32`, and apply that file once before the `kubectl apply -k .` (it is deliberately not listed in `kustomization.yaml` so a re-apply cannot roll a real Secret back to the placeholder values). The `Deployment` defaults to a single replica in stateful mode for audit-friendly behaviour; switch to stateless multi-replica by setting `MCP_STATELESS=true` and scaling `replicas`. For integration with external secret stores (External Secrets Operator, Sealed Secrets, CSI Secrets Store), replace the Secret with the appropriate resource in your own overlay.
 
 ---
 
@@ -549,7 +549,7 @@ The server's stdlib `http.Server` is configured with three deliberate values:
 When fronting the server with a reverse proxy (recommended for any non-local deployment — see [Security notes](#security-notes)), the proxy's own timeouts must accommodate streaming responses:
 
 - **nginx.** Set `proxy_read_timeout` and `proxy_send_timeout` to at least the longest tool-call wall time you expect — a reasoning agent over a large PDF or Office document can take 30+ seconds. Disable `proxy_buffering` for the MCP route so SSE chunks reach the client immediately.
-- **Caddy.** The bundled [`Caddyfile`](Caddyfile) sets `flush_interval -1` on the MCP reverse_proxy directive, which is what disables Caddy's response buffering for streaming.
+- **Caddy.** The bundled [`Caddyfile`](deploy/podman/Caddyfile) sets `flush_interval -1` on the MCP reverse_proxy directive, which is what disables Caddy's response buffering for streaming.
 - **Traefik.** Use the `forwardingTimeouts.responseHeaderTimeout` field and ensure the entrypoint is not configured with an aggressive idle timeout.
 
 If you see tool calls failing with truncated SSE streams in a reverse-proxy deployment, the proxy's read/write timeout is almost always the cause, not the relay's.
