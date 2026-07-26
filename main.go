@@ -67,6 +67,15 @@ func main() {
 		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+	// Install the egress proxy (FETCH_PROXY / FETCH_PROXY_ALL). Same
+	// fail-loud stance: a malformed proxy URL, an unsupported scheme, or a
+	// scope set with no proxy to route through stops the server. Degrading
+	// silently to "no proxy" would be worse than not starting — in a network
+	// with no direct egress every fetch would hang until its timeout.
+	if err := acl.setProxy(cfg.FetchProxy, cfg.FetchProxyAll); err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
 	cfg.FetchACL = acl
 
 	// Validate the pre-extraction prune selector.  go-trafilatura parses it
@@ -91,6 +100,22 @@ func main() {
 			"allowed_hosts", cfg.FetchAllowedHosts,
 			"allowed_cidrs", cfg.FetchAllowedCIDRs,
 			"hint", "the fetch tool can now reach these internal hosts/ranges; keep the lists tight")
+	}
+
+	// A proxy scoped to allow-listed hosts changes reach but not enforcement,
+	// so it logs at info. FETCH_PROXY_ALL hands the per-IP policy to the
+	// proxy outright and gets the same warn-level treatment as a widened
+	// allow-list: an operator reading the logs should never have to infer
+	// that assertPublicIP has stopped participating.
+	if acl.proxyConfigured() {
+		if cfg.FetchProxyAll {
+			slog.Warn("fetch egress proxy applies to ALL fetches",
+				"proxy", acl.describeProxy(),
+				"hint", "the relay no longer resolves destinations itself, so the public-IP check and FETCH_ALLOWED_CIDRS no longer apply; the proxy is now the enforcement point")
+		} else {
+			slog.Info("fetch egress proxy configured for allow-listed hosts",
+				"proxy", acl.describeProxy())
+		}
 	}
 
 	// Warn (don't fail) if basic-auth credentials would travel in plaintext.
@@ -356,6 +381,12 @@ func logConfig(server *Server, mode, port string) {
 		if len(cfg.FetchAllowedCIDRs) > 0 {
 			rows = append(rows, row("allowed cidrs", strings.Join(cfg.FetchAllowedCIDRs, ", ")))
 		}
+	}
+	// Egress proxy. Shown only when configured, so the banner of an
+	// unproxied deployment is unchanged. describeProxy redacts any password
+	// in the proxy URL's userinfo and names the scope explicitly.
+	if cfg.FetchACL != nil && cfg.FetchACL.proxyConfigured() {
+		rows = append(rows, row("fetch proxy", cfg.FetchACL.describeProxy()))
 	}
 	rows = append(rows,
 		// Token count and identity count: tokens >= identities, because an
