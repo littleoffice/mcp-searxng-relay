@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -70,6 +71,18 @@ import (
 type fetchACL struct {
 	allowedHosts map[string]struct{} // lower-cased, trailing-dot-stripped exact matches
 	allowedCIDRs []*net.IPNet
+
+	// Egress proxy for the fetch tool (FETCH_PROXY / FETCH_PROXY_ALL).
+	// nil proxyURL means no proxy — the historical behaviour, in which
+	// every fetch is dialled directly by safeDialContext.  See the
+	// "Egress proxy" section below for the security rationale.
+	proxyURL *url.URL
+	// proxyAuthority is the canonical "host:port" of proxyURL with the
+	// scheme's default port filled in, lower-cased.  It is compared
+	// against the addr safeDialContext receives (which always carries an
+	// explicit port) to recognise a dial that is heading for the proxy.
+	proxyAuthority string
+	proxyAll       bool
 }
 
 // newFetchACL compiles the operator-supplied host and CIDR allow-lists.
@@ -149,6 +162,147 @@ func (a *fetchACL) assertReachable(ip net.IP) error {
 	return assertPublicIP(ip)
 }
 
+// ── Egress proxy (opt-in) ────────────────────────────────────────────────────
+//
+// Some networks give the relay no direct route outward, or no route to a
+// particular internal segment; the only way out is an HTTP/SOCKS forward
+// proxy.  Two env vars opt in, both empty/false by default so the historical
+// behaviour is byte-for-byte unchanged:
+//
+//   - FETCH_PROXY: the proxy URL.  On its own it applies *only* to hosts on
+//     FETCH_ALLOWED_HOSTS.  This costs nothing in enforcement, because
+//     safeDialContext already skips every per-IP check for allow-listed
+//     hosts (see the hostAllowed branch below) — the operator has already
+//     declared those names trusted.  Every other fetch continues to be
+//     dialled directly with the full public-IP policy applied.
+//
+//   - FETCH_PROXY_ALL: route *every* fetch through the proxy.  This is for
+//     networks with no direct egress at all, where the alternative is not
+//     "stricter" but "nothing works".  It is a genuine delegation and must
+//     be understood as one: once the proxy performs the connection it also
+//     performs the DNS resolution, so the relay never learns the
+//     destination IP and assertPublicIP / allowedCIDRs stop participating
+//     entirely.  The egress proxy becomes the enforcement point.  main()
+//     emits a warn-level audit line and the startup banner says so.
+//
+// Deliberately NOT read from HTTP_PROXY / HTTPS_PROXY.  Those are ambient —
+// set by base images, CI, and cluster admission controllers for unrelated
+// reasons — and honouring them here would let a variable nobody set for this
+// purpose silently change a security control.  They also carry the opposite
+// default (proxy everything except NO_PROXY) to this subsystem's default-deny
+// stance.  searchTransport still honours them, because its single destination
+// is operator-controlled and carries no SSRF exposure.
+
+// proxyDefaultPort returns the port a scheme implies when the proxy URL
+// omits one, so proxyAuthority can be compared against the always-explicit
+// addr that http.Transport hands to DialContext.
+func proxyDefaultPort(scheme string) string {
+	switch scheme {
+	case "https":
+		return "443"
+	case "socks5", "socks5h":
+		return "1080"
+	default:
+		return "80"
+	}
+}
+
+// setProxy validates and installs the operator's proxy configuration.
+// Every failure mode returns an error so startup aborts loudly, matching
+// newFetchACL's stance: a typo in a security-relevant control should stop
+// the server rather than quietly change its reach.
+func (a *fetchACL) setProxy(raw string, all bool) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		if all {
+			return fmt.Errorf("FETCH_PROXY_ALL is set but FETCH_PROXY is empty: there is no proxy to route through")
+		}
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("FETCH_PROXY: invalid URL %q: %w", raw, err)
+	}
+	switch u.Scheme {
+	case "http", "https", "socks5", "socks5h":
+	default:
+		return fmt.Errorf("FETCH_PROXY: unsupported scheme %q (want http, https, socks5 or socks5h)", u.Scheme)
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("FETCH_PROXY: URL %q has no host", raw)
+	}
+	port := u.Port()
+	if port == "" {
+		port = proxyDefaultPort(u.Scheme)
+	}
+	a.proxyURL = u
+	a.proxyAuthority = net.JoinHostPort(normaliseHost(u.Hostname()), port)
+	a.proxyAll = all
+	return nil
+}
+
+// proxyConfigured reports whether an egress proxy is in use.
+func (a *fetchACL) proxyConfigured() bool { return a.proxyURL != nil }
+
+// describeProxy renders the proxy setting for the startup banner, with any
+// userinfo password redacted by url.URL.Redacted.
+func (a *fetchACL) describeProxy() string {
+	if a.proxyURL == nil {
+		return "disabled"
+	}
+	scope := "allow-listed hosts only"
+	if a.proxyAll {
+		scope = "ALL fetches — per-IP SSRF checks delegated to the proxy"
+	}
+	return a.proxyURL.Redacted() + " (" + scope + ")"
+}
+
+// isProxyAuthority reports whether host:port names the configured proxy.
+func (a *fetchACL) isProxyAuthority(host, port string) bool {
+	if a.proxyAuthority == "" {
+		return false
+	}
+	return net.JoinHostPort(normaliseHost(host), port) == a.proxyAuthority
+}
+
+// requestAuthority returns the canonical "host:port" a request URL targets,
+// filling in the scheme default when the URL omits the port.
+func requestAuthority(u *url.URL) string {
+	port := u.Port()
+	if port == "" {
+		if u.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return net.JoinHostPort(normaliseHost(u.Hostname()), port)
+}
+
+// proxyFor is used as http.Transport.Proxy for the fetchClient.  Returning
+// (nil, nil) means "dial this one directly", which leaves safeDialContext's
+// per-IP policy fully in force — so the default path is unchanged whenever
+// no proxy is configured.
+//
+// Returning an error fails the request. The one case that does so is a
+// caller asking to fetch the proxy itself: without that guard the dial-time
+// exemption below (which exists so the proxy is reachable even when it lives
+// on a private address) would double as a way for an authenticated caller to
+// reach the proxy's own listener directly, and an open forward proxy reached
+// that way is equivalent to FETCH_PROXY_ALL for whoever found it.
+func (a *fetchACL) proxyFor(req *http.Request) (*url.URL, error) {
+	if a.proxyURL == nil {
+		return nil, nil
+	}
+	if a.proxyAuthority == requestAuthority(req.URL) {
+		return nil, fmt.Errorf("refusing to fetch the configured egress proxy")
+	}
+	if a.proxyAll || a.hostAllowed(req.URL.Hostname()) {
+		return a.proxyURL, nil
+	}
+	return nil, nil
+}
+
 // safeDialContext is used as http.Transport.DialContext for the fetchClient.
 // It resolves the hostname itself and rejects any address that is not a
 // globally routable unicast IP — see assertPublicIP for the full block list
@@ -161,6 +315,21 @@ func (a *fetchACL) safeDialContext(ctx context.Context, network, addr string) (n
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid address %q: %w", addr, err)
+	}
+
+	// When Transport.Proxy selects a proxy, Go calls this dialer with the
+	// *proxy's* address rather than the target's.  Naming a proxy in
+	// FETCH_PROXY is itself the operator's statement that the address is
+	// safe to reach, so requiring them to also list it in
+	// FETCH_ALLOWED_CIDRS would be redundant friction — and in practice
+	// invites the far worse workaround of allow-listing 10.0.0.0/8 wholesale.
+	// proxyFor refuses target URLs that name the proxy, so this exemption
+	// cannot be reached by a caller-supplied URL.  Dial addr as given, using
+	// the stdlib's own address traversal.
+	if a.isProxyAuthority(host, port) {
+		slog.Debug("SSRF: dialing configured egress proxy", "authority", a.proxyAuthority)
+		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		return dialer.DialContext(ctx, network, addr)
 	}
 
 	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
@@ -205,6 +374,16 @@ func (a *fetchACL) safeCheckRedirect(req *http.Request, via []*http.Request) err
 	// while every other host is re-validated per resolved IP so an open
 	// redirect on a public host still cannot pivot to a blocked internal one.
 	if a.hostAllowed(host) {
+		return nil
+	}
+	// Under FETCH_PROXY_ALL the proxy performs the connection and therefore
+	// the DNS resolution; an IP we resolve here constrains nothing it will
+	// do.  Worse, such networks frequently give the relay no working
+	// resolver at all, so this lookup would fail and block legitimate
+	// redirects.  Enforcement for redirect targets belongs to the proxy,
+	// consistent with the rest of the FETCH_PROXY_ALL delegation.  The hop
+	// limit above still applies.
+	if a.proxyAll {
 		return nil
 	}
 	addrs, err := net.DefaultResolver.LookupIPAddr(req.Context(), host)

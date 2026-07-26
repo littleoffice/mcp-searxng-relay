@@ -79,17 +79,22 @@ func NewServer(cfg Config) *Server {
 	// private-IP check happens at TCP-dial time, closing the DNS-rebinding
 	// window.  CheckRedirect re-validates each hop for the same reason.
 	//
-	// Proxy is intentionally NOT set to http.ProxyFromEnvironment here, in
-	// contrast to searchTransport.  Reasoning: when a proxy is configured,
-	// Go's http.Transport calls DialContext with the *proxy's* address rather
-	// than the target host.  safeDialContext would then validate the proxy
+	// Proxy is acl.proxyFor, NOT http.ProxyFromEnvironment as on
+	// searchTransport.  Reasoning: when a proxy is configured, Go's
+	// http.Transport calls DialContext with the *proxy's* address rather than
+	// the target host.  safeDialContext would then validate the proxy
 	// (typically a public address — passes) and the proxy itself would route
-	// to wherever it pleases, including internal/loopback addresses.  That
-	// silently defeats the SSRF protection this transport exists to provide.
-	// If proxying becomes necessary for outbound fetches, the right answer is
-	// to validate destination IPs in a way that survives indirection (e.g.
-	// allow-list the proxy and require destinations through it match the same
-	// policy), not to re-enable ProxyFromEnvironment here.
+	// to wherever it pleases, including internal/loopback addresses.  Reading
+	// the ambient HTTP_PROXY/HTTPS_PROXY here would therefore let a variable
+	// set for some unrelated reason silently defeat the SSRF protection this
+	// transport exists to provide.
+	//
+	// proxyFor instead applies the operator's explicit FETCH_PROXY only where
+	// they have already accepted the trade-off — allow-listed hosts, which
+	// skip the per-IP check regardless — or, under the separate and
+	// deliberately louder FETCH_PROXY_ALL, everywhere, for networks that have
+	// no direct egress and where the honest description is that enforcement
+	// has moved to the proxy.  See the "Egress proxy" section in ssrf.go.
 	// The fetch ACL widens the default public-only SSRF policy with any
 	// operator-configured allowed hosts/CIDRs. It is compiled and validated
 	// in main(); a Server built directly in tests may leave it nil, in which
@@ -100,7 +105,7 @@ func NewServer(cfg Config) *Server {
 	}
 
 	fetchTransport := &http.Transport{
-		Proxy:               nil,
+		Proxy:               acl.proxyFor,
 		DialContext:         acl.safeDialContext,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}

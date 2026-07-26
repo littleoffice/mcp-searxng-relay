@@ -51,6 +51,12 @@ type Config struct {
 	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: IP ranges treated as reachable
 	FetchACL          *fetchACL // compiled form; nil until main() validates the two lists
 
+	// Egress proxy for the fetch tool. Deliberately separate from the
+	// ambient HTTP_PROXY/HTTPS_PROXY that searchTransport honours — see the
+	// "Egress proxy" section in ssrf.go for why. Empty/false by default.
+	FetchProxy    string // FETCH_PROXY: proxy URL (http, https, socks5, socks5h)
+	FetchProxyAll bool   // FETCH_PROXY_ALL: route every fetch through it, not just allow-listed hosts
+
 	// ExtractLinks controls whether hyperlink targets from fetched HTML
 	// reach the model. EXTRACT_LINKS=false restores the previous behaviour
 	// (anchor text only, targets dropped) for deployments that would rather
@@ -193,6 +199,11 @@ func configFromEnv() Config {
 	// dropped. Empty (the default) leaves the strict public-only policy.
 	c.FetchAllowedHosts = parseCSV(os.Getenv("FETCH_ALLOWED_HOSTS"))
 	c.FetchAllowedCIDRs = parseCSV(os.Getenv("FETCH_ALLOWED_CIDRS"))
+	// Egress proxy — validated in main() via fetchACL.setProxy so a bad URL
+	// or a scope set without a proxy fails startup rather than degrading to
+	// "no proxy" and timing out on every fetch.
+	c.FetchProxy = strings.TrimSpace(os.Getenv("FETCH_PROXY"))
+	c.FetchProxyAll = parseBool(os.Getenv("FETCH_PROXY_ALL"))
 	return c
 }
 
