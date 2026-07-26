@@ -60,7 +60,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging
 - **Per-caller rate limiting** — token-bucket throttle keyed by identity when authenticated and by source IP otherwise. Configurable RPS and burst, default 5 rps / burst 10. Exposed at `mcp_rate_limit_rejections_total`.
 - **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients.
-- **Reproducible container builds** — bit-for-bit. Given the same source commit and `SOURCE_DATE_EPOCH`, the build produces a byte-identical image, verifiable via `docker save <image> | sha256sum`. Toolchain pinned by digest, `go.sum` frozen, no embedded paths, VCS state, or build IDs. Details in [`docs/supply-chain.md`](docs/supply-chain.md).
+- **Reproducible container builds** — bit-for-bit. Given the same source commit and `SOURCE_DATE_EPOCH`, the build produces a byte-identical image, verifiable via `docker save <image> | sha256sum`. Toolchain pinned by digest, `go.sum` frozen, no embedded paths, VCS state, or build IDs. Details in [`supply-chain.md`](docs/supply-chain.md).
 - **Structured startup banner** with all configuration values printed to stderr on start (secrets redacted)
 
 ---
@@ -142,7 +142,7 @@ podman build \
 
 The multi-stage build compiles the binary on a digest-pinned `golang:1.26.3-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
 
-**Reproducibility.** Given the same source commit and `SOURCE_DATE_EPOCH` (canonically the commit's own timestamp), either invocation produces a byte-identical image — verifiable via `docker save <image> | sha256sum` or `podman save <image> | sha256sum`. The toolchain is pinned by content digest, the module graph is frozen by `go.sum`, and the build sets `-trimpath`, `-buildvcs=false`, `-buildid=`, and `-Wl,--build-id=none` so neither paths, VCS state, nor link-time build IDs leak into the binary. BuildKit's `rewrite-timestamp` and Podman's `--timestamp` both pin all layer file timestamps to the same value so the image envelope is reproducible, not just the binary inside. See [`docs/supply-chain.md`](docs/supply-chain.md) for the full provenance statement and verification steps.
+**Reproducibility.** Given the same source commit and `SOURCE_DATE_EPOCH` (canonically the commit's own timestamp), either invocation produces a byte-identical image — verifiable via `docker save <image> | sha256sum` or `podman save <image> | sha256sum`. The toolchain is pinned by content digest, the module graph is frozen by `go.sum`, and the build sets `-trimpath`, `-buildvcs=false`, `-buildid=`, and `-Wl,--build-id=none` so neither paths, VCS state, nor link-time build IDs leak into the binary. BuildKit's `rewrite-timestamp` and Podman's `--timestamp` both pin all layer file timestamps to the same value so the image envelope is reproducible, not just the binary inside. See [`supply-chain.md`](docs/supply-chain.md) for the full provenance statement and verification steps.
 
 Note that Docker and Podman use slightly different on-disk manifest encodings, so images built with one and saved through the other will not have matching SHA-256s even when functionally identical. Pick a build tool and stick with it for cross-machine reproducibility checks.
 
@@ -469,7 +469,7 @@ Two notes:
 
 **PDF and Office safety.** PDF extraction uses `pdf_oxide` and Office extraction (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) uses `office_oxide`, both of which are Rust cores that guarantee zero panics and zero timeouts across all inputs. A malformed or adversarially crafted document will return an error, not crash the server process.
 
-**Reporting and provenance.** Security issues should be reported privately — see [`docs/SECURITY.md`](docs/SECURITY.md) for the disclosure process and scope. The codebase is primarily AI-generated and reviewed, built, and tested by a single human maintainer before release; [`docs/supply-chain.md`](docs/supply-chain.md) is the full dependency, build-provenance, and development-process statement, written for reviewers evaluating the project for a controlled environment.
+**Reporting and provenance.** Security issues should be reported privately — see [`SECURITY.md`](docs/SECURITY.md) for the disclosure process and scope. The codebase is primarily AI-generated and reviewed, built, and tested by a single human maintainer before release; [`supply-chain.md`](docs/supply-chain.md) is the full dependency, build-provenance, and development-process statement, written for reviewers evaluating the project for a controlled environment.
 
 ---
 
