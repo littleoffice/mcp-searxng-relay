@@ -3,7 +3,7 @@ module mcp-searxng-relay
 go 1.26.5
 
 require (
-	github.com/andybalholm/cascadia v1.3.2
+	github.com/andybalholm/cascadia v1.3.4
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/markusmobius/go-trafilatura v1.12.2
 	github.com/modelcontextprotocol/go-sdk v1.6.1
