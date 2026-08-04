@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -54,6 +53,13 @@ func (s *Server) toolReadURL(
 	req *mcp.CallToolRequest,
 	in fetchInput,
 ) (*mcp.CallToolResult, any, error) {
+	// Bind the session ID into the context once, so the shared readURL
+	// pipeline below inherits full caller attribution without taking the
+	// request.  Both URL tools do this; readURL itself never sees a
+	// CallToolRequest.
+	ctx = withSessionID(ctx, sessionIDOf(req))
+	lg := callerLogger(ctx)
+
 	if in.URL == "" {
 		return nil, nil, fmt.Errorf("url argument is required")
 	}
@@ -63,10 +69,8 @@ func (s *Server) toolReadURL(
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
 		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
-		slog.Error("fetch failed",
-			"url", in.URL, "error", err,
-			"identity", identityFromContext(ctx),
-			"session_id", sessionIDOf(req))
+		lg.Error("fetch failed",
+			"url", in.URL, "error", err)
 		return nil, nil, err
 	}
 	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
@@ -77,10 +81,8 @@ func (s *Server) toolReadURL(
 		// Image responses are NOT fence-wrapped: the wrapper is a text-level
 		// trust boundary, and binary image data has no equivalent injection
 		// risk. Vision-model interpretation is out of scope for prompt fencing.
-		slog.Info("fetch completed",
-			"url", in.URL, "kind", "image",
-			"identity", identityFromContext(ctx),
-			"session_id", sessionIDOf(req))
+		lg.Info("fetch completed",
+			"url", in.URL, "kind", "image")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.ImageContent{
 				Data:     result.imageData,
@@ -103,12 +105,10 @@ func (s *Server) toolReadURL(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
-	slog.Info("fetch completed",
+	lg.Info("fetch completed",
 		"url", in.URL, "kind", "text",
 		"start_index", start, "end_index", end,
-		"total_chars", len(result.text),
-		"identity", identityFromContext(ctx),
-		"session_id", sessionIDOf(req))
+		"total_chars", len(result.text))
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fenced}},
 	}, nil, nil
@@ -221,6 +221,9 @@ func (s *Server) toolURLMetadata(
 	req *mcp.CallToolRequest,
 	in urlMetadataInput,
 ) (*mcp.CallToolResult, any, error) {
+	ctx = withSessionID(ctx, sessionIDOf(req))
+	lg := callerLogger(ctx)
+
 	if in.URL == "" {
 		return nil, nil, fmt.Errorf("url argument is required")
 	}
@@ -230,10 +233,8 @@ func (s *Server) toolURLMetadata(
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
 		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
-		slog.Error("metadata fetch failed",
-			"url", in.URL, "error", err,
-			"identity", identityFromContext(ctx),
-			"session_id", sessionIDOf(req))
+		lg.Error("metadata fetch failed",
+			"url", in.URL, "error", err)
 		return nil, nil, err
 	}
 	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
@@ -255,12 +256,10 @@ func (s *Server) toolURLMetadata(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
-	slog.Info("metadata fetch completed",
+	lg.Info("metadata fetch completed",
 		"url", in.URL,
 		"has_title", payload.Title != "",
-		"has_date", payload.Date != nil,
-		"identity", identityFromContext(ctx),
-		"session_id", sessionIDOf(req))
+		"has_date", payload.Date != nil)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fenced}},
 	}, nil, nil
@@ -282,10 +281,12 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// The cache stores text + metadata together so that the read-url and
 	// url-metadata tools share a single upstream fetch.  Image fetches
 	// always bypass the text cache.
+	lg := callerLogger(ctx)
+
 	if !forceRefresh {
 		if entry, ok := s.cache.Get(targetURL); ok {
 			if time.Now().Before(entry.expiresAt) {
-				slog.Debug("cache hit", "url", targetURL)
+				lg.Debug("cache hit", "url", targetURL)
 				s.metrics.CacheHits.Add(1)
 				return urlFetchResult{text: entry.content, metadata: entry.metadata, truncated: entry.truncated}, nil
 			}
@@ -293,12 +294,12 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		}
 		s.metrics.CacheMisses.Add(1)
 	} else {
-		slog.Debug("force refresh, bypassing cache", "url", targetURL)
+		lg.Debug("force refresh, bypassing cache", "url", targetURL)
 		s.cache.Remove(targetURL)
 		s.metrics.CacheForceRefresh.Add(1)
 		s.metrics.CacheMisses.Add(1)
 	}
-	slog.Debug("cache miss, fetching", "url", targetURL)
+	lg.Debug("cache miss, fetching", "url", targetURL)
 
 	// Validate scheme before doing anything.
 	parsedURL, err := url.Parse(targetURL)
@@ -369,7 +370,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	if isImage(contentType, targetURL) {
 		mimeType := imageMIMEType(contentType, targetURL)
 		s.metrics.FetchImage.Add(1)
-		slog.Info("image fetched", "url", targetURL,
+		lg.Info("image fetched", "url", targetURL,
 			"mime_type", mimeType,
 			"bytes", len(body))
 		return urlFetchResult{
@@ -433,7 +434,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		if extractErr != nil {
 			// Extraction failure is non-fatal: log and proceed with what
 			// we have.  The metadata at minimum carries the URL.
-			slog.Debug("html extraction failed",
+			lg.Debug("html extraction failed",
 				"url", targetURL, "error", extractErr)
 		}
 		// A nil linkBase switches off link annotation in the renderer.
@@ -448,7 +449,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		metadata = extractedMeta
 	}
 
-	slog.Info("url fetched", "url", targetURL,
+	lg.Info("url fetched", "url", targetURL,
 		"content_type", contentType,
 		"bytes_raw", len(body),
 		"chars_extracted", len(content),

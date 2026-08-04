@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -60,6 +59,11 @@ func (s *Server) toolSearch(
 	req *mcp.CallToolRequest,
 	in searchInput,
 ) (*mcp.CallToolResult, any, error) {
+	// Bind the session ID into the context once, so the search pipeline
+	// below inherits full caller attribution without taking the request.
+	ctx = withSessionID(ctx, sessionIDOf(req))
+	lg := callerLogger(ctx)
+
 	if in.Query == "" {
 		return nil, nil, fmt.Errorf("query argument is required")
 	}
@@ -103,10 +107,8 @@ func (s *Server) toolSearch(
 	s.metrics.SearchDuration.Observe(time.Since(searchStart))
 	if err != nil {
 		s.metrics.SearchErrors.Add(1)
-		slog.Error("search failed",
-			"query", in.Query, "error", err,
-			"identity", identityFromContext(ctx),
-			"session_id", sessionIDOf(req))
+		lg.Error("search failed",
+			"query", in.Query, "error", err)
 		return nil, nil, err
 	}
 	s.metrics.SearchTotal.Add(1)
@@ -116,12 +118,10 @@ func (s *Server) toolSearch(
 		results = results[:numResults]
 	}
 
-	slog.Info("search completed",
+	lg.Info("search completed",
 		"query", in.Query, "page", pageno,
 		"results", len(results), "categories", in.Categories,
-		"engines", engines,
-		"identity", identityFromContext(ctx),
-		"session_id", sessionIDOf(req))
+		"engines", engines)
 
 	if len(results) == 0 {
 		return &mcp.CallToolResult{
@@ -194,7 +194,7 @@ func (s *Server) search(
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		slog.Warn("searxng returned non-200",
+		callerLogger(ctx).Warn("searxng returned non-200",
 			"status", resp.StatusCode,
 			"url", u.String(),
 			"hint", "ensure JSON format is enabled in settings.yml")

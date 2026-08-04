@@ -44,6 +44,46 @@ func identityFromContext(ctx context.Context) string {
 	return ""
 }
 
+// sessionCtxKey carries the MCP session ID the same way identityCtxKey
+// carries the identity.  Unlike identity, it is attached by the tool
+// handlers rather than by requireAuth: the SDK assigns session IDs, so the
+// value is not known until a CallToolRequest exists.
+type sessionCtxKey struct{}
+
+// withSessionID returns a child context carrying the MCP session ID.  Tool
+// handlers call this once at entry so that everything downstream of them —
+// the shared fetch pipeline in particular — can emit fully attributed log
+// lines without threading the request through every signature.
+func withSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionCtxKey{}, sessionID)
+}
+
+// sessionIDFromContext returns the session ID attached by a tool handler,
+// or "" when the context carries none (stdio mode, unit tests constructing
+// a request without a session, or a non-tool code path).
+func sessionIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(sessionCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// callerLogger returns the default logger pre-bound with the caller
+// attribution attrs — "identity" and "session_id".
+//
+// Every log line emitted while serving a tool call should come from this
+// logger rather than from slog directly.  Attribution is what makes the
+// audit log joinable: without it a line records that a URL was fetched but
+// not on whose behalf, which is exactly the question an incident review
+// asks.  Both fields degrade to "" rather than being omitted, so the key
+// set is stable across transports and log processors can rely on it.
+func callerLogger(ctx context.Context) *slog.Logger {
+	return slog.Default().With(
+		"identity", identityFromContext(ctx),
+		"session_id", sessionIDFromContext(ctx),
+	)
+}
+
 // ── HTTP wrappers ─────────────────────────────────────────────────────────────
 //
 // The MCP Streamable HTTP transport (POST/GET/DELETE on /, SSE responses,
