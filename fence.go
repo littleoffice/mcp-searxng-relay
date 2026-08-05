@@ -89,8 +89,9 @@ const (
 // form).
 const fenceXMLNamespace = "http://promptfence.org/security/1.0"
 
-// fenceFormatVersion is reported by the /fence/public-key endpoint so future
-// verifiers can negotiate compatibility.
+// fenceFormatVersion is emitted as the `version` attribute on every fence and
+// reported by /fence/public-key, so a verifier can negotiate compatibility
+// from either the wire format or the endpoint.
 const fenceFormatVersion = "1.0"
 
 // fenceMetadata holds the structured attributes of a fence segment.
@@ -100,6 +101,23 @@ type fenceMetadata struct {
 	Source    string // optional, may be empty
 	Timestamp time.Time
 	Nonce     string // hex-encoded, generated per fence
+
+	// KeyID names the key that signed the fence, as the same fingerprint
+	// reported by /fence/public-key.  A verifier holding several keys — which
+	// it must during a rotation, since fences signed by the outgoing key stay
+	// in the context window and keep arriving while the new key rolls out —
+	// uses it to select one key instead of trial-verifying against all of
+	// them.  Without it, "signed by a key I have since retired" and "forged"
+	// are indistinguishable: both present as "no key in my set verifies this".
+	//
+	// Always set by wrapFence.
+	KeyID string
+
+	// Version is the fence format version, so a verifier can branch on format
+	// rather than inferring it from which attributes happen to be present.
+	//
+	// Always set by wrapFence.
+	Version string
 }
 
 // canonicalAttributes returns the metadata serialised in alphabetical key
@@ -117,6 +135,21 @@ func (m fenceMetadata) canonicalAttributes() string {
 	}
 	if m.Source != "" {
 		pairs = append(pairs, attrPair("source", m.Source))
+	}
+	// kid and version are always populated by wrapFence, so in practice these
+	// are unconditional.  They are guarded like Source anyway so a
+	// directly-constructed fenceMetadata (tests, future callers) canonicalises
+	// to a clean string rather than to kid="" version="".
+	//
+	// Both are inside the canonical form, and therefore inside the signature:
+	// an attacker who could rewrite kid to name a key they control, or
+	// downgrade version to reach an older verification path, would otherwise
+	// have a free hand over exactly the fields a verifier routes on.
+	if m.KeyID != "" {
+		pairs = append(pairs, attrPair("kid", m.KeyID))
+	}
+	if m.Version != "" {
+		pairs = append(pairs, attrPair("version", m.Version))
 	}
 	sort.Strings(pairs)
 	return strings.Join(pairs, " ")
@@ -292,6 +325,10 @@ func (s *Server) wrapFence(content string, contentType FenceContentType, rating 
 		Source:    source,
 		Timestamp: time.Now(),
 		Nonce:     nonce,
+		// Same fingerprint /fence/public-key reports, so a verifier can key
+		// its trusted-key set directly on the value it reads off the fence.
+		KeyID:   fenceKeyFingerprint(s.fencePublicKey),
+		Version: fenceFormatVersion,
 	}
 	canonical := meta.canonicalAttributes()
 	// Signature is computed over the UNESCAPED content (paired with canonical

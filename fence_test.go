@@ -8,6 +8,110 @@ import (
 	"time"
 )
 
+// ── kid / version ─────────────────────────────────────────────────────────────
+
+// kid sorts before nonce and version sorts after type, so adding them must not
+// disturb the ordering of the attributes that were already there.
+func TestCanonicalAttributes_KeyIDAndVersionOrdering(t *testing.T) {
+	m := fenceMetadata{
+		Type:      FenceTypeContent,
+		Rating:    FenceUntrusted,
+		Source:    "https://example.com",
+		Timestamp: time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC),
+		Nonce:     "abc123",
+		KeyID:     "3f9a1c7e2b4d8056",
+		Version:   "1.0",
+	}
+	got := m.canonicalAttributes()
+	want := `kid="3f9a1c7e2b4d8056" nonce="abc123" rating="untrusted" ` +
+		`source="https://example.com" timestamp="2026-05-09T14:30:00Z" ` +
+		`type="content" version="1.0"`
+	if got != want {
+		t.Errorf("canonical mismatch\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// A directly-constructed fenceMetadata that leaves them unset must not emit
+// kid="" version="" — the guard mirrors how Source is handled.
+func TestCanonicalAttributes_OmitsEmptyKeyIDAndVersion(t *testing.T) {
+	m := fenceMetadata{
+		Type:      FenceTypeContent,
+		Rating:    FenceUntrusted,
+		Timestamp: time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC),
+		Nonce:     "abc123",
+	}
+	got := m.canonicalAttributes()
+	for _, attr := range []string{"kid=", "version="} {
+		if strings.Contains(got, attr) {
+			t.Errorf("expected no %s attribute when unset, got %q", attr, got)
+		}
+	}
+}
+
+// Production fences must always carry both, since a verifier routes on them.
+func TestWrapFence_AlwaysEmitsKeyIDAndVersion(t *testing.T) {
+	s := newTestFenceServer(t)
+	out, err := s.wrapFence("body", FenceTypeContent, FenceUntrusted, "https://example.com")
+	if err != nil {
+		t.Fatalf("wrapFence: %v", err)
+	}
+	tag := extractOpeningTag(t, out)
+
+	if got := mustExtractAttr(t, tag, "version"); got != fenceFormatVersion {
+		t.Errorf("version = %q, want %q", got, fenceFormatVersion)
+	}
+	// kid must equal the fingerprint /fence/public-key reports, or a verifier
+	// keying its trusted set on that endpoint will never match a fence.
+	want := fenceKeyFingerprint(s.fencePublicKey)
+	if got := mustExtractAttr(t, tag, "kid"); got != want {
+		t.Errorf("kid = %q, want the public-key fingerprint %q", got, want)
+	}
+}
+
+// Both attributes are inside the signature. Rewriting kid to name an
+// attacker-controlled key, or downgrading version to reach an older
+// verification path, must invalidate the fence.
+func TestFenceSignature_CoversKeyIDAndVersion(t *testing.T) {
+	base := fenceMetadata{
+		Type:      FenceTypeContent,
+		Rating:    FenceUntrusted,
+		Timestamp: time.Date(2026, 5, 9, 14, 30, 0, 0, time.UTC),
+		Nonce:     "abc123",
+		KeyID:     "3f9a1c7e2b4d8056",
+		Version:   "1.0",
+	}
+	_, priv := generateFenceKeypair()
+	const content = "untrusted body"
+
+	sig, err := computeFenceSignature(priv, content, base.canonicalAttributes())
+	if err != nil {
+		t.Fatalf("signing: %v", err)
+	}
+
+	tampered := []struct {
+		name string
+		mut  func(*fenceMetadata)
+	}{
+		{"kid swapped", func(m *fenceMetadata) { m.KeyID = "0000000000000000" }},
+		{"version downgraded", func(m *fenceMetadata) { m.Version = "0.9" }},
+		{"kid stripped", func(m *fenceMetadata) { m.KeyID = "" }},
+		{"version stripped", func(m *fenceMetadata) { m.Version = "" }},
+	}
+	for _, tc := range tampered {
+		t.Run(tc.name, func(t *testing.T) {
+			m := base
+			tc.mut(&m)
+			after, err := computeFenceSignature(priv, content, m.canonicalAttributes())
+			if err != nil {
+				t.Fatalf("signing: %v", err)
+			}
+			if after == sig {
+				t.Error("signature unchanged, so the field is not covered by it")
+			}
+		})
+	}
+}
+
 // ── canonicalAttributes ───────────────────────────────────────────────────────
 
 func TestCanonicalAttributes_AlphabeticalOrder(t *testing.T) {
@@ -515,7 +619,7 @@ func mustExtractAttr(t *testing.T, tag, key string) string {
 func reconstructCanonical(openTag string) string {
 	// keys is already in alphabetical order; the optional `source` slots
 	// between `rating` and `timestamp`.
-	keys := []string{"nonce", "rating", "source", "timestamp", "type"}
+	keys := []string{"kid", "nonce", "rating", "source", "timestamp", "type", "version"}
 	var pairs []string
 	for _, k := range keys {
 		prefix := k + `="`

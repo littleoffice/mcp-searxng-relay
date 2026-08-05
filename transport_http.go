@@ -238,6 +238,11 @@ func (s *Server) writeHealthResponse(w http.ResponseWriter, ok bool) {
 // definition, public.  The fingerprint is included for cross-checking
 // against the startup-banner value operators have on hand.
 //
+// The `fingerprint` field is the same value each fence carries as its `kid`
+// attribute, so a verifier can key its trusted-key set on it directly. It is
+// deliberately not renamed to "kid" here: anything already parsing this
+// response expects `fingerprint`.
+//
 // The key rotates on every server restart unless the operator supplied one
 // via FENCE_SIGNING_KEY / FENCE_SIGNING_KEY_FILE, in which case it is stable
 // for as long as that key is (see fence_key.go).  The startup banner says
