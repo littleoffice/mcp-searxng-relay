@@ -55,6 +55,15 @@ spec:
             # shapes"):
             # - name: MCP_STATELESS
             #   value: "true"
+            # Uncomment, together with the fence-key entry in
+            # secret.example.yaml, to pin a persistent fence signing key.
+            # Two reasons to want this: a verifying gateway can pin one
+            # fingerprint instead of re-reading it after every rollout, and
+            # all replicas sign with the same key rather than one each.
+            # The path below is inside the existing mcp-auth mount, so no
+            # extra volume is needed.  See README "Fence signing key".
+            # - name: FENCE_SIGNING_KEY_FILE
+            #   value: /etc/mcp-auth/fence-key
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
