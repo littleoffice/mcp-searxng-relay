@@ -406,17 +406,20 @@ This server implements the prompt-fencing specification from [Peh, S. (2025), "P
 ```xml
 <sec:fence xmlns:sec="http://promptfence.org/security/1.0"
            signature="MEYCIQDx5w2l7..."
+           kid="3f9a1c7e2b4d8056"
            nonce="a9f7e2c14b8d6f31..."
            rating="untrusted"
            source="https://example.com/article"
            timestamp="2026-05-07T14:23:00Z"
-           type="content">
+           type="content"
+           version="1.0">
 <extracted content>
 </sec:fence>
 ```
 
 What this provides today:
 
+- **Key identification and format versioning.** Every fence carries `kid` — the same fingerprint reported by `/fence/public-key` — and `version`. `kid` lets a verifier holding several keys select one instead of trial-verifying against all of them, which is what makes key rotation workable: fences signed by an outgoing key stay in the context window and keep arriving while the new key rolls out, and without `kid` "signed by a key I have since retired" and "forged" both present as "nothing in my set verifies this". Both attributes are inside the canonical signed form, so an attacker cannot rewrite `kid` to name a key they control, or downgrade `version` to reach an older verification path, without invalidating the signature.
 - **Boundary-escape protection.** Each fence carries a 128-bit random `nonce` (from `crypto/rand`). An attacker who controls fetched content cannot guess the nonce, so they cannot forge a closing tag that prematurely ends the fence or open a new "trusted" fence inside it. The awareness preamble tells the consuming model to honour only the boundary identified by the per-response nonce.
 - **Forward-compatible signatures.** Every fence carries an Ed25519 signature so a future fence-verifying client (or an external verifying gateway) can authenticate that fenced content was emitted by this specific server process. The signed bytes are a domain-separated, length-prefixed serialisation — `"PromptFence/v1.0" || 0x00 || uint64_be(len(content)) || content || canonical_metadata` — fed to PureEd25519 per RFC 8032 §5.1 (the signing operation hashes the message internally with SHA-512; we do not pre-hash). This is a deliberate deviation from paper §4.3's literal `Ed25519(SHA-256(C || M))` construction, which silently changes the security argument by feeding a 32-byte digest into a signature scheme that already hashes its input. The domain tag prevents cross-protocol signature confusion; the length prefix removes the boundary ambiguity a bare `content || canonical_metadata` concatenation would leave. Content is signed in its pre-XML-escape form, so a verifier xml-unescapes the parsed element body before verifying. The exact wire format is documented in the `fence.go` `computeFenceSignature` and `buildFenceSigningInput` comment blocks. **No MCP client currently verifies these signatures**; they are present for forward compatibility.
 
@@ -426,7 +429,7 @@ Limitations, stated honestly:
 - The Prompt Fencing paper measured 100% prevention of direct injection in their experimental setting (n=300 attempts across two frontier models), but that result depends on model compliance with the awareness preamble. Smaller or specialised models may behave differently.
 - Semantic attacks — where untrusted content tries to *persuade* rather than *impersonate* — are not addressed by any fencing scheme.
 
-**Public key.** The Ed25519 public key for the running server is exposed at `GET /fence/public-key` (HTTP mode, unauthenticated — a public key is by definition not a secret). The startup banner prints the same key's fingerprint, so the two can be cross-checked.
+**Public key.** The Ed25519 public key for the running server is exposed at `GET /fence/public-key` (HTTP mode, unauthenticated — a public key is by definition not a secret). The startup banner prints the same key's fingerprint, so the two can be cross-checked. That `fingerprint` field is also the value each fence carries as its `kid`, so a verifier can key its trusted-key set on it directly; the field is deliberately not renamed to `kid` in the endpoint response, since anything already parsing it expects `fingerprint`.
 
 **Fence signing key.** By default the signing key is generated fresh at every process start, so the fingerprint changes across process lifetimes. That default is deliberate: without an external trust anchor (a CA, a published JWK set, a KMS), persisting a key would imply a continuity property this server cannot deliver on its own.
 
