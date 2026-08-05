@@ -51,11 +51,17 @@ import (
 //     guess the nonce, and the awareness preamble tells the consuming model
 //     that only the nonced boundary is authoritative.
 //
-// The signing key is generated fresh at server start.  This is intentional:
-// without an external trust anchor (a CA, a published JWK set, a KMS), key
-// persistence would imply a trust property the codebase cannot deliver.
-// Operators wanting cross-restart key continuity should run this server
-// behind a process supervisor that holds a long-lived key — see README.
+// The signing key is generated fresh at server start BY DEFAULT.  This is
+// intentional: without an external trust anchor (a CA, a published JWK set, a
+// KMS), key persistence would imply a trust property the codebase cannot
+// deliver on its own.
+//
+// Operators who need cross-restart continuity — which any downstream verifier
+// does, since it cannot pin a fingerprint that changes every deploy — can
+// supply their own key via FENCE_SIGNING_KEY or FENCE_SIGNING_KEY_FILE.  That
+// puts the trust anchor in their KMS or secret store rather than in this
+// process.  See fence_key.go; the ephemeral default is unchanged when neither
+// variable is set.
 
 // FenceTrust denotes the trust rating of a fenced segment
 // (paper §4.2: rating ∈ {trusted, untrusted, partially-trusted}).

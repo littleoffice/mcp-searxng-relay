@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -75,6 +76,21 @@ type Config struct {
 	// PRUNE_SELECTOR overrides it; setting it to the empty string disables
 	// pruning entirely (unset and empty are distinguished via os.LookupEnv).
 	PruneSelector string // PRUNE_SELECTOR
+
+	// Fence signing key persistence (opt-in). Raw values are read here; the
+	// parsed key is populated in main() via loadFenceSigningKey, following
+	// the same "read raw, validate in main" split used for FetchACL above,
+	// so a malformed key fails startup with a clear message rather than
+	// silently degrading to an ephemeral key that a downstream verifier
+	// would then reject every fence from.
+	//
+	// Both unset — the default — preserves the original behaviour: a fresh
+	// keypair generated per process. See fence_key.go for the rationale and
+	// the accepted encodings.
+	FenceSigningKey     string             // FENCE_SIGNING_KEY: inline key material
+	FenceSigningKeyFile string             // FENCE_SIGNING_KEY_FILE: path to a file holding the same
+	FenceKey            ed25519.PrivateKey // parsed form; nil until main() validates, and nil means ephemeral
+	FenceKeySource      string             // human-readable origin for the banner; empty means ephemeral
 }
 
 func configFromEnv() Config {
@@ -204,6 +220,12 @@ func configFromEnv() Config {
 	// "no proxy" and timing out on every fetch.
 	c.FetchProxy = strings.TrimSpace(os.Getenv("FETCH_PROXY"))
 	c.FetchProxyAll = parseBool(os.Getenv("FETCH_PROXY_ALL"))
+	// Fence signing key — only the raw strings are read here. Decoding and
+	// validation happen in main() via loadFenceSigningKey, which also decides
+	// between them (setting both is an error, not a precedence question).
+	// Leaving both unset keeps the per-process ephemeral key.
+	c.FenceSigningKey = strings.TrimSpace(os.Getenv(fenceKeyEnvVar))
+	c.FenceSigningKeyFile = strings.TrimSpace(os.Getenv(fenceKeyFileEnvVar))
 	return c
 }
 
