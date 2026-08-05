@@ -59,6 +59,8 @@ Set `MCP_STATELESS=true` and bump `replicas:` to 2+. Every request is treated as
 
 You lose the cross-request `session_id` join key. Audit correlation now relies on `identity` + timestamp + source IP — usable, but less precise than per-session attribution.
 
+One thing to watch if anything downstream verifies fence signatures: each pod generates its own fence signing key at startup, so a verifier behind the Service sees a different key depending on which pod answered, and a fresh set after every rollout. Pin a shared key via `FENCE_SIGNING_KEY_FILE` (commented entries in `deployment.yaml` and `secret.example.yaml` show the shape) so every replica signs identically. Irrelevant if nothing verifies the signatures.
+
 This is the right shape if "agents survive every redeploy" matters more than per-session audit precision.
 
 ### Multiple replicas, stateful

@@ -129,7 +129,35 @@ func main() {
 			"hint", "use https:// or run the upstream behind TLS termination")
 	}
 
+	// Resolve the fence signing key (FENCE_SIGNING_KEY / FENCE_SIGNING_KEY_FILE).
+	// Unset — the default — leaves the per-process ephemeral key untouched.
+	// Same fail-loud stance as the controls above: an operator who configured
+	// a key did so because something downstream pins its fingerprint, and
+	// starting with a silently different key would make every fence fail
+	// verification at that verifier with no obvious cause.
+	fenceKey, fenceKeySource, err := loadFenceSigningKey(cfg.FenceSigningKey, cfg.FenceSigningKeyFile)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.FenceKey = fenceKey
+	cfg.FenceKeySource = fenceKeySource
+
 	server := NewServer(cfg)
+
+	// Leave an audit line when the signing key outlives the process. This
+	// reverses a deliberate default, and it changes the blast radius of a
+	// key leak from one process lifetime to "until the operator rotates" —
+	// so it belongs in the logs, not merely inferable from the environment.
+	// Logged after NewServer so the fingerprint comes from the public key the
+	// server will actually publish at /fence/public-key, not from a
+	// separately derived copy that could drift from it.
+	if fenceKey != nil {
+		slog.Warn("fence signing key is persistent, not per-process",
+			"source", fenceKeySource,
+			"fingerprint", fenceKeyFingerprint(server.fencePublicKey),
+			"hint", "fences stay verifiable across restarts; rotate this key on the same cadence as your other signing material")
+	}
 
 	if port := os.Getenv("MCP_PORT"); port != "" {
 		runHTTP(cfg, server, port)
@@ -407,9 +435,12 @@ func logConfig(server *Server, mode, port string) {
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.
 		row("prune selector", prunePolicyLabel(cfg.PruneSelector)),
-		// Fingerprint of the per-process fence signing key. Rotates each
-		// restart; full key material is never logged.
-		row("fence key", fenceKeyFingerprint(server.fencePublicKey)),
+		// Fingerprint of the fence signing key, plus whether it survives a
+		// restart. An operator wiring up a verifying gateway needs the
+		// persistence state at a glance, because it decides whether the
+		// fingerprint they pin is stable or has to be re-read after every
+		// deploy. Full key material is never logged.
+		row("fence key", fenceKeyLabel(server.fencePublicKey, cfg.FenceKeySource)),
 	)
 
 	maxLen := len(title)

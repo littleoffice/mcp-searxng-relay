@@ -125,7 +125,10 @@ starting points:
   see the main `README.md` for the variables and tuning notes.
 - **Prompt fencing** of all tool output, implementing the scheme from
   arXiv:2511.19727, with an honest statement of what that does and does not
-  provide in the README.
+  provide in the README. The Ed25519 signing key is per-process by default;
+  deployments that run an external verifier can pin a persistent key via
+  `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE`, moving the trust anchor to
+  the operator's own secret store.
 - **PDF page markers are advisory.** The `--- [PDF page N of M] ---` lines
   inserted between extracted PDF pages are server-generated, but they sit
   inside untrusted extracted content: a malicious PDF can embed lookalike

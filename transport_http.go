@@ -238,9 +238,10 @@ func (s *Server) writeHealthResponse(w http.ResponseWriter, ok bool) {
 // definition, public.  The fingerprint is included for cross-checking
 // against the startup-banner value operators have on hand.
 //
-// The key rotates on every server restart — operators wanting cross-restart
-// continuity should run behind a process supervisor that holds a long-lived
-// key (see fence.go).
+// The key rotates on every server restart unless the operator supplied one
+// via FENCE_SIGNING_KEY / FENCE_SIGNING_KEY_FILE, in which case it is stable
+// for as long as that key is (see fence_key.go).  The startup banner says
+// which of the two applies.
 func (s *Server) handleFencePublicKey(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

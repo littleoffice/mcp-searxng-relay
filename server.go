@@ -116,7 +116,11 @@ func NewServer(cfg Config) *Server {
 		panic("failed to initialise LRU cache: " + err.Error())
 	}
 
-	pub, priv := generateFenceKeypair()
+	// Operator-supplied key when one was configured and validated in main(),
+	// a fresh per-process keypair otherwise. A Server built directly in tests
+	// passes a zero Config, so cfg.FenceKey is nil there and the ephemeral
+	// path is taken exactly as before.
+	pub, priv := resolveFenceKeypair(cfg.FenceKey)
 
 	s := &Server{
 		config: cfg,

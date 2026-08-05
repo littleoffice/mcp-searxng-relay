@@ -59,7 +59,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`.
 - **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging
 - **Per-caller rate limiting** — token-bucket throttle keyed by identity when authenticated and by source IP otherwise. Configurable RPS and burst, default 5 rps / burst 10. Exposed at `mcp_rate_limit_rejections_total`.
-- **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients.
+- **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients. The signing key is per-process by default, or operator-supplied via `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE` when a verifier needs a stable fingerprint to pin.
 - **Reproducible container builds** — bit-for-bit. Given the same source commit and `SOURCE_DATE_EPOCH`, the build produces a byte-identical image, verifiable via `docker save <image> | sha256sum`. Toolchain pinned by digest, `go.sum` frozen, no embedded paths, VCS state, or build IDs. Details in [`supply-chain.md`](docs/supply-chain.md).
 - **Structured startup banner** with all configuration values printed to stderr on start (secrets redacted)
 
@@ -185,6 +185,8 @@ All configuration is via environment variables. The server will refuse to start 
 | `FETCH_ALLOWED_CIDRS` | no | — | Comma-separated IP ranges treated as reachable even though the default policy would block them (e.g. `10.0.0.0/8,192.168.0.0/16`). Checked against the *resolved* IP at dial time and on each redirect, so it stays robust against DNS rebinding. A malformed entry fails startup. See [SSRF protection](#security-notes) |
 | `FETCH_PROXY` | no | — | Egress proxy for the fetch tool (`http`, `https`, `socks5`, `socks5h`), e.g. `http://proxy.corp:3128`. On its own it applies **only** to hosts on `FETCH_ALLOWED_HOSTS`. Deliberately *not* read from `HTTP_PROXY`/`HTTPS_PROXY`. A malformed URL or unsupported scheme fails startup. See [SSRF protection](#security-notes) |
 | `FETCH_PROXY_ALL` | no | `false` | Route **every** fetch through `FETCH_PROXY`, not just allow-listed hosts. For networks with no direct egress. Delegates the per-IP SSRF policy to the proxy: `FETCH_ALLOWED_CIDRS` and the public-IP check stop applying. Setting it without `FETCH_PROXY` fails startup. See [SSRF protection](#security-notes) |
+| `FENCE_SIGNING_KEY` | no | — | Ed25519 private key used to sign `<sec:fence>` elements, supplied inline. Accepts PKCS#8 PEM, base64 PKCS#8 DER, a base64 32-byte seed, or a base64 64-byte private key — the encoding is auto-detected, and line-wrapped base64 is fine. When unset (the default) a fresh key is generated at every process start. Mutually exclusive with `FENCE_SIGNING_KEY_FILE`: setting both fails startup, as does a malformed key. See [Fence signing key](#security-notes) |
+| `FENCE_SIGNING_KEY_FILE` | no | — | Path to a file holding the same key material, for Secret mounts and `podman secret`. Same encodings and same validation as `FENCE_SIGNING_KEY`. A file readable beyond its owner logs a warning but does not fail startup, since read-only mounts routinely land at `0444`. See [Fence signing key](#security-notes) |
 | `LOG_LEVEL` | no | `info` | Log verbosity: `debug`, `info`, `warn`, `error`, `off` |
 | `LOG_FORMAT` | no | `text` | Log format: `text` or `json` |
 
@@ -424,7 +426,43 @@ Limitations, stated honestly:
 - The Prompt Fencing paper measured 100% prevention of direct injection in their experimental setting (n=300 attempts across two frontier models), but that result depends on model compliance with the awareness preamble. Smaller or specialised models may behave differently.
 - Semantic attacks — where untrusted content tries to *persuade* rather than *impersonate* — are not addressed by any fencing scheme.
 
-**Public key.** The Ed25519 public key for the running server is exposed at `GET /fence/public-key` (HTTP mode, unauthenticated — a public key is by definition not a secret). The signing key is regenerated on every server restart, so the key fingerprint changes across process lifetimes. Operators who need stable verification across restarts should run the server behind a supervisor that holds a long-lived key — out of scope for this server.
+**Public key.** The Ed25519 public key for the running server is exposed at `GET /fence/public-key` (HTTP mode, unauthenticated — a public key is by definition not a secret). The startup banner prints the same key's fingerprint, so the two can be cross-checked.
+
+**Fence signing key.** By default the signing key is generated fresh at every process start, so the fingerprint changes across process lifetimes. That default is deliberate: without an external trust anchor (a CA, a published JWK set, a KMS), persisting a key would imply a continuity property this server cannot deliver on its own.
+
+It is also of no use to a verifier. Anything that actually checks these signatures — a fence-verifying client, or the external security gateway of paper §4.5 — needs a key it can pin. Against a key that rotates every restart its only options are to re-fetch `/fence/public-key` at verification time, which reduces the check to "signed by whoever answered", or to re-pin a fingerprint by hand after every deploy.
+
+Operators running such a verifier can therefore supply their own key, which puts the trust anchor in their KMS or secret store rather than in this process:
+
+```bash
+# PKCS#8 PEM — the usual choice for a mounted Secret
+openssl genpkey -algorithm ed25519 -out fence.pem
+
+# or a bare 32-byte seed, if an inline env var is easier to manage
+# (any 32 bytes is a valid Ed25519 seed)
+openssl rand -base64 32
+```
+
+```bash
+FENCE_SIGNING_KEY_FILE=/etc/mcp-auth/fence-key    # mounted file
+FENCE_SIGNING_KEY="$(openssl rand -base64 32)"    # or inline
+```
+
+The banner states which mode is active, so a misconfiguration is visible at a glance rather than only when a verifier starts rejecting fences:
+
+```
+fence key        3f9a1c7e2b4d8056 (persistent, from FENCE_SIGNING_KEY_FILE (PKCS#8 PEM))
+fence key        a17c04e9b3f2d158 (ephemeral, rotates on restart)
+```
+
+Persistent mode also emits a `warn` line at startup, for the same reason widening the SSRF policy does: it reverses a deliberate default, and it extends the blast radius of a key leak from one process lifetime to "until the operator rotates". Rotate this key on whatever cadence you rotate your other signing material — there is no automatic expiry.
+
+A multi-replica deployment gets a second benefit. Each replica otherwise generates its own key, so a verifier facing a load-balanced Service would have to trust every pod's key and re-learn them on every rollout. A shared key from one Secret means all replicas sign identically.
+
+Two things a persistent key does **not** do, stated plainly:
+
+- **It does not give you verification.** It makes verification *possible* by giving a verifier something stable to pin. Nothing in this server checks signatures, and a signature nobody verifies provides no guarantee regardless of how the key is managed.
+- **It does not solve key distribution**, which is the harder half. A gateway that fetches whatever `/fence/public-key` currently returns is trusting the very endpoint it is trying to authenticate: an attacker who can impersonate the relay serves their own key too. Pin the fingerprint out-of-band, or fetch it once over an authenticated channel and alert on change. Note also that stdio mode exposes no HTTP endpoints at all, so in that mode the public key has to come from the banner or be derived from the private key you already hold.
 
 For high-risk deployments, consider restricting the tools to a known allowlist of domains, running the agent with a minimal permission scope, and auditing tool call sequences in your application layer.
 
