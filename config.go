@@ -25,6 +25,7 @@ type Config struct {
 	SearxngURL             string
 	AuthUsername           string
 	AuthPassword           string
+	SearxngTokens          []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
 	UserAgent              string
 	LogLevel               string
 	LogFormat              string
@@ -209,6 +210,20 @@ func configFromEnv() Config {
 	defaultBurst := int(math.Max(1, math.Ceil(c.RateLimitRPS*2)))
 	c.RateLimitBurst = parseInt(os.Getenv("MCP_RATE_LIMIT_BURST"), defaultBurst)
 	c.RateLimitExempt = parseCSV(os.Getenv("MCP_RATE_LIMIT_EXEMPT"))
+	// SearXNG private-engine tokens — comma-separated, forwarded verbatim as
+	// the `tokens` search parameter.  An engine carrying a `tokens:` list in
+	// settings.yml is invisible and unusable to any caller that does not
+	// present one of them, so this is what scopes a relay to a subset of the
+	// engines on a shared SearXNG instance.
+	//
+	// Deliberately process-wide rather than per-identity: the boundary this
+	// draws is "this relay may reach these engines", enforced upstream by
+	// SearXNG's own validate_token.  Per-caller scoping would put the check
+	// in this process, where the `engines` parameter is only one of several
+	// ways to select an engine (bang syntax inside the query string is
+	// another), and a filter that misses one of them fails open.  One relay
+	// per trust boundary keeps the enforcement where it cannot be bypassed.
+	c.SearxngTokens = parseCSV(os.Getenv("SEARXNG_TOKENS"))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
 	// CIDRs are compiled and validated in main() via newFetchACL so a bad
 	// entry fails startup with a clear message instead of being silently

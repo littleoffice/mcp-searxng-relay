@@ -179,6 +179,16 @@ func (s *Server) search(
 	if engines != "" {
 		q.Set("engines", engines)
 	}
+	// Private-engine tokens.  SearXNG resolves the full engine reference list
+	// first — categories, the `engines` parameter, and `!bang` syntax inside
+	// the query alike — and then drops every engine whose `tokens:` list is
+	// not satisfied by what the caller presented.  Sending them here is
+	// therefore what makes a tokenised engine reachable at all, and omitting
+	// them is what makes every *other* tenant's engines unreachable from this
+	// relay regardless of what the agent asks for.
+	if len(s.config.SearxngTokens) > 0 {
+		q.Set("tokens", strings.Join(s.config.SearxngTokens, ","))
+	}
 	u.RawQuery = q.Encode()
 
 	req, err := s.newSearxRequest(http.MethodGet, u.String(), nil)
