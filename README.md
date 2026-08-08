@@ -28,6 +28,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
   - [`searxng_url_metadata`](#searxng_url_metadata)
 - [Using with Claude Desktop (stdio mode)](#using-with-claude-desktop-stdio-mode)
 - [Using with Claude Desktop (HTTP mode)](#using-with-claude-desktop-http-mode)
+- [Scoping a relay to specific engines](#scoping-a-relay-to-specific-engines)
 - [Security notes](#security-notes)
 - [Rate limiting](#rate-limiting)
 - [Session limits](#session-limits)
@@ -171,6 +172,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_RATE_LIMIT_EXEMPT` | no | — | Comma-separated identity names that bypass the rate limiter entirely (e.g. `ci,uptime-monitor`). Useful for trusted internal callers and monitoring identities |
 | `AUTH_USERNAME` | no | — | HTTP Basic Auth username for SearXNG (if your instance requires it) |
 | `AUTH_PASSWORD` | no | — | HTTP Basic Auth password for SearXNG |
+| `SEARXNG_TOKENS` | no | — | Comma-separated [private-engine tokens](https://docs.searxng.org/admin/settings/settings_engines.html#private-engines-tokens) sent as the `tokens` search parameter on every query. Engines carrying a `tokens:` list in SearXNG's `settings.yml` are invisible and unusable without one. Scopes this relay to a subset of the engines on a shared SearXNG instance. See [Scoping a relay to specific engines](#scoping-a-relay-to-specific-engines) |
 | `USER_AGENT` | no | `mcp-searxng-relay/<version>` | User-Agent header sent with all outbound requests |
 | `CACHE_TTL_SECONDS` | no | `300` | How long fetched URL content is cached (seconds) |
 | `CACHE_MAX_ENTRIES` | no | `1000` | Maximum number of URLs held in the in-memory cache. Oldest entries are evicted automatically when the cap is reached |
@@ -396,6 +398,43 @@ If you prefer to run the server as a persistent background process rather than s
 > **Note:** Run the HTTP server behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik) in any non-local deployment. The server itself speaks plain HTTP.
 
 ---
+
+## Scoping a relay to specific engines
+
+`SEARXNG_TOKENS` lets several relays share one SearXNG instance while each reaches only its own engines — useful when separate teams have separate internal search backends and must not read each other's.
+
+Mark the engine private in SearXNG's `settings.yml`. `tokens:` gates who may select the engine; the engine's own credential (`api_key` or equivalent) is what limits what it can see:
+
+```yaml
+engines:
+  - name: teama-confluence
+    engine: json_engine
+    base_url: https://confluence-a.corp/rest/api/search
+    api_key: "<team A service account token>"
+    shortcut: cfa
+    categories: [general]
+    disabled: true
+    tokens: ['ENGINE-TOKEN-A']
+```
+
+Then give each relay only its own token:
+
+```bash
+docker run -d \
+  -e SEARXNG_URL=https://searxng.corp \
+  -e SEARXNG_TOKENS=ENGINE-TOKEN-A \
+  -e MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
+  -e MCP_PORT=8080 -p 8080:8080 \
+  ghcr.io/littleoffice/mcp-searxng-relay:latest
+```
+
+Notes:
+
+- **`disabled: true` is not redundant.** Without it the engine sits in its category and fires on every ordinary web search, adding latency and putting internal results in front of unrelated queries. Naming an engine explicitly through the `engines` search parameter builds the engine reference directly and is unaffected by the disabled-by-default state, so the engine still runs when actually asked for.
+- **The boundary is enforced by SearXNG, not by this relay.** SearXNG resolves the full engine reference list — categories, the `engines` parameter, and `!bang` syntax inside the query string alike — and only then drops engines whose `tokens:` are unsatisfied. A filter in this process on the `engines` parameter would miss the bang path; presenting the wrong token cannot be worked around from the agent side.
+- **Tokens are per-process, not per-caller.** Every identity in the token table shares them. Where two groups of callers must be separated, run one relay per group. The identities in `MCP_AUTH_TOKEN_FILE` are audit labels, not an authorization boundary.
+- **`tokens` as a query parameter is undocumented upstream.** SearXNG's Search API docs describe engine tokens only as a Preferences-page setting. That they are also accepted as a request parameter follows from `webapp.pre_request` merging `request.args` into the preferences it parses. It is long-standing behaviour, but pin your SearXNG image by digest and keep a test asserting the negative case — a search naming another team's engine without its token returns no results.
+- **Search only.** `searxng_read_url` does not use these tokens. If the relay must be kept away from another team's internal hosts, that is `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`, set per relay.
 
 ## Security notes
 

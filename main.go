@@ -365,6 +365,14 @@ func logConfig(server *Server, mode, port string) {
 	rows = append(rows,
 		row("searxng", cfg.SearxngURL),
 	)
+	// Engine-token count, never the values: the banner goes to stderr and
+	// from there into whatever collects container logs.  The count is what an
+	// operator needs to confirm the Secret was mounted and parsed as expected
+	// ("I configured two, it says two"), and it is enough to catch the common
+	// failure of an empty or whitespace-only value being silently accepted.
+	if n := len(cfg.SearxngTokens); n > 0 {
+		rows = append(rows, row("searxng tokens", fmt.Sprintf("%d configured", n)))
+	}
 	if cfg.AuthUsername != "" {
 		rows = append(rows, row("username", cfg.AuthUsername))
 	}
