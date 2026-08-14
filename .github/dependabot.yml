@@ -9,6 +9,23 @@ updates:
       - dependencies
       - security
 
+  # Bumps the builder image in the Dockerfile -- both the tag and the sha256
+  # digest -- when a new Go patch release lands. This is the "keep the
+  # container updated" half; the gomod entry above is the "keep the libraries
+  # updated" half.
+  #
+  # Dependabot does NOT know that the go directive in go.mod must move with
+  # it. That drift is deliberate here: pin-consistency.yml fails the PR until
+  # you edit the one line, which keeps the mismatch visible instead of letting
+  # CI silently test against a different stdlib than the image ships.
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: daily
+    labels:
+      - dependencies
+      - security
+
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
