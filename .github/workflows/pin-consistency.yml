@@ -1,0 +1,102 @@
+# .github/workflows/pin-consistency.yml
+#
+# Guards a single invariant that Dependabot cannot maintain on its own: the Go
+# toolchain version must be the same in two places.
+#
+#   1. The builder base image in the Dockerfile   (FROM docker.io/golang:X.Y.Z-...)
+#   2. The `go` directive in go.mod               (which `setup-go` reads via
+#                                                  go-version-file, and which
+#                                                  therefore selects the stdlib
+#                                                  CI actually tests against)
+#
+# Dependabot's `docker` ecosystem bumps the base image tag/digest on a new Go
+# patch release, but it does NOT know to move the `go` directive in go.mod to
+# match. If that drift went unnoticed, CI would test against one stdlib while
+# the shipped container built against another. This check fails the PR until the
+# two agree, keeping the mismatch visible -- exactly the behaviour the comment
+# in .github/dependabot.yml promises.
+#
+# The fix when this fails is one line: edit the `go` directive in go.mod (and
+# `toolchain`, if you add one) to match the Dockerfile, or vice versa.
+#
+# This job reads two files and runs no third-party code; it needs no secrets and
+# only read access, so it is safe to run on pull_request from Dependabot.
+
+name: Pin consistency
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'go.mod'
+  push:
+    branches: ['**']
+    paths:
+      - 'Dockerfile'
+      - 'go.mod'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pin-consistency-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-version-match:
+    name: Dockerfile Go version == go.mod go directive
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare Go versions
+        run: |
+          set -euo pipefail
+
+          # Go version baked into the builder base image, e.g. the "1.26.6" in
+          # `FROM docker.io/golang:1.26.6-trixie@sha256:...`. Only FROM lines are
+          # considered -- matching bare `golang:X.Y.Z` anywhere would also catch
+          # stale references in comments (there is one in this Dockerfile), which
+          # would make this check fail on a false mismatch.
+          dockerfile_go="$(grep -iE '^[[:space:]]*FROM[[:space:]]' Dockerfile \
+            | grep -oiE 'golang:[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d: -f2 || true)"
+
+          # The `go` directive in go.mod, e.g. "1.26.6" from `go 1.26.6`.
+          gomod_go="$(grep -oE '^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?' go.mod \
+            | head -n1 | awk '{print $2}' || true)"
+
+          echo "Dockerfile base-image Go : ${dockerfile_go:-<none found>}"
+          echo "go.mod go directive      : ${gomod_go:-<none found>}"
+
+          if [ -z "${dockerfile_go}" ]; then
+            echo "::error file=Dockerfile::Could not find a 'golang:X.Y.Z' base image tag to check."
+            exit 1
+          fi
+          if [ -z "${gomod_go}" ]; then
+            echo "::error file=go.mod::Could not find a 'go X.Y.Z' directive to check."
+            exit 1
+          fi
+
+          if [ "${dockerfile_go}" != "${gomod_go}" ]; then
+            {
+              echo "## ❌ Go version pin mismatch"
+              echo ""
+              echo "The builder base image and the go.mod \`go\` directive disagree:"
+              echo ""
+              echo "| Source | Go version |"
+              echo "|---|---|"
+              echo "| Dockerfile (\`golang:…\`) | \`${dockerfile_go}\` |"
+              echo "| go.mod (\`go\` directive) | \`${gomod_go}\` |"
+              echo ""
+              echo "Bring them into line (edit the \`go\` directive in go.mod, or the"
+              echo "base image tag in the Dockerfile) so CI tests against the same"
+              echo "stdlib the container ships."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::Dockerfile Go ${dockerfile_go} != go.mod go ${gomod_go}"
+            exit 1
+          fi
+
+          echo "✅ Go versions match (${dockerfile_go})." >> "$GITHUB_STEP_SUMMARY"
