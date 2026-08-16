@@ -45,10 +45,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -77,20 +77,37 @@ jobs:
           echo "CGO_CFLAGS=-I${HEADER_DIR}" >> "$GITHUB_ENV"
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          # Pinned instead of `latest`: with `latest` a new golangci-lint
+          # release can turn CI red (or green) with no code change, so a green
+          # run wouldn't prove the code passes the linter version you'll ship
+          # with. This is a free-form action input, not a `uses:` ref, so
+          # Dependabot does NOT bump it -- update this line by hand when you
+          # want a newer linter (or move golangci-lint into a go.mod `tool`
+          # directive and invoke the binary directly to get it tracked).
+          version: v2.12.2
           # --timeout because the WASM-backed transitive deps make first-run
           # analysis a bit slow on cold cache. Tune downward later if you want.
           args: --timeout=5m
 
       - name: actionlint
         # Linting the workflow files themselves catches a class of bug that
-        # only surfaces when GitHub tries to schedule the run. Pinning to a
-        # released SHA would be stricter; ubuntu-latest's pre-installed
-        # actionlint is fine for a starting point.
+        # only surfaces when GitHub tries to schedule the run.
+        #
+        # Both the installer script and the actionlint version are pinned. The
+        # previous form curled the script from the `main` branch and installed
+        # whatever version was newest at run time -- a mutable ref executed via
+        # bash, which is exactly the supply-chain shape SHA-pinning elsewhere in
+        # this repo is meant to avoid. The URL now points at an immutable
+        # release tag and the version is passed explicitly, so this step is
+        # reproducible. (Stronger still: install actionlint via a go.mod `tool`
+        # directive so Dependabot tracks it; left as a follow-up because it
+        # needs a go.sum update.)
+        env:
+          ACTIONLINT_VERSION: 1.7.12
         run: |
-          bash <(curl -sL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          bash <(curl -sL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "${ACTIONLINT_VERSION}"
           ./actionlint -color
 
   test:
@@ -99,10 +116,10 @@ jobs:
     needs: lint
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@v7
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
           cache: true
@@ -159,8 +176,20 @@ jobs:
         run: go test -race -count=1 -v ./...
 
       - name: govulncheck
+        # Pinned instead of `@latest` so the scanner version is reproducible;
+        # the advisory DATABASE is still fetched fresh at run time, so the daily
+        # schedule keeps catching newly published advisories -- pinning the tool
+        # does not freeze what it checks against.
+        #
+        # NOTE: this `go install` version string is not visible to Dependabot
+        # (it lives in workflow YAML, not go.mod). To get automated update PRs,
+        # promote it to a go.mod `tool` directive:
+        #     go get -tool golang.org/x/vuln/cmd/govulncheck@v1.7.0
+        # then replace the install line below with `go tool govulncheck ./...`.
+        # Left as a follow-up here because it requires regenerating go.sum,
+        # which needs Go module network access.
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
           govulncheck ./...
 
   build:
@@ -169,10 +198,10 @@ jobs:
     needs: test
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Derive build args
         # Same derivation as build.sh -- SOURCE_DATE_EPOCH from the commit,
@@ -184,7 +213,7 @@ jobs:
           echo "SERVER_VERSION=$(git describe --tags --always --dirty)" >> "$GITHUB_ENV"
 
       - name: Build image (no push)
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
           context: .
           push: false

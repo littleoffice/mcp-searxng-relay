@@ -31,7 +31,7 @@ ARG SERVER_VERSION=dev
 # 1.26.3 (2026-05-07) fixes CVE-2026-33814: an HTTP/2 client infinite-loop on
 # malicious SETTINGS_MAX_FRAME_SIZE=0, reachable via the searxng_read_url tool
 # when fetching an attacker-controlled HTTPS endpoint.
-FROM docker.io/golang:1.26.6-trixie@sha256:ab563819a16cfe5faff0f96a8bb598fbb0e400ab2ac751996e60abcb23b106a3 as builder
+FROM docker.io/golang:1.26.6-trixie@sha256:ab563819a16cfe5faff0f96a8bb598fbb0e400ab2ac751996e60abcb23b106a3 AS builder
 
 # ARGs do not cross FROM boundaries — re-declare to bring them into scope.
 ARG SOURCE_DATE_EPOCH
@@ -140,7 +140,6 @@ RUN GOARCH="$(go env GOARCH)" && \
         -buildvcs=false \
         -tags netgo \
         -ldflags "-linkmode=external -extldflags '-static -Wl,--build-id=none' -buildid= -X main.ServerVersion=${SERVER_VERSION}" \
-
         -o mcp-searxng-relay .
 
 # ---------------------------------------------------------------------------
@@ -155,9 +154,13 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certifi
 USER 1001:1001
 ENV SEARXNG_URL=""
 ENV MCP_PORT=""
-ENV MCP_AUTH_TOKEN=""
-ENV AUTH_USERNAME=""
-ENV AUTH_PASSWORD=""
+# Auth credentials (MCP_AUTH_TOKEN, AUTH_USERNAME, AUTH_PASSWORD) are read from
+# the runtime environment via os.Getenv and are deliberately NOT declared here.
+# Baking secret-named ENV keys into the image is flagged by BuildKit's
+# SecretsUsedInArgOrEnv check and would persist them in image metadata/history;
+# an unset var and one set to "" are equivalent to this code, so declaring them
+# gains nothing. Provide them at run time, e.g. `-e MCP_AUTH_TOKEN=...` or via
+# your orchestrator's secret mechanism.
 ENV USER_AGENT=""
 ENV CACHE_TTL_SECONDS="300"
 ENV CACHE_MAX_ENTRIES="1000"

@@ -1,10 +1,47 @@
 version: 2
+
+# Dependency updates. Dependabot opens ONE pull request per dependency that has
+# a newer version (no `groups:` key below, so nothing is batched), on the
+# schedule set per ecosystem. This is the mechanism that "checks daily and
+# raises a PR for every dependency" -- ci.yml's daily cron is unrelated; it only
+# re-runs lint/test/govulncheck against the current advisory database.
+#
+# open-pull-requests-limit is set high on every ecosystem so the cap never
+# suppresses a PR. GitHub's default is 5: once 5 version-update PRs are open,
+# Dependabot stops raising new ones until some are merged/closed. 99 is well
+# above the number of dependencies here and effectively removes that cap, which
+# is what "a PR for every single dependency" requires. (Security-update PRs are
+# never subject to this limit; this only affects routine version bumps.)
+#
+# Trade-off worth knowing: with no grouping and a lifted cap, a quiet week of
+# upstream releases can produce many PRs at once, and each one triggers the full
+# ci.yml matrix -- native pdf_oxide/office_oxide builds, -race tests, and the
+# container sanity build. If that becomes noisy, the usual lever is a `groups:`
+# block to batch related updates into one PR, not lowering the limit.
 updates:
   - package-ecosystem: gomod
     directory: "/"
     schedule:
       interval: daily
-    open-pull-requests-limit: 10
+    open-pull-requests-limit: 99
+    # Grouping trades "a PR for literally every dependency" for "a PR for every
+    # dependency that could plausibly need separate review". Low-risk minor/patch
+    # bumps are batched into one PR (one CI run instead of N); anything NOT
+    # matched by a group -- every major bump, and the native cgo libraries --
+    # still lands as its own individual PR, which is where per-dependency review
+    # actually matters:
+    #   - major bumps can break APIs, so you want them isolated;
+    #   - pdf_oxide / office_oxide drive the expensive native-build path in
+    #     ci.yml, so a failure there should point at exactly one library.
+    # Remove this whole `groups:` block to go back to strict one-PR-per-dep.
+    groups:
+      go-minor-patch:
+        applies-to: version-updates
+        update-types:
+          - minor
+          - patch
+        exclude-patterns:
+          - "github.com/yfedoseev/*"
     labels:
       - dependencies
       - security
@@ -22,13 +59,17 @@ updates:
     directory: "/"
     schedule:
       interval: daily
+    open-pull-requests-limit: 99
     labels:
       - dependencies
       - security
 
+  # Was weekly; moved to daily so every ecosystem is re-checked every day, per
+  # the "runs every day" requirement.
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
-      interval: weekly
+      interval: daily
+    open-pull-requests-limit: 99
     labels:
       - dependencies
