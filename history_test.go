@@ -338,10 +338,17 @@ func TestCDATAFenceRoundTripsThroughXMLParser(t *testing.T) {
 			t.Fatalf("wrapFenceCDATA(%q): %v", raw, err)
 		}
 
-		// Skip the awareness preamble; the element itself starts at the tag.
-		i := strings.Index(out, "<sec:fence")
+		// Skip the awareness preamble.  It cannot be found by searching for
+		// "<sec:fence": the preamble quotes both that tag and its closing
+		// form while explaining the boundary rules, so the first match lands
+		// in prose and a parser started there runs off the end of the
+		// document.  The namespace declaration appears only on the real
+		// element, which is what makes it a usable anchor — and the reason
+		// the fence identifies its true boundary by nonce rather than by tag
+		// name in the first place.
+		i := strings.Index(out, `<sec:fence xmlns:sec=`)
 		if i < 0 {
-			t.Fatalf("no <sec:fence element in output for %q", raw)
+			t.Fatalf("no namespaced <sec:fence element in output for %q", raw)
 		}
 
 		var got strings.Builder
