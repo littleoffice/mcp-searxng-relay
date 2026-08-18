@@ -131,6 +131,14 @@ type Metrics struct {
 	MetadataTotal  atomic.Int64 // all calls to searxng_url_metadata
 	MetadataErrors atomic.Int64 // calls that returned an error
 
+	// ── session sources tool ─────────────────────────────────────────────────
+	// No error counter: the tool reads in-process state and has no failure
+	// mode short of a JSON marshal error, which would be a bug rather than
+	// an operational condition.  The ratio of this counter to
+	// mcp_fetches_total is the interesting signal — it says how often
+	// agents verify their URLs before answering.
+	SourcesTotal atomic.Int64 // all calls to searxng_session_sources
+
 	// ── latency ──────────────────────────────────────────────────────────────
 	// Duration histograms for the two upstream operations an operator
 	// alerts on.  "Upstream is slow" is a more common incident than
@@ -239,6 +247,10 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		"Total number of searxng_url_metadata tool calls.", &m.MetadataTotal)
 	writeCounter("mcp_metadata_errors_total",
 		"Total number of searxng_url_metadata calls that returned an error.", &m.MetadataErrors)
+
+	// Session sources
+	writeCounter("mcp_session_sources_total",
+		"Total number of searxng_session_sources tool calls.", &m.SourcesTotal)
 
 	// Search
 	writeCounter("mcp_searches_total",

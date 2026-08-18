@@ -26,6 +26,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
   - [`searxng_web_search`](#searxng_web_search)
   - [`searxng_read_url`](#searxng_read_url)
   - [`searxng_url_metadata`](#searxng_url_metadata)
+  - [`searxng_session_sources`](#searxng_session_sources)
 - [Using with Claude Desktop (stdio mode)](#using-with-claude-desktop-stdio-mode)
 - [Using with Claude Desktop (HTTP mode)](#using-with-claude-desktop-http-mode)
 - [Scoping a relay to specific engines](#scoping-a-relay-to-specific-engines)
@@ -56,6 +57,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Readability-style content extraction** — navigation bars, footers, sidebars, and cookie banners are stripped automatically
 - **Engine attribution on search results** — each result includes the list of SearXNG backend engines that returned it. A URL surfaced by three engines is a different signal than one surfaced by one, and the agent can weigh that without the server imposing a ranking on top. The `engines` search parameter closes the loop: an agent can re-query the specific backend that surfaced a promising result.
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
+- **Verifiable source list** — `searxng_session_sources` returns the URLs the relay actually fetched for a caller, byte-exact and newest-first, with how much of each was read. Agents transcribe URLs badly when composing a final answer far from the tool call that produced them, and fabricate them outright when they never fetched one; this gives the model ground truth to copy from instead of recall. Delivered in a CDATA-encoded fence so URLs survive the round trip unescaped.
 - **Response caching** with configurable TTL and per-request cache bypass
 - **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`.
 - **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging
@@ -353,6 +355,50 @@ Fetch only the structured metadata for a URL — title, author, publish date, la
 ```
 
 **When to use this vs `searxng_read_url`.** Use `searxng_url_metadata` to triage which of several candidate URLs is worth reading in full, for citation building, and for date/author/site verification when the body itself is not needed. Use `searxng_read_url` once you've committed to reading a specific URL. The two tools share a cache, so triaging with metadata first and then reading the chosen URLs in full does not double the upstream load.
+
+---
+
+### `searxng_session_sources`
+
+Return the URLs this relay has fetched for the calling identity, newest first, byte-exact.
+
+The problem it addresses is not retrieval — it is transcription. A model composing a final answer containing ten URLs is reproducing them from context that scrolled past thousands of tokens earlier, token by token, with nothing to check against. That step happens after the last tool call, in a message no MCP server ever sees, so nothing on the wire can validate it. This tool moves the correct bytes back to the position immediately before the answer is written, which is the only place a server can help. The same list answers the second failure — a plausible-looking URL for a page that was never fetched at all — because a URL absent from the list was not fetched.
+
+| Parameter | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `since_seq` | integer | no | `0` | Return only entries with a sequence number above this. Pass the highest `seq` from a previous call to see only what has been fetched since |
+
+**Output shape.** A JSON object, one row per distinct URL rather than per fetch:
+
+```json
+{
+  "note": "URLs below are byte-exact as fetched by this relay …",
+  "total_fetches": 12,
+  "returned": 9,
+  "elided": 0,
+  "sources": [
+    {
+      "url": "https://www.example.com/psu/flex-atx-350w",
+      "requested_url": "https://example.com/psu/flex-atx-350w",
+      "title": "FlexATX 350W review",
+      "read": "full",
+      "outcome": "ok",
+      "chars_read": 18422,
+      "total_chars": 18422,
+      "fetched_at": "2026-08-18T09:14:02Z",
+      "tool": "searxng_read_url",
+      "seq": 12,
+      "fetches": 2
+    }
+  ]
+}
+```
+
+`read` is the field that distinguishes a source an agent may claim to have read from one it merely looked at: `full` (the whole extracted text), `partial` (one pagination window of a longer document), `metadata` (`searxng_url_metadata` only — the body was never returned), `image`, or `none` (the fetch failed). Failed fetches appear with `outcome: "error"` and the error text; omitting them would make a 404 indistinguishable from a URL never tried. `requested_url` appears only when a redirect moved the URL, and the post-redirect `url` is the one to cite — it is the only URL in the exchange the model never saw and so cannot reconstruct at all.
+
+**History scope.** Per caller (identity + session ID), in-memory, last 50 entries with older ones reported as an `elided` count. Keying on identity as well as session matters: under `MCP_STATELESS=true`, and in the documented sessionless configuration, the session ID is client-asserted or empty, and keying on it alone would let one caller read another's fetched URLs. History does not survive a restart and does not cross replicas — it only needs to outlive the conversation, and shared storage would widen it to "everything this identity ever fetched", which makes the list worse for its purpose rather than better. For multi-replica deployments, configure session affinity at the ingress.
+
+**Fence encoding.** This response is wrapped in a `<sec:fence>` carrying `encoding="cdata"`. The ordinary escaped fence turns every `&` into `&amp;`, which for a payload whose entire purpose is byte-exact URLs is a self-inflicted corruption channel — and query-string-dense URLs hit it on nearly every entry. The signature still covers the pre-encoding bytes exactly as on the escaped path; `encoding` is inside the canonical signed form, so a verifier can tell how to recover them and an attacker cannot flip it. The rating stays `untrusted`: the relay authors the assertion ("I fetched X at T") but not the values — titles come from fetched pages — and marking it trusted would let any site launder text into a trusted fence by being fetched once.
 
 ---
 
@@ -708,6 +754,7 @@ The exposed series are:
 | `mcp_search_errors_total` | — | Subset of the above that returned an error |
 | `mcp_metadata_total` | — | All calls to `searxng_url_metadata` |
 | `mcp_metadata_errors_total` | — | Subset of the above that returned an error |
+| `mcp_session_sources_total` | — | All calls to `searxng_session_sources`. Read as a ratio against `mcp_fetches_total`: it says how often agents verify their URLs before answering |
 | `mcp_fetches_total` | — | All calls to `searxng_read_url` |
 | `mcp_fetch_errors_total` | — | Subset that returned an error |
 | `mcp_fetches_by_type_total` | `type=html\|pdf\|office\|plain\|image` | Successful fetches by extractor used |

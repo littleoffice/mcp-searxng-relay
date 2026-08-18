@@ -47,6 +47,16 @@ type Server struct {
 	// it nil and exercise the no-op fast path.
 	rateLimiter *rateLimiter
 
+	// history holds the per-caller fetch history that backs
+	// searxng_session_sources.  See history.go for the storage rationale;
+	// historyMu guards only the get-or-create, not the ring behind the
+	// pointer (fetchHistory has its own lock for that).
+	//
+	// Nil when a Server is constructed directly in tests, in which case
+	// recording is a no-op and the tool returns an empty list.
+	history   *lru.Cache[string, *fetchHistory]
+	historyMu sync.Mutex
+
 	// health probe cache — avoids hitting SearXNG on every /health request
 	healthMu      sync.Mutex
 	healthOK      bool
@@ -138,6 +148,7 @@ func NewServer(cfg Config) *Server {
 		fenceSigningKey: priv,
 		fencePublicKey:  pub,
 		rateLimiter:     newRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitExempt),
+		history:         newFetchHistoryCache(),
 		sessions:        make(map[string]*sessionInfo),
 	}
 	s.mcpServer = s.buildMCPServer()
@@ -209,6 +220,22 @@ func (s *Server) buildMCPServer() *mcp.Server {
 			"Results are cached and shared with searxng_read_url — a metadata fetch " +
 			"followed by a content fetch needs only one upstream HTTP request.",
 	}, s.toolURLMetadata)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name: "searxng_session_sources",
+		Description: "List the URLs this relay has actually fetched for you, " +
+			"byte-exact, newest first. Call this before writing any answer that " +
+			"contains URLs, and copy the URLs from its output rather than from " +
+			"memory — a URL recalled from earlier in a long conversation is " +
+			"frequently wrong in ways that are not visible until someone clicks " +
+			"it. Each entry records how much was read (full / partial / metadata " +
+			"only) and whether the fetch succeeded, so you can tell which sources " +
+			"you are entitled to cite as read. A URL that does not appear here " +
+			"was not fetched by this relay. Pass since_seq to see only what has " +
+			"been fetched since a previous call. History is per caller and " +
+			"in-memory: it covers the current session and does not survive a " +
+			"server restart.",
+	}, s.toolSessionSources)
 
 	return server
 }
