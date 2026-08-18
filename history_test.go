@@ -140,6 +140,21 @@ func newSourcesTestServer(t *testing.T) *Server {
 	return s
 }
 
+// sourcesTestCtx builds the context a tool handler actually operates under.
+//
+// Every handler opens with ctx = withSessionID(ctx, sessionIDOf(req)), and
+// these tests pass a nil request, so that call resolves the session ID to "".
+// Seeding a different one here would key recordFetch and the tool's own
+// lookup to two separate histories and the tool would correctly report an
+// empty list — an artifact of the nil request, not a defect in the keying.
+// Production cannot hit it: every handler derives the ID from the same
+// request in the same way.
+//
+// Identity is what these tests actually vary, and it is unaffected.
+func sourcesTestCtx(identity string) context.Context {
+	return withSessionID(withIdentity(context.Background(), identity), "")
+}
+
 // textOf pulls the single text block out of a tool result.
 func textOf(t *testing.T, res *mcp.CallToolResult) string {
 	t.Helper()
@@ -170,7 +185,7 @@ func decodeSourcesPayload(t *testing.T, fenced string) sourcesPayload {
 
 func TestSessionSourcesDeduplicatesAndCountsRepeats(t *testing.T) {
 	s := newSourcesTestServer(t)
-	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
+	ctx := sourcesTestCtx("alice")
 
 	s.recordFetch(ctx, fetchRecord{Tool: "searxng_url_metadata", URL: "https://example.com/a", Outcome: "ok", Read: readDepthMetadata})
 	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/a", Outcome: "ok", Read: readDepthFull})
@@ -207,7 +222,7 @@ func TestSessionSourcesDeduplicatesAndCountsRepeats(t *testing.T) {
 
 func TestSessionSourcesSinceSeq(t *testing.T) {
 	s := newSourcesTestServer(t)
-	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
+	ctx := sourcesTestCtx("alice")
 
 	for _, u := range []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"} {
 		s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: u, Outcome: "ok", Read: readDepthFull})
@@ -219,14 +234,17 @@ func TestSessionSourcesSinceSeq(t *testing.T) {
 	}
 	p := decodeSourcesPayload(t, textOf(t, res))
 
-	if len(p.Sources) != 1 || p.Sources[0].Seq != 3 {
-		t.Fatalf("since_seq=2 returned %+v, want only seq 3", p.Sources)
+	if len(p.Sources) != 1 {
+		t.Fatalf("since_seq=2 returned %d sources, want 1: %+v", len(p.Sources), p.Sources)
+	}
+	if p.Sources[0].Seq != 3 {
+		t.Fatalf("since_seq=2 returned seq %d, want 3", p.Sources[0].Seq)
 	}
 }
 
 func TestSessionSourcesEmptyHistory(t *testing.T) {
 	s := newSourcesTestServer(t)
-	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
+	ctx := sourcesTestCtx("alice")
 
 	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{})
 	if err != nil {
@@ -243,7 +261,7 @@ func TestSessionSourcesEmptyHistory(t *testing.T) {
 
 func TestSessionSourcesPrefersFinalURL(t *testing.T) {
 	s := newSourcesTestServer(t)
-	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
+	ctx := sourcesTestCtx("alice")
 
 	s.recordFetch(ctx, fetchRecord{
 		Tool:     "searxng_read_url",
@@ -258,6 +276,9 @@ func TestSessionSourcesPrefersFinalURL(t *testing.T) {
 		t.Fatalf("tool returned error: %v", err)
 	}
 	p := decodeSourcesPayload(t, textOf(t, res))
+	if len(p.Sources) != 1 {
+		t.Fatalf("sources = %d, want 1", len(p.Sources))
+	}
 
 	if p.Sources[0].URL != "https://www.example.com/full/article?id=7" {
 		t.Errorf("url = %q, want the post-redirect URL", p.Sources[0].URL)
