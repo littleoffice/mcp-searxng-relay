@@ -101,6 +101,19 @@ func TestHistoryKeySeparatesCallersSharingASessionID(t *testing.T) {
 	}
 }
 
+// A plain "identity|session" join collides when an identity happens to contain
+// the delimiter.  Nothing in the token table forbids that — addAuthToken checks
+// only token length — so the key encoding has to be injective on its own.
+func TestHistoryKeyIsInjectiveOverDelimiter(t *testing.T) {
+	a := withSessionID(withIdentity(context.Background(), "alice|b"), "")
+	b := withSessionID(withIdentity(context.Background(), "alice"), "b")
+
+	if historyKey(a) == historyKey(b) {
+		t.Fatalf("identity %q + session %q collides with identity %q + session %q: both key to %q",
+			"alice|b", "", "alice", "b", historyKey(a))
+	}
+}
+
 func TestHistoryIsolatedPerCaller(t *testing.T) {
 	s := &Server{history: newFetchHistoryCache()}
 

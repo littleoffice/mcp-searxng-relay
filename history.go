@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
 
@@ -159,10 +160,19 @@ func (h *fetchHistory) list() (records []fetchRecord, total int) {
 //
 // Identity is server-validated in both session modes, so pairing the two keeps
 // callers separated even when the session half is empty, forged, or shared.
-// The separator cannot be produced by either component: identities reject "|"
-// at token-table parse time and SDK session IDs are base32.
+//
+// The identity is length-prefixed rather than merely delimited.  Identities are
+// arbitrary operator-chosen strings — addAuthToken validates only token length,
+// and strings.Cut on the first ":" means a colon cannot appear in one but
+// nothing excludes the delimiter used here.  A plain "identity|session" join is
+// therefore ambiguous: identity "alice|b" with an empty session ID and identity
+// "alice" with session "b" both produce "alice|b", and the two callers share a
+// history.  The length prefix makes the encoding injective, which is the same
+// reason buildFenceSigningInput length-prefixes its content rather than relying
+// on the delimiter being unreachable.
 func historyKey(ctx context.Context) string {
-	return identityFromContext(ctx) + "|" + sessionIDFromContext(ctx)
+	identity := identityFromContext(ctx)
+	return strconv.Itoa(len(identity)) + "|" + identity + "|" + sessionIDFromContext(ctx)
 }
 
 // historyFor returns the caller's history, creating it on first use.
