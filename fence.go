@@ -284,6 +284,15 @@ const fenceSigDomain = "PromptFence/v1.0"
 // ed25519.Verify with the same raw serialisation — no prehashing on
 // either side.
 func computeFenceSignature(privKey ed25519.PrivateKey, content, canonicalMetadata string) (string, error) {
+	// ed25519.Sign panics on a wrong-sized key rather than returning an
+	// error, and the panic surfaces as an index-out-of-range inside
+	// crypto/ed25519 that names neither the key nor the caller.  Production
+	// always has a key (resolveFenceKeypair generates one when none is
+	// configured), so this only fires for a Server literal that forgot the
+	// field — but that is exactly the case worth naming.
+	if len(privKey) != ed25519.PrivateKeySize {
+		return "", fmt.Errorf("fence signing key is %d bytes, want %d", len(privKey), ed25519.PrivateKeySize)
+	}
 	msg, err := buildFenceSigningInput(content, canonicalMetadata)
 	if err != nil {
 		return "", err

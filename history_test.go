@@ -126,6 +126,20 @@ func TestRecordFetchNoOpWithoutHistoryCache(t *testing.T) {
 
 // ── tool output ───────────────────────────────────────────────────────────────
 
+// newSourcesTestServer builds a Server with both halves the sources tool
+// needs: a history cache and a fence signing key.
+//
+// The key is not optional.  wrapFence* signs unconditionally, and
+// ed25519.Sign panics rather than erroring on a nil private key, so a Server
+// literal that omits fenceSigningKey fails inside crypto/ed25519 with an
+// index-out-of-range that says nothing about the missing field.
+func newSourcesTestServer(t *testing.T) *Server {
+	t.Helper()
+	s := newTestFenceServer(t)
+	s.history = newFetchHistoryCache()
+	return s
+}
+
 // textOf pulls the single text block out of a tool result.
 func textOf(t *testing.T, res *mcp.CallToolResult) string {
 	t.Helper()
@@ -155,7 +169,7 @@ func decodeSourcesPayload(t *testing.T, fenced string) sourcesPayload {
 }
 
 func TestSessionSourcesDeduplicatesAndCountsRepeats(t *testing.T) {
-	s := &Server{history: newFetchHistoryCache()}
+	s := newSourcesTestServer(t)
 	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
 
 	s.recordFetch(ctx, fetchRecord{Tool: "searxng_url_metadata", URL: "https://example.com/a", Outcome: "ok", Read: readDepthMetadata})
@@ -192,7 +206,7 @@ func TestSessionSourcesDeduplicatesAndCountsRepeats(t *testing.T) {
 }
 
 func TestSessionSourcesSinceSeq(t *testing.T) {
-	s := &Server{history: newFetchHistoryCache()}
+	s := newSourcesTestServer(t)
 	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
 
 	for _, u := range []string{"https://example.com/1", "https://example.com/2", "https://example.com/3"} {
@@ -211,7 +225,7 @@ func TestSessionSourcesSinceSeq(t *testing.T) {
 }
 
 func TestSessionSourcesEmptyHistory(t *testing.T) {
-	s := &Server{history: newFetchHistoryCache()}
+	s := newSourcesTestServer(t)
 	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
 
 	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{})
@@ -228,7 +242,7 @@ func TestSessionSourcesEmptyHistory(t *testing.T) {
 }
 
 func TestSessionSourcesPrefersFinalURL(t *testing.T) {
-	s := &Server{history: newFetchHistoryCache()}
+	s := newSourcesTestServer(t)
 	ctx := withSessionID(withIdentity(context.Background(), "alice"), "S1")
 
 	s.recordFetch(ctx, fetchRecord{
