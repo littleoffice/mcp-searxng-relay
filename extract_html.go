@@ -305,7 +305,19 @@ func renderMarkdown(root *html.Node, maxChars int, linkBase *url.URL) (string, b
 				return st
 
 			case "li":
-				indent := strings.Repeat("  ", st.listDepth-1)
+				// listDepth is incremented by the enclosing <ul>/<ol>, so a
+				// well-formed item has listDepth >= 1.  An <li> with no list
+				// ancestor leaves it at 0: html.Parse preserves stray list
+				// items wherever they appear rather than synthesising a
+				// wrapper, and real pages do emit them (e.g. inside a
+				// <blockquote>).  Clamp to 0 — the item renders unindented at
+				// top level — rather than handing strings.Repeat a negative
+				// count, which panics and takes the whole server down.
+				indentDepth := st.listDepth - 1
+				if indentDepth < 0 {
+					indentDepth = 0
+				}
+				indent := strings.Repeat("  ", indentDepth)
 				if len(st.orderedStack) > 0 {
 					idx := len(st.orderedStack) - 1
 					st.orderedStack[idx]++
