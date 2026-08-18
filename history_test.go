@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -313,17 +315,53 @@ func TestCDATAFencePreservesAmpersandsInURLs(t *testing.T) {
 	}
 }
 
-func TestCDATAFenceSplitsTerminator(t *testing.T) {
+// The property that matters is not the shape of the escape but that the fence
+// is well-formed XML and the content comes back byte-identical.  Counting "]]>"
+// occurrences tested cdataEscape's implementation; parsing tests the contract.
+//
+// Note the escape yields "]]]]>" for a single "]]>": two literal brackets, then
+// the sequence that closes the section.  Reading that as two terminators is an
+// easy miscount, and exactly why this asserts on a parse instead.
+func TestCDATAFenceRoundTripsThroughXMLParser(t *testing.T) {
 	s := newTestFenceServer(t)
-	out, err := s.wrapFenceCDATA(`a]]>b`, FenceTypeData, FenceUntrusted, "test")
-	if err != nil {
-		t.Fatalf("wrapFenceCDATA: %v", err)
-	}
-	// The body must not contain a bare terminator that would end the
-	// section early and spill the remainder into the document.
-	body := out[strings.Index(out, "<![CDATA["):]
-	if strings.Count(body, "]]>") != 3 {
-		t.Errorf("expected the split form (]]]]><![CDATA[> plus the real terminator), got:\n%s", body)
+
+	for _, raw := range []string{
+		`https://geizhals.de/?cat=gehps&sort=p&xf=1_flex+atx`,
+		`a]]>b`,
+		`]]>`,
+		`]]>]]>`,
+		`a <![CDATA[ b`,
+		`{"url":"https://x.example/?a=1&b=2","t":"<script>"}`,
+	} {
+		out, err := s.wrapFenceCDATA(raw, FenceTypeData, FenceUntrusted, "test")
+		if err != nil {
+			t.Fatalf("wrapFenceCDATA(%q): %v", raw, err)
+		}
+
+		// Skip the awareness preamble; the element itself starts at the tag.
+		i := strings.Index(out, "<sec:fence")
+		if i < 0 {
+			t.Fatalf("no <sec:fence element in output for %q", raw)
+		}
+
+		var got strings.Builder
+		dec := xml.NewDecoder(strings.NewReader(out[i:]))
+		for {
+			tok, err := dec.Token()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Fatalf("fence is not well-formed XML for %q: %v\n%s", raw, err, out[i:])
+			}
+			if cd, ok := tok.(xml.CharData); ok {
+				got.WriteString(string(cd))
+			}
+		}
+
+		if strings.TrimSpace(got.String()) != raw {
+			t.Errorf("round trip altered content\n got: %q\nwant: %q", strings.TrimSpace(got.String()), raw)
+		}
 	}
 }
 
