@@ -636,3 +636,12 @@ func reconstructCanonical(openTag string) string {
 	}
 	return strings.Join(pairs, " ")
 }
+
+// A Server literal that omits fenceSigningKey must produce a named error
+// rather than an index-out-of-range from inside crypto/ed25519.
+func TestWrapFence_NilSigningKeyIsAnError(t *testing.T) {
+	s := &Server{}
+	if _, err := s.wrapFence("x", FenceTypeContent, FenceUntrusted, "test"); err == nil {
+		t.Fatal("expected an error for a missing signing key, got nil")
+	}
+}

@@ -51,6 +51,14 @@ type cacheEntry struct {
 	content   string
 	metadata  URLMetadata
 	expiresAt time.Time
+	// finalURL is the URL the transport actually ended on after redirects,
+	// and fetchedAt is when those bytes were retrieved.  Both are carried
+	// through the cache so a cache hit reports the truth rather than the
+	// request that happened to hit it: the citable URL is the final one,
+	// and a hit at 14:32 whose bytes were fetched at 14:28 must not claim
+	// 14:32.  See history.go.
+	finalURL  string
+	fetchedAt time.Time
 	// truncated records whether content was cut at the MaxExtractedChars
 	// extraction cap.  Carried alongside the text (rather than encoded as
 	// a sentinel inside it) so the pagination layer can tell the agent

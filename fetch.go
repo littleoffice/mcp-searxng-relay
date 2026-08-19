@@ -35,6 +35,13 @@ type urlFetchResult struct {
 	// Distinct from response-window truncation, which is applied later by
 	// paginateContent and is recoverable via start_index.
 	truncated bool
+	// finalURL, fetchedAt and fromCache feed the per-caller fetch history
+	// (history.go).  finalURL is what the model should cite — it is the
+	// only URL in the exchange the model never saw and therefore cannot
+	// reconstruct at all.
+	finalURL  string
+	fetchedAt time.Time
+	fromCache bool
 }
 
 func (r urlFetchResult) isImage() bool { return r.imageData != nil }
@@ -69,6 +76,16 @@ func (s *Server) toolReadURL(
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
 		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		// Recorded as well as logged.  A failed fetch missing from the
+		// history is indistinguishable from one never attempted, and the
+		// model would be free to cite the URL as read.
+		s.recordFetch(ctx, fetchRecord{
+			Tool:    "searxng_read_url",
+			URL:     in.URL,
+			Outcome: "error",
+			Err:     err.Error(),
+			Read:    readDepthNone,
+		})
 		lg.Error("fetch failed",
 			"url", in.URL, "error", err)
 		return nil, nil, err
@@ -81,6 +98,15 @@ func (s *Server) toolReadURL(
 		// Image responses are NOT fence-wrapped: the wrapper is a text-level
 		// trust boundary, and binary image data has no equivalent injection
 		// risk. Vision-model interpretation is out of scope for prompt fencing.
+		s.recordFetch(ctx, fetchRecord{
+			Tool:      "searxng_read_url",
+			URL:       in.URL,
+			FinalURL:  result.finalURL,
+			FetchedAt: result.fetchedAt,
+			Outcome:   "ok",
+			Read:      readDepthImage,
+			FromCache: result.fromCache,
+		})
 		lg.Info("fetch completed",
 			"url", in.URL, "kind", "image")
 		return &mcp.CallToolResult{
@@ -105,10 +131,31 @@ func (s *Server) toolReadURL(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
+	// "full" is claimed only when this window reached the end of the text
+	// AND extraction itself was not capped.  Anything less is "partial":
+	// the model asked for a document and holds one slice of it, which is
+	// not the same as having read it.
+	depth := readDepthPartial
+	if end >= len(result.text) && !result.truncated {
+		depth = readDepthFull
+	}
+	s.recordFetch(ctx, fetchRecord{
+		Tool:       "searxng_read_url",
+		URL:        in.URL,
+		FinalURL:   result.finalURL,
+		Title:      result.metadata.Title,
+		FetchedAt:  result.fetchedAt,
+		Outcome:    "ok",
+		Read:       depth,
+		CharsRead:  end - start,
+		TotalChars: len(result.text),
+		FromCache:  result.fromCache,
+	})
 	lg.Info("fetch completed",
 		"url", in.URL, "kind", "text",
 		"start_index", start, "end_index", end,
-		"total_chars", len(result.text))
+		"total_chars", len(result.text),
+		"read", string(depth))
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: fenced}},
 	}, nil, nil
@@ -233,6 +280,13 @@ func (s *Server) toolURLMetadata(
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
 		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		s.recordFetch(ctx, fetchRecord{
+			Tool:    "searxng_url_metadata",
+			URL:     in.URL,
+			Outcome: "error",
+			Err:     err.Error(),
+			Read:    readDepthNone,
+		})
 		lg.Error("metadata fetch failed",
 			"url", in.URL, "error", err)
 		return nil, nil, err
@@ -256,6 +310,20 @@ func (s *Server) toolURLMetadata(
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
+	// readDepthMetadata, never readDepthFull: the body was never returned.
+	// This is the distinction that "don't cite links you haven't read" is
+	// actually about, and the one a model reconstructing from context most
+	// reliably loses.
+	s.recordFetch(ctx, fetchRecord{
+		Tool:      "searxng_url_metadata",
+		URL:       in.URL,
+		FinalURL:  result.finalURL,
+		Title:     payload.Title,
+		FetchedAt: result.fetchedAt,
+		Outcome:   "ok",
+		Read:      readDepthMetadata,
+		FromCache: result.fromCache,
+	})
 	lg.Info("metadata fetch completed",
 		"url", in.URL,
 		"has_title", payload.Title != "",
@@ -288,7 +356,14 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 			if time.Now().Before(entry.expiresAt) {
 				lg.Debug("cache hit", "url", targetURL)
 				s.metrics.CacheHits.Add(1)
-				return urlFetchResult{text: entry.content, metadata: entry.metadata, truncated: entry.truncated}, nil
+				return urlFetchResult{
+					text:      entry.content,
+					metadata:  entry.metadata,
+					truncated: entry.truncated,
+					finalURL:  entry.finalURL,
+					fetchedAt: entry.fetchedAt,
+					fromCache: true,
+				}, nil
 			}
 			s.cache.Remove(targetURL)
 		}
@@ -337,6 +412,16 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		return urlFetchResult{}, fmt.Errorf("URL returned HTTP %d", resp.StatusCode)
 	}
 
+	// The transport followed any redirects (revalidating SSRF policy at each
+	// hop), so resp.Request.URL is the address the bytes actually came from.
+	// It is guarded because a hand-built response in a test may carry no
+	// Request.
+	fetchedAt := time.Now()
+	finalURL := targetURL
+	if resp.Request != nil && resp.Request.URL != nil {
+		finalURL = resp.Request.URL.String()
+	}
+
 	contentType := resp.Header.Get("Content-Type")
 
 	// Choose the body size limit based on content type.
@@ -377,6 +462,8 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 			imageData:     body,
 			imageMimeType: mimeType,
 			metadata:      URLMetadata{URL: targetURL},
+			finalURL:      finalURL,
+			fetchedAt:     fetchedAt,
 		}, nil
 	}
 
@@ -460,8 +547,16 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		metadata:  metadata,
 		expiresAt: time.Now().Add(s.cacheTTL),
 		truncated: truncated,
+		finalURL:  finalURL,
+		fetchedAt: fetchedAt,
 	})
-	return urlFetchResult{text: content, metadata: metadata, truncated: truncated}, nil
+	return urlFetchResult{
+		text:      content,
+		metadata:  metadata,
+		truncated: truncated,
+		finalURL:  finalURL,
+		fetchedAt: fetchedAt,
+	}, nil
 }
 
 // ── Encoding detection ────────────────────────────────────────────────────────
