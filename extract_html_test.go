@@ -85,3 +85,56 @@ func TestRenderMarkdown_ListNesting(t *testing.T) {
 		})
 	}
 }
+
+// Ordinary nested cell content must still render: the depth guard on the
+// table-cell mini-walk must not flatten or drop legitimately nested inline
+// markup, only the pathological far end of it.
+func TestRenderMarkdown_NestedCellRenders(t *testing.T) {
+	got := renderString(t, "<table><tr><td><span><b>deep cell text</b></span></td></tr></table>")
+	if !strings.Contains(got, "deep cell text") {
+		t.Errorf("nested cell rendered as %q, want it to contain %q", got, "deep cell text")
+	}
+}
+
+// The main renderer walk is depth-capped (maxDOMDepth) so adversarial nesting
+// cannot exhaust the goroutine stack — a fatal, unrecoverable crash rather than
+// a catchable panic. The separate <td>/<th> cell mini-walk must carry the same
+// cap: today x/net/html's parser refuses to build a tree deeper than 512 open
+// elements, which keeps the cell walk bounded in practice, but the renderer
+// should not depend on that parser limit staying put — the guard belongs in the
+// walk itself, matching the main path.
+//
+// The tree is built directly rather than via html.Parse precisely because the
+// parser's 512-node cap would otherwise reject a past-maxDOMDepth document, so
+// only a hand-built node tree can pin the renderer's own guarantee. The
+// assertion pins the shared budget: content shallower than the cap survives,
+// content past it is cut, and the render returns instead of recursing without
+// limit.
+func TestRenderMarkdown_DeeplyNestedCellIsBounded(t *testing.T) {
+	td := &html.Node{Type: html.ElementNode, Data: "td"}
+	// A direct text child sits within the cap and must always be collected.
+	td.AppendChild(&html.Node{Type: html.TextNode, Data: "shallow"})
+	// A chain of spans far deeper than maxDOMDepth, ending in a marker the
+	// guard must never reach.
+	cur := td
+	for i := 0; i < maxDOMDepth*2; i++ {
+		span := &html.Node{Type: html.ElementNode, Data: "span"}
+		cur.AppendChild(span)
+		cur = span
+	}
+	cur.AppendChild(&html.Node{Type: html.TextNode, Data: "marker"})
+
+	tr := &html.Node{Type: html.ElementNode, Data: "tr"}
+	tr.AppendChild(td)
+	table := &html.Node{Type: html.ElementNode, Data: "table"}
+	table.AppendChild(tr)
+
+	got, _ := renderMarkdown(table, 1_000_000, nil)
+
+	if !strings.Contains(got, "shallow") {
+		t.Errorf("cell text above the depth cap was dropped; got %q", got)
+	}
+	if strings.Contains(got, "marker") {
+		t.Error("cell content nested past maxDOMDepth was rendered; the depth guard did not fire")
+	}
+}

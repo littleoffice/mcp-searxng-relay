@@ -391,8 +391,19 @@ func renderMarkdown(root *html.Node, maxChars int, linkBase *url.URL) (string, b
 					literal bool
 				}
 				var frags []cellFrag
-				var collect func(*html.Node)
-				collect = func(cn *html.Node) {
+				// cdepth bounds this mini-walk exactly as maxDOMDepth bounds
+				// the main walk above.  A <td> can hold arbitrarily nested
+				// inline content, and html.Parse preserves whatever nesting a
+				// page ships; without this guard a pathologically deep cell
+				// would recurse until the goroutine stack is exhausted — a
+				// fatal, unrecoverable crash, not a catchable panic — bypassing
+				// the protection the main walker already enforces.  Seeded with
+				// the cell's own depth so the two walks share one budget.
+				var collect func(*html.Node, int)
+				collect = func(cn *html.Node, cdepth int) {
+					if cdepth > maxDOMDepth {
+						return
+					}
 					if cn.Type == html.TextNode {
 						if t := strings.TrimSpace(cn.Data); t != "" {
 							frags = append(frags, cellFrag{text: t})
@@ -402,7 +413,7 @@ func renderMarkdown(root *html.Node, maxChars int, linkBase *url.URL) (string, b
 					if cn.Type == html.ElementNode && cn.Data == "a" && linkBase != nil {
 						mark := len(frags)
 						for c := cn.FirstChild; c != nil; c = c.NextSibling {
-							collect(c)
+							collect(c, cdepth+1)
 						}
 						href := resolveHref(cn, linkBase)
 						if href == "" {
@@ -426,10 +437,10 @@ func renderMarkdown(root *html.Node, maxChars int, linkBase *url.URL) (string, b
 						return
 					}
 					for c := cn.FirstChild; c != nil; c = c.NextSibling {
-						collect(c)
+						collect(c, cdepth+1)
 					}
 				}
-				collect(n)
+				collect(n, depth)
 				parts := make([]string, 0, len(frags))
 				for _, f := range frags {
 					if f.literal {
