@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -71,6 +73,30 @@ func TestHistogramExposition(t *testing.T) {
 	// _sum is emitted in seconds as a float.
 	if !strings.Contains(out, "test_seconds_sum 45.21\n") {
 		t.Errorf("exposition sum wrong in:\n%s", out)
+	}
+}
+
+// mcp_active_sessions is a gauge: its value rises and falls as sessions open
+// and close. It must be exposed with TYPE gauge, not counter — Prometheus
+// treats a counter's every decrease as a reset, which silently corrupts
+// rate()/increase() over what is really a gauge. Pinned because the metric is
+// emitted through the same writeGauge helper as any future gauge, so a
+// regression here would mislabel all of them.
+func TestActiveSessionsExposedAsGauge(t *testing.T) {
+	// A minimal server is enough: ServeMetrics reads the live session set
+	// (empty here) and writes the exposition. CacheMaxEntries must be > 0 or
+	// the LRU constructor in NewServer rejects it.
+	srv := NewServer(Config{CacheMaxEntries: 1})
+
+	rec := httptest.NewRecorder()
+	srv.ServeMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	body := rec.Body.String()
+
+	if !strings.Contains(body, "# TYPE mcp_active_sessions gauge\n") {
+		t.Errorf("mcp_active_sessions must be exposed as a gauge; got:\n%s", body)
+	}
+	if strings.Contains(body, "# TYPE mcp_active_sessions counter\n") {
+		t.Error("mcp_active_sessions is still exposed as a counter")
 	}
 }
 
