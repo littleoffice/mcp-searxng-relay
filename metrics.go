@@ -238,7 +238,10 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 
 	writeGauge := func(name, help string, val int64) {
 		_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
-		_, _ = fmt.Fprintf(w, "# TYPE %s counter\n", name)
+		// TYPE gauge, not counter: the value rises and falls as sessions open
+		// and close. Exposing it as a counter makes rate()/increase() treat
+		// every decrease as a counter reset and silently corrupts those queries.
+		_, _ = fmt.Fprintf(w, "# TYPE %s gauge\n", name)
 		_, _ = fmt.Fprintf(w, "%s %d\n\n", name, val)
 	}
 
