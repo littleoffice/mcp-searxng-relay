@@ -141,7 +141,7 @@ podman build \
     -t mcp-searxng-relay:"${SERVER_VERSION}" .
 ```
 
-The multi-stage build compiles the binary on a digest-pinned `golang:1.26.3-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
+The multi-stage build compiles the binary on a digest-pinned `golang:1.26.6-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
 
 **Reproducibility.** Given the same source commit and `SOURCE_DATE_EPOCH` (canonically the commit's own timestamp), either invocation produces a byte-identical image — verifiable via `docker save <image> | sha256sum` or `podman save <image> | sha256sum`. The toolchain is pinned by content digest, the module graph is frozen by `go.sum`, and the build sets `-trimpath`, `-buildvcs=false`, `-buildid=`, and `-Wl,--build-id=none` so neither paths, VCS state, nor link-time build IDs leak into the binary. BuildKit's `rewrite-timestamp` and Podman's `--timestamp` both pin all layer file timestamps to the same value so the image envelope is reproducible, not just the binary inside. See [`supply-chain.md`](docs/supply-chain.md) for the full provenance statement and verification steps.
 
@@ -642,7 +642,7 @@ If you see tool calls failing with truncated SSE streams in a reverse-proxy depl
 docker build -t mcp-searxng-relay .
 ```
 
-The multi-stage build compiles the binary on the digest-pinned `golang:1.26.3-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
+The multi-stage build compiles the binary on the digest-pinned `golang:1.26.6-trixie` builder and copies only the static binary and CA certificates into a `scratch` runtime image.
 
 ---
 
