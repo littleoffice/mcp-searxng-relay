@@ -166,6 +166,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKEN` | HTTP mode¹ | — | Single bearer token; identity is logged as `"default"`. Backwards-compatible with single-tenant deployments |
 | `MCP_AUTH_TOKENS` | HTTP mode¹ | — | Comma-separated `identity:token` pairs for small static fleets, e.g. `alice:abc...,bob:def...` |
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
+| `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
 | `MCP_STATELESS` | no | `false` | If `true`, the SDK skips session-ID validation and treats each request as a fresh temporary session. See "Session modes" below |
 | `MCP_SESSION_MAX_AGE` | no | `168h` | Stateful mode only. How long a session may live before the janitor closes it. Go duration syntax (`30m`, `12h`, `168h` — no `d` or `w`) |
 | `MCP_SESSION_JANITOR_INTERVAL` | no | `15m` | Stateful mode only. How often the janitor sweeps for expired sessions. Same duration syntax |
@@ -641,13 +642,27 @@ Notes for running the server in production. Most of this lives in the code and t
 | `200 OK` | `{"status":"ok","searxng":"reachable"}` | Server is running and the upstream SearXNG instance answered with HTTP < 500. |
 | `503 Service Unavailable` | `{"status":"degraded","searxng":"unreachable"}` | Server is running but the upstream SearXNG probe failed. |
 
-The upstream-reachability result is cached for 10 seconds so a polling load balancer does not hammer SearXNG. The endpoint is intentionally unauthenticated (probes do not need to ship a bearer token) and intentionally not rate-limited (a high-frequency LB poller should never get 429 from `/health`).
+The upstream-reachability result is cached for 10 seconds so a polling load balancer does not hammer SearXNG. The endpoint is **open by default** (probes do not need to ship a bearer token) and intentionally not rate-limited (a high-frequency LB poller should never get 429 from `/health`).
 
-The included [`deployment.yaml`](deployment.yaml) uses `/health` only as the readiness probe; liveness is a plain TCP-socket probe. This is deliberate: a transient SearXNG outage should not cascade into kubelet killing the pod, only into traffic being routed away until SearXNG recovers.
+**Optionally requiring a token.** Set `MCP_HEALTH_TOKEN` to gate `/health` behind a bearer token — useful when the endpoint is reachable beyond the local host, since an open `/health` both discloses upstream-reachability status and (once per 10 s cache window) triggers a probe against SearXNG. The token is a **separate secret** from the MCP bearer tokens: the probe and the MCP endpoint are different trust domains, so they must not share a credential. It is validated against the same 32-character minimum, and a too-short value fails startup.
+
+> **⚠️ If you set `MCP_HEALTH_TOKEN`, every prober must send it.** The token is enforced for *all* callers of `/health`, so any health checker that does not present `Authorization: Bearer <token>` will start getting `401` and mark the service unhealthy. That includes external load balancers, uptime monitors, and Kubernetes `httpGet` probes. The one prober wired up automatically is the container `--healthcheck` self-probe, which reads the same env var (see below). For a Kubernetes `httpGet` probe, add the header explicitly:
+>
+> ```yaml
+> readinessProbe:
+>   httpGet:
+>     path: /health
+>     port: http
+>     httpHeaders:
+>       - name: Authorization
+>         value: Bearer <your-health-token>
+> ```
+
+The included [`deployment.yaml`](deploy/kubernetes/deployment.yaml) uses `/health` only as the readiness probe; liveness is a plain TCP-socket probe. This is deliberate: a transient SearXNG outage should not cascade into kubelet killing the pod, only into traffic being routed away until SearXNG recovers. (A TCP-socket liveness probe needs no `Authorization` header even when `MCP_HEALTH_TOKEN` is set, since it never hits `/health`.)
 
 ### `--healthcheck` CLI flag
 
-The container `HEALTHCHECK` directive in the [`Dockerfile`](Dockerfile) invokes `mcp-searxng-relay --healthcheck`, which is a self-probe: the binary makes a single `GET` to `http://127.0.0.1:$MCP_PORT/health` with a 5-second timeout, exits `0` if the response is `200`, and exits `1` otherwise. The flag exists because the `scratch` runtime image has no shell, `curl`, or `wget` to write a conventional probe with — the binary has to be its own probe.
+The container `HEALTHCHECK` directive in the [`Dockerfile`](Dockerfile) invokes `mcp-searxng-relay --healthcheck`, which is a self-probe: the binary makes a single `GET` to `http://127.0.0.1:$MCP_PORT/health` with a 5-second timeout, exits `0` if the response is `200`, and exits `1` otherwise. The flag exists because the `scratch` runtime image has no shell, `curl`, or `wget` to write a conventional probe with — the binary has to be its own probe. When `MCP_HEALTH_TOKEN` is set, the self-probe reads that same env var and sends the `Authorization: Bearer` header automatically, so a single environment entry covers both the server and its own probe.
 
 This is for plain `docker run` / Compose deployments. Kubernetes uses the HTTP probes in `deployment.yaml` and ignores the `HEALTHCHECK` directive.
 

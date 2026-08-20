@@ -22,24 +22,32 @@ import (
 type tokenDigest [32]byte
 
 type Config struct {
-	SearxngURL             string
-	AuthUsername           string
-	AuthPassword           string
-	SearxngTokens          []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
-	UserAgent              string
-	LogLevel               string
-	LogFormat              string
-	AuthTokens             map[tokenDigest]string // digest → identity, populated by parseAuthTokens
-	Stateless              bool                   // MCP_STATELESS=true → SDK skips session tracking
-	SessionMaxAge          time.Duration          // MCP_SESSION_MAX_AGE: idle-session reap age (stateful only)
-	SessionJanitorInterval time.Duration          // MCP_SESSION_JANITOR_INTERVAL: how often the janitor wakes
+	SearxngURL    string
+	AuthUsername  string
+	AuthPassword  string
+	SearxngTokens []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
+	UserAgent     string
+	LogLevel      string
+	LogFormat     string
+	AuthTokens    map[tokenDigest]string // digest → identity, populated by parseAuthTokens
+	// HealthToken gates the /health probe. It is a SEPARATE secret from the
+	// MCP bearer tokens in AuthTokens — the health probe and the MCP endpoint
+	// are different trust domains and must not share a credential. Populated
+	// by parseHealthToken from MCP_HEALTH_TOKEN; nil/empty (the default)
+	// leaves /health open, which is the historical behaviour. A set is used
+	// rather than a digest→identity map because the health token carries no
+	// identity: it is a single shared secret, not a per-caller credential.
+	HealthToken            map[tokenDigest]struct{}
+	Stateless              bool          // MCP_STATELESS=true → SDK skips session tracking
+	SessionMaxAge          time.Duration // MCP_SESSION_MAX_AGE: idle-session reap age (stateful only)
+	SessionJanitorInterval time.Duration // MCP_SESSION_JANITOR_INTERVAL: how often the janitor wakes
 	CacheTTL               time.Duration
 	CacheMaxEntries        int
 	MaxBodyBytes           int64
 	MaxPDFBytes            int64
 	MaxOfficeBytes         int64
 	MaxImageBytes          int64
-	MaxExtractedChars      int // MAX_EXTRACTED_CHARS: cap on extracted text cached per URL
+	MaxExtractedChars      int      // MAX_EXTRACTED_CHARS: cap on extracted text cached per URL
 	RateLimitRPS           float64  // MCP_RATE_LIMIT_RPS: per-caller sustained rate (requests/sec); 0 disables
 	RateLimitBurst         int      // MCP_RATE_LIMIT_BURST: token-bucket capacity
 	RateLimitExempt        []string // MCP_RATE_LIMIT_EXEMPT: identities bypassed entirely (e.g. monitoring)
@@ -395,6 +403,27 @@ func addAuthToken(m map[tokenDigest]string, identity, token, source string) erro
 	}
 	m[sha256.Sum256([]byte("Bearer "+token))] = identity
 	return nil
+}
+
+// parseHealthToken reads MCP_HEALTH_TOKEN and returns the digest set used to
+// authenticate the /health probe, or nil when the variable is unset (leaving
+// /health open — the historical default).
+//
+// The token is a single shared secret, distinct from the MCP bearer tokens:
+// it is validated against the same minAuthTokenLen minimum, and stored as the
+// SHA-256 of the full "Bearer "+token header value so requireHealthAuth can
+// look it up with the same fixed-size, timing-safe digest comparison used by
+// requireAuth. The raw token is never retained.
+func parseHealthToken() (map[tokenDigest]struct{}, error) {
+	raw := strings.TrimSpace(os.Getenv("MCP_HEALTH_TOKEN"))
+	if raw == "" {
+		return nil, nil
+	}
+	if len(raw) < minAuthTokenLen {
+		return nil, fmt.Errorf("MCP_HEALTH_TOKEN is %d characters, need at least %d (use `openssl rand -hex 32`)",
+			len(raw), minAuthTokenLen)
+	}
+	return map[tokenDigest]struct{}{sha256.Sum256([]byte("Bearer " + raw)): {}}, nil
 }
 
 // countIdentities returns the number of distinct identities in m.

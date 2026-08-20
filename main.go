@@ -58,6 +58,19 @@ func main() {
 	}
 	cfg.AuthTokens = tokens
 
+	// Optional /health bearer token (MCP_HEALTH_TOKEN) — a separate secret
+	// from the MCP tokens above. Parsed here, before NewServer copies cfg,
+	// so the server's config carries it (requireHealthAuth reads
+	// server.config, and so does the startup banner). Unset leaves /health
+	// open, matching historical behaviour; a too-short value fails startup
+	// with the same fail-loud stance as the MCP tokens.
+	healthToken, err := parseHealthToken()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.HealthToken = healthToken
+
 	// Compile the fetch allow-list (FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS).
 	// A malformed CIDR fails startup with a clear message — the same
 	// fail-loud stance as the auth-token parser, since this is a security
@@ -203,7 +216,18 @@ func runHealthCheck() {
 		os.Exit(1)
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:" + port + "/health")
+	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/health", nil)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		os.Exit(1)
+	}
+	// If MCP_HEALTH_TOKEN is set the endpoint requires it. The probe reads
+	// the same env var the server reads, so a single entry covers both the
+	// server and its own Docker HEALTHCHECK probe with no extra wiring.
+	if healthToken := strings.TrimSpace(os.Getenv("MCP_HEALTH_TOKEN")); healthToken != "" {
+		req.Header.Set("Authorization", "Bearer "+healthToken)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
 		os.Exit(1)
@@ -275,9 +299,12 @@ func runHTTP(cfg Config, server *Server, port string) {
 	// twice (once in callerKey, once in requireAuth).  Two SHA-256s of a
 	// ~70-byte input — negligible compared to anything else on this path.
 	mux.Handle("/", server.rateLimit(server.requireAuth(server.limitSessions(mcpHandler))))
-	// /health is intentionally unauthenticated for load balancers, and
-	// intentionally NOT rate-limited so a polling LB never gets 429.
-	mux.HandleFunc("/health", server.handleHealth)
+	// /health is open by default for load balancers, and intentionally NOT
+	// rate-limited so a polling LB never gets 429. requireHealthAuth gates it
+	// behind MCP_HEALTH_TOKEN when that is set (a no-op wrapper otherwise);
+	// note that turning it on means every prober — external LBs and
+	// Kubernetes httpGet probes included — must then send the token.
+	mux.Handle("/health", server.requireHealthAuth(http.HandlerFunc(server.handleHealth)))
 	// /fence/public-key is intentionally unauthenticated — public keys are public.
 	mux.HandleFunc("/fence/public-key", server.handleFencePublicKey)
 	// /metrics is behind the same bearer token as the MCP endpoint.  We
@@ -432,6 +459,9 @@ func logConfig(server *Server, mode, port string) {
 		// that, good."
 		row("auth tokens", fmt.Sprintf("%d configured (%d identities)",
 			len(cfg.AuthTokens), countIdentities(cfg.AuthTokens))),
+		// Whether the /health probe requires MCP_HEALTH_TOKEN. Shown only in
+		// HTTP mode — stdio has no /health endpoint for it to apply to.
+		row("health auth", healthAuthLabel(mode, len(cfg.HealthToken) > 0)),
 		// Rate limit: shown unconditionally so it's obvious whether the
 		// throttle is engaged.  "disabled" appears when RPS == 0.
 		row("rate limit", server.rateLimiter.describe()),
@@ -501,6 +531,20 @@ func enabledLabel(b bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// healthAuthLabel renders the /health authentication state for the banner.
+// It is mode-aware: stdio has no /health endpoint, so the token cannot apply
+// there and saying "disabled" would be misleading. In HTTP mode the disabled
+// string names the env var so an operator sees at a glance how to turn it on.
+func healthAuthLabel(mode string, enabled bool) string {
+	if mode != "streamable-http" {
+		return "n/a (stdio has no /health endpoint)"
+	}
+	if enabled {
+		return "enabled (MCP_HEALTH_TOKEN set)"
+	}
+	return "disabled (/health open — set MCP_HEALTH_TOKEN to require a token)"
 }
 
 // sessionModeLabel renders the cfg.Stateless bool as the human-readable
