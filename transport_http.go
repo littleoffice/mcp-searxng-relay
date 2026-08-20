@@ -92,7 +92,8 @@ func callerLogger(ctx context.Context) *slog.Logger {
 //
 //   - bearer-token authentication, possibly against multiple tokens
 //   - a soft session cap on initialize requests
-//   - an unauthenticated /health probe with cached upstream check
+//   - a /health probe (open by default, optionally gated by MCP_HEALTH_TOKEN)
+//     with a cached upstream check
 //   - Prometheus /metrics behind auth
 //
 // /metrics is registered in main.go alongside the SDK handler.
@@ -138,6 +139,37 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// requireHealthAuth is the /health-dedicated auth check. When a health token
+// is configured (len(cfg.HealthToken) > 0, from MCP_HEALTH_TOKEN) it verifies
+// the request's Authorization header against it — a separate secret from the
+// MCP bearer tokens in cfg.AuthTokens, because the health probe and the MCP
+// endpoint are two different trust domains and must not share a credential.
+//
+// The check mirrors requireAuth exactly: a single SHA-256 of the full header
+// value looked up in a set keyed by the digest of "Bearer "+token, so it
+// carries the same timing-safe property (fixed 32-byte comparison, no
+// short-circuit on the first differing byte) and never logs the offered
+// header. On failure it returns 401 with a WWW-Authenticate challenge.
+//
+// When no health token is configured the endpoint is open — the historical
+// behaviour, preserved so existing deployments keep working. Operators are
+// encouraged to set MCP_HEALTH_TOKEN whenever /health is reachable beyond the
+// local host; see the README for the load-balancer / Kubernetes caveat.
+func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(s.config.HealthToken) > 0 {
+			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+			if _, ok := s.config.HealthToken[got]; !ok {
+				slog.Warn("unauthorized health request", "remote", r.RemoteAddr)
+				w.Header().Set("WWW-Authenticate", `Bearer realm="health"`)
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // limitSessions rejects new initialize requests when the session cap is
 // reached. We identify initialize requests heuristically: a POST with no
 // Mcp-Session-Id header, since the SDK assigns the session ID and clients
@@ -172,8 +204,10 @@ func (s *Server) logRequests(next http.Handler) http.Handler {
 
 // ── /health ───────────────────────────────────────────────────────────────────
 
-// handleHealth is an unauthenticated liveness + readiness probe.
-// It checks reachability of the upstream SearXNG instance and returns:
+// handleHealth is a liveness + readiness probe. It is open by default;
+// wrapping it in requireHealthAuth (when MCP_HEALTH_TOKEN is set) gates it
+// behind a bearer token. It checks reachability of the upstream SearXNG
+// instance and returns:
 //
 //	200 OK        — server is running and SearXNG is reachable
 //	503 Unavailable — SearXNG probe failed

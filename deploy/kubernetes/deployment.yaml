@@ -89,6 +89,14 @@ spec:
             httpGet:
               path: /health
               port: http
+              # If you set MCP_HEALTH_TOKEN to gate /health, this probe must
+              # present it too — otherwise every readiness check gets 401 and
+              # the Pod never becomes Ready. Uncomment and match the token:
+              # httpHeaders:
+              #   - name: Authorization
+              #     value: Bearer <your-health-token>
+              # (The livenessProbe above is a TCP socket check, so it needs no
+              # header even when the token is set.)
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 5
