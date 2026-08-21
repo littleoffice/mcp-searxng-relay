@@ -94,7 +94,7 @@ func callerLogger(ctx context.Context) *slog.Logger {
 //   - a soft session cap on initialize requests
 //   - a /health probe (open by default, optionally gated by MCP_HEALTH_TOKEN)
 //     with a cached upstream check
-//   - Prometheus /metrics behind auth
+//   - Prometheus /metrics behind its own MCP_METRICS_TOKEN (401 when unset)
 //
 // /metrics is registered in main.go alongside the SDK handler.
 
@@ -139,35 +139,90 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 	})
 }
 
+// requireSharedSecret wraps next with a check against a single-shared-secret
+// digest set (see parseSharedSecretToken). Used by the /health and /metrics
+// gates, which authenticate a probe or a scraper rather than a caller and so
+// have no identity to attach to the context.
+//
+// The check mirrors requireAuth exactly: a single SHA-256 of the full header
+// value looked up in a set keyed by the digest of "Bearer "+token, so it
+// carries the same timing-safe property (fixed 32-byte comparison, no
+// short-circuit on the first differing byte) and never logs the offered
+// header. On failure it returns 401 with a WWW-Authenticate challenge naming
+// realm, and a warn line carrying logMsg and the remote address.
+func requireSharedSecret(
+	tokens map[tokenDigest]struct{}, realm, logMsg string, next http.Handler,
+) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
+		if _, ok := tokens[got]; !ok {
+			slog.Warn(logMsg, "remote", r.RemoteAddr)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm+`"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // requireHealthAuth is the /health-dedicated auth check. When a health token
 // is configured (len(cfg.HealthToken) > 0, from MCP_HEALTH_TOKEN) it verifies
 // the request's Authorization header against it — a separate secret from the
 // MCP bearer tokens in cfg.AuthTokens, because the health probe and the MCP
 // endpoint are two different trust domains and must not share a credential.
 //
-// The check mirrors requireAuth exactly: a single SHA-256 of the full header
-// value looked up in a set keyed by the digest of "Bearer "+token, so it
-// carries the same timing-safe property (fixed 32-byte comparison, no
-// short-circuit on the first differing byte) and never logs the offered
-// header. On failure it returns 401 with a WWW-Authenticate challenge.
-//
 // When no health token is configured the endpoint is open — the historical
 // behaviour, preserved so existing deployments keep working. Operators are
 // encouraged to set MCP_HEALTH_TOKEN whenever /health is reachable beyond the
 // local host; see the README for the load-balancer / Kubernetes caveat.
 func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(s.config.HealthToken) > 0 {
-			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-			if _, ok := s.config.HealthToken[got]; !ok {
-				slog.Warn("unauthorized health request", "remote", r.RemoteAddr)
-				w.Header().Set("WWW-Authenticate", `Bearer realm="health"`)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	if len(s.config.HealthToken) == 0 {
+		return next
+	}
+	return requireSharedSecret(s.config.HealthToken, "health", "unauthorized health request", next)
+}
+
+// requireMetricsAuth is the /metrics-dedicated auth check.  MCP_METRICS_TOKEN
+// is REQUIRED: with none configured the endpoint answers 401 to everyone,
+// including callers holding a valid MCP token.
+//
+// Why /metrics needs a credential of its own: it serves
+// mcp_fetches_by_domain_total, which names up to 512 destination hostnames the
+// relay has fetched — across every caller.  Gated on the shared MCP token
+// table, that makes each tenant's browsing targets readable by every other
+// tenant, and on a relay with FETCH_ALLOWED_HOSTS configured those hostnames
+// describe the internal estate.  A scraper is not a tenant and should not be
+// holding a tenant's credential; a tenant is not a scraper and should not be
+// able to read the fleet's egress profile.
+//
+// Closed rather than falling back to the MCP token table.  A fallback reads as
+// the safe choice — nothing breaks on upgrade — but it means the separation
+// this endpoint exists to draw silently does not hold wherever the operator
+// has not opted in, which is every deployment that has not yet read the
+// release note.  A security boundary that is only present when configured is
+// not a boundary; 401 until a credential exists is the honest default, and it
+// fails in the direction that discloses nothing.
+//
+// The cost is real and deliberate: an existing Prometheus scraper starts
+// getting 401s on upgrade until MCP_METRICS_TOKEN is set and its scrape config
+// updated.  runHTTP logs a warn line at startup when the token is absent so
+// the reason is in the logs before the first scrape fails, and the startup
+// banner says the endpoint is closed.
+//
+// The empty-map lookup in requireSharedSecret would already reject everything,
+// but the branch is written out so the closed state is a stated decision at
+// the call site rather than an emergent property of an empty map.
+func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
+	if len(s.config.MetricsToken) == 0 {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			slog.Warn("metrics request rejected: MCP_METRICS_TOKEN is not configured",
+				"remote", r.RemoteAddr,
+				"hint", "set MCP_METRICS_TOKEN to a value from `openssl rand -hex 32` and give it to your scraper")
+			w.Header().Set("WWW-Authenticate", `Bearer realm="metrics"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		})
+	}
+	return requireSharedSecret(s.config.MetricsToken, "metrics", "unauthorized metrics request", next)
 }
 
 // limitSessions rejects new initialize requests when the session cap is

@@ -171,6 +171,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKENS` | HTTP mode¹ | — | Comma-separated `identity:token` pairs for small static fleets, e.g. `alice:abc...,bob:def...` |
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
 | `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
+| `MCP_METRICS_TOKEN` | to scrape | — | Bearer token that gates `GET /metrics`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset, `/metrics` returns `401` to everyone, including callers holding a valid MCP token. Same 32-character minimum. Required if you scrape metrics (see [Metrics](#metrics)) |
 | `MCP_STATELESS` | no | `false` | If `true`, the SDK skips session-ID validation and treats each request as a fresh temporary session. See "Session modes" below |
 | `MCP_SESSION_MAX_AGE` | no | `168h` | Stateful mode only. How long a session may live before the janitor closes it. Go duration syntax (`30m`, `12h`, `168h` — no `d` or `w`) |
 | `MCP_SESSION_JANITOR_INTERVAL` | no | `15m` | Stateful mode only. How often the janitor sweeps for expired sessions. Same duration syntax |
@@ -626,7 +627,7 @@ Rejections return HTTP `429 Too Many Requests` with a `Retry-After` header conta
 
 The bucket store is an LRU capped at 10,000 entries. Identities are bounded by the configured auth-token table so they all fit comfortably; the cap bounds memory under an IP-rotation attack, at the cost that evicted buckets reset to full on next contact (which doesn't materially affect throttling for distinct attackers).
 
-**What this doesn't cover.** `/health` is never rate-limited so a polling load balancer can't be flagged as abusive. `/metrics` is also exempt — a scraper that's polling on a fixed interval shouldn't produce gaps in Prometheus that look like outages, and an abusive scraper is better contained by withholding the token than by 429-ing the metrics endpoint. `/fence/public-key` is unauthenticated and unthrottled (it's a public key, public). Stdio mode has no HTTP middleware and therefore no rate limit, but it's also a single trusted process with no remote attack surface.
+**What this doesn't cover.** `/health` is never rate-limited so a polling load balancer can't be flagged as abusive. `/metrics` is also exempt — a scraper that's polling on a fixed interval shouldn't produce gaps in Prometheus that look like outages, and an abusive scraper is better contained by rotating `MCP_METRICS_TOKEN` than by 429-ing the metrics endpoint. Because that token is separate from the MCP tokens, revoking it costs the scraper nothing but its own access. `/fence/public-key` is unauthenticated and unthrottled (it's a public key, public). Stdio mode has no HTTP middleware and therefore no rate limit, but it's also a single trusted process with no remote attack surface.
 
 **Exempt list.** `MCP_RATE_LIMIT_EXEMPT=ci,uptime-monitor` skips the limiter entirely for those identities. Use it for internal monitoring agents that hit the MCP root endpoint (rather than `/metrics`), and for CI pipelines that run high-rate functional tests against the live service. Tokens for exempt identities should still come from a strong source — exemption is about volume, not trust.
 
@@ -775,7 +776,20 @@ The `session_id` field joins each tool call back to the `"session initialized"` 
 
 ## Metrics
 
-In HTTP mode, `GET /metrics` returns Prometheus text-format counters. Authentication applies (same bearer token as the tool endpoints).
+In HTTP mode, `GET /metrics` returns Prometheus text-format counters, gated by `MCP_METRICS_TOKEN`.
+
+> **⚠️ `MCP_METRICS_TOKEN` is required to scrape.** With it unset, `/metrics` returns `401` to *every* caller — including one holding a valid MCP token. Set it to a value from `openssl rand -hex 32` and give that value to your scraper:
+>
+> ```
+> MCP_METRICS_TOKEN=<openssl rand -hex 32>
+> ```
+>
+> **It must not be one of your MCP tokens.** `mcp_fetches_by_domain_total` names up to 512 destination hostnames this relay has fetched, across *all* callers. Served to the MCP token table, that lets each tenant read which hosts every other tenant has been reading — and on a relay with `FETCH_ALLOWED_HOSTS` configured, those are your internal hostnames. A scraper is not a tenant and a tenant is not a scraper; the credential separates them in both directions.
+>
+> The endpoint is closed rather than open by default because a boundary that only exists once configured is not a boundary — it would silently fail to hold on every deployment that had not yet read this paragraph. `/health` takes the opposite default (open unless `MCP_HEALTH_TOKEN` is set) because it discloses two fixed fields, not the fleet's egress profile.
+>
+> The startup banner's `metrics auth` row reports `CLOSED` when no token is set, and the server logs a warn line at startup saying so, so a blank dashboard is diagnosable from this end rather than from the scraper's.
+
 
 The exposed series are:
 
