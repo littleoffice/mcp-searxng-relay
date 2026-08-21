@@ -37,7 +37,21 @@ type Config struct {
 	// leaves /health open, which is the historical behaviour. A set is used
 	// rather than a digest→identity map because the health token carries no
 	// identity: it is a single shared secret, not a per-caller credential.
-	HealthToken            map[tokenDigest]struct{}
+	HealthToken map[tokenDigest]struct{}
+	// MetricsToken gates the /metrics endpoint, and is a SEPARATE secret from
+	// the MCP bearer tokens for the same reason HealthToken is. /metrics
+	// exposes mcp_fetches_by_domain_total, i.e. the set of hostnames every
+	// *other* tenant has been fetching. On a relay with FETCH_ALLOWED_HOSTS
+	// set those are internal hostnames, so serving it to a per-tenant
+	// credential discloses the internal estate to every tenant that holds one.
+	//
+	// Populated by parseMetricsToken from MCP_METRICS_TOKEN. Unlike
+	// HealthToken, this one is REQUIRED: nil/empty closes /metrics to
+	// everyone (401) rather than falling back to the MCP token table. See
+	// requireMetricsAuth for why the boundary is not made optional, and note
+	// that this differs deliberately from HealthToken, whose unset state
+	// leaves /health open.
+	MetricsToken           map[tokenDigest]struct{}
 	Stateless              bool          // MCP_STATELESS=true → SDK skips session tracking
 	SessionMaxAge          time.Duration // MCP_SESSION_MAX_AGE: idle-session reap age (stateful only)
 	SessionJanitorInterval time.Duration // MCP_SESSION_JANITOR_INTERVAL: how often the janitor wakes
@@ -57,8 +71,8 @@ type Config struct {
 	// FetchACL is the compiled, validated form populated in main() (see
 	// newFetchACL). Storing the raw lists too keeps the startup banner and any
 	// future /config introspection honest about what was configured.
-	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: hostnames exempt from the public-IP check
-	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: IP ranges treated as reachable
+	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: host:port entries exempt from the public-IP check
+	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: range/prefix:port entries treated as reachable
 	FetchACL          *fetchACL // compiled form; nil until main() validates the two lists
 
 	// Egress proxy for the fetch tool. Deliberately separate from the
@@ -233,9 +247,16 @@ func configFromEnv() Config {
 	// per trust boundary keeps the enforcement where it cannot be bypassed.
 	c.SearxngTokens = parseCSV(os.Getenv("SEARXNG_TOKENS"))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
-	// CIDRs are compiled and validated in main() via newFetchACL so a bad
-	// entry fails startup with a clear message instead of being silently
+	// hosts and CIDRs are compiled and validated in main() via newFetchACL so
+	// a bad entry fails startup with a clear message instead of being silently
 	// dropped. Empty (the default) leaves the strict public-only policy.
+	//
+	// Both lists require an explicit port: "host:port" and
+	// "range/prefix:port". A bare entry is a startup error rather than a
+	// shorthand for "every port". See the allowedHosts and allowedCIDRs
+	// comments in ssrf.go for why, and note that a default-route prefix
+	// (0.0.0.0/0, ::/0) is refused outright — it removes the address policy
+	// rather than widening it.
 	c.FetchAllowedHosts = parseCSV(os.Getenv("FETCH_ALLOWED_HOSTS"))
 	c.FetchAllowedCIDRs = parseCSV(os.Getenv("FETCH_ALLOWED_CIDRS"))
 	// Egress proxy — validated in main() via fetchACL.setProxy so a bad URL
@@ -405,25 +426,44 @@ func addAuthToken(m map[tokenDigest]string, identity, token, source string) erro
 	return nil
 }
 
-// parseHealthToken reads MCP_HEALTH_TOKEN and returns the digest set used to
-// authenticate the /health probe, or nil when the variable is unset (leaving
-// /health open — the historical default).
+// parseSharedSecretToken reads a single-shared-secret bearer token from envVar
+// and returns the digest set an auth middleware looks it up in, or nil when the
+// variable is unset.
 //
-// The token is a single shared secret, distinct from the MCP bearer tokens:
-// it is validated against the same minAuthTokenLen minimum, and stored as the
-// SHA-256 of the full "Bearer "+token header value so requireHealthAuth can
-// look it up with the same fixed-size, timing-safe digest comparison used by
-// requireAuth. The raw token is never retained.
-func parseHealthToken() (map[tokenDigest]struct{}, error) {
-	raw := strings.TrimSpace(os.Getenv("MCP_HEALTH_TOKEN"))
+// Backs both MCP_HEALTH_TOKEN and MCP_METRICS_TOKEN. These are shared secrets
+// rather than per-caller credentials — they carry no identity, so a set is the
+// right shape, not the digest→identity map AuthTokens uses. Both are validated
+// against the same minAuthTokenLen minimum, and both are stored as the SHA-256
+// of the full "Bearer "+token header value so the middleware can look them up
+// with the same fixed-size, timing-safe digest comparison used by requireAuth.
+// The raw token is never retained.
+//
+// Kept as one function rather than two near-identical ones so a change to the
+// storage scheme — the "Bearer " prefix, the digest, the length floor — cannot
+// land on one endpoint's credential and miss the other's.
+func parseSharedSecretToken(envVar string) (map[tokenDigest]struct{}, error) {
+	raw := strings.TrimSpace(os.Getenv(envVar))
 	if raw == "" {
 		return nil, nil
 	}
 	if len(raw) < minAuthTokenLen {
-		return nil, fmt.Errorf("MCP_HEALTH_TOKEN is %d characters, need at least %d (use `openssl rand -hex 32`)",
-			len(raw), minAuthTokenLen)
+		return nil, fmt.Errorf("%s is %d characters, need at least %d (use `openssl rand -hex 32`)",
+			envVar, len(raw), minAuthTokenLen)
 	}
 	return map[tokenDigest]struct{}{sha256.Sum256([]byte("Bearer " + raw)): {}}, nil
+}
+
+// parseHealthToken reads MCP_HEALTH_TOKEN. Unset leaves /health open — the
+// historical default.
+func parseHealthToken() (map[tokenDigest]struct{}, error) {
+	return parseSharedSecretToken("MCP_HEALTH_TOKEN")
+}
+
+// parseMetricsToken reads MCP_METRICS_TOKEN. Unset closes /metrics entirely —
+// the endpoint 401s every caller, including ones holding a valid MCP token.
+// See Config.MetricsToken and requireMetricsAuth.
+func parseMetricsToken() (map[tokenDigest]struct{}, error) {
+	return parseSharedSecretToken("MCP_METRICS_TOKEN")
 }
 
 // countIdentities returns the number of distinct identities in m.

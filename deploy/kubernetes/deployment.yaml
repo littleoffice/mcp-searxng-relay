@@ -51,6 +51,20 @@ spec:
               # without per-deployment regex work.  Drop to "text" if you
               # only ever read logs with kubectl logs.
               value: json
+            # Credential for /metrics, from the metrics-token key in the
+            # mcp-auth Secret.  Required to scrape: without it /metrics 401s
+            # every caller, including ones holding a valid MCP token.  It is
+            # deliberately NOT one of the tokens in the tokens file —
+            # mcp_fetches_by_domain_total names the destination hosts this
+            # relay has fetched across all callers, which no single tenant
+            # should be able to read.  Point your ServiceMonitor at this
+            # value.  Drop this entry (and the Secret key) if you do not
+            # scrape metrics; the endpoint stays closed, which is correct.
+            - name: MCP_METRICS_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mcp-auth
+                  key: metrics-token
             # Uncomment to switch to stateless mode (see README "Deployment
             # shapes"):
             # - name: MCP_STATELESS

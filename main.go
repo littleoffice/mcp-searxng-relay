@@ -71,6 +71,21 @@ func main() {
 	}
 	cfg.HealthToken = healthToken
 
+	// /metrics bearer token (MCP_METRICS_TOKEN) — again a secret of its own,
+	// and unlike MCP_HEALTH_TOKEN it is required rather than optional.
+	// /metrics serves mcp_fetches_by_domain_total, which names the destination
+	// hosts this relay has fetched across ALL callers; serving that to the
+	// shared MCP token table would make every tenant's fetch targets readable
+	// by every other tenant. Unset closes the endpoint (401) rather than
+	// falling back — see requireMetricsAuth. A too-short value fails startup
+	// with the same fail-loud stance as the MCP tokens.
+	metricsToken, err := parseMetricsToken()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.MetricsToken = metricsToken
+
 	// Compile the fetch allow-list (FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS).
 	// A malformed CIDR fails startup with a clear message — the same
 	// fail-loud stance as the auth-token parser, since this is a security
@@ -113,6 +128,11 @@ func main() {
 			"allowed_hosts", cfg.FetchAllowedHosts,
 			"allowed_cidrs", cfg.FetchAllowedCIDRs,
 			"hint", "the fetch tool can now reach these internal hosts/ranges; keep the lists tight")
+		// Per-range detail. A prefix length does not convey its own size —
+		// "10.0.0.0/8" is eleven characters that grant reach to 16.7 million
+		// addresses — so the count and any sensitive address the range sweeps
+		// in are stated explicitly rather than left to be inferred.
+		acl.logCIDRBlastRadius()
 	}
 
 	// A proxy scoped to allow-listed hosts changes reach but not enforcement,
@@ -258,6 +278,15 @@ func runHTTP(cfg Config, server *Server, port string) {
 		os.Exit(1)
 	}
 
+	// /metrics has no credential, so it will 401 every scrape. Say so once at
+	// startup: the alternative is an operator debugging a silent monitoring
+	// gap from the scraper's side, where the 401 looks like a scrape-config
+	// bug rather than a deliberate default on this end.
+	if len(cfg.MetricsToken) == 0 {
+		slog.Warn("/metrics is closed: MCP_METRICS_TOKEN is not set",
+			"hint", "generate one with `openssl rand -hex 32`; it is deliberately NOT the MCP auth token, because /metrics discloses the destination hosts fetched for every caller")
+	}
+
 	logConfig(server, "streamable-http", port)
 
 	// The SDK's StreamableHTTPHandler implements the full transport:
@@ -307,12 +336,14 @@ func runHTTP(cfg Config, server *Server, port string) {
 	mux.Handle("/health", server.requireHealthAuth(http.HandlerFunc(server.handleHealth)))
 	// /fence/public-key is intentionally unauthenticated — public keys are public.
 	mux.HandleFunc("/fence/public-key", server.handleFencePublicKey)
-	// /metrics is behind the same bearer token as the MCP endpoint.  We
-	// deliberately do NOT rate-limit it: monitoring scrapers poll on a
-	// schedule that's already low-rate, and a 429 from /metrics would
-	// produce gaps in Prometheus that look identical to outages.  An
-	// abusive scraper is better contained by withholding the token.
-	mux.Handle("/metrics", server.requireAuth(http.HandlerFunc(server.ServeMetrics)))
+	// /metrics is behind MCP_METRICS_TOKEN when one is set, and behind the
+	// MCP token table otherwise (see requireMetricsAuth for why a dedicated
+	// secret is worth setting).  We deliberately do NOT rate-limit it:
+	// monitoring scrapers poll on a schedule that's already low-rate, and a
+	// 429 from /metrics would produce gaps in Prometheus that look identical
+	// to outages.  An abusive scraper is better contained by withholding the
+	// token.
+	mux.Handle("/metrics", server.requireMetricsAuth(http.HandlerFunc(server.ServeMetrics)))
 
 	srv := &http.Server{
 		Addr:        ":" + port,
@@ -462,6 +493,11 @@ func logConfig(server *Server, mode, port string) {
 		// Whether the /health probe requires MCP_HEALTH_TOKEN. Shown only in
 		// HTTP mode — stdio has no /health endpoint for it to apply to.
 		row("health auth", healthAuthLabel(mode, len(cfg.HealthToken) > 0)),
+		// Whether /metrics has a credential at all. Worth showing
+		// unconditionally: without one the endpoint is closed, and an
+		// operator whose dashboards have gone blank should find the reason
+		// here rather than in the scraper's logs.
+		row("metrics auth", metricsAuthLabel(mode, len(cfg.MetricsToken) > 0)),
 		// Rate limit: shown unconditionally so it's obvious whether the
 		// throttle is engaged.  "disabled" appears when RPS == 0.
 		row("rate limit", server.rateLimiter.describe()),
@@ -545,6 +581,21 @@ func healthAuthLabel(mode string, enabled bool) string {
 		return "enabled (MCP_HEALTH_TOKEN set)"
 	}
 	return "disabled (/health open — set MCP_HEALTH_TOKEN to require a token)"
+}
+
+// metricsAuthLabel renders the /metrics authentication state for the banner.
+// Mode-aware for the same reason healthAuthLabel is: stdio has no /metrics
+// endpoint. The unset string says the endpoint is CLOSED rather than
+// "disabled", because the distinction an operator needs is "nothing can
+// scrape this" and not "a feature is off".
+func metricsAuthLabel(mode string, configured bool) string {
+	if mode != "streamable-http" {
+		return "n/a (stdio has no /metrics endpoint)"
+	}
+	if configured {
+		return "enabled (MCP_METRICS_TOKEN set)"
+	}
+	return "CLOSED (/metrics returns 401 — set MCP_METRICS_TOKEN to enable scraping)"
 }
 
 // sessionModeLabel renders the cfg.Stateless bool as the human-readable

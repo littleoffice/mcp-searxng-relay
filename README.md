@@ -61,7 +61,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
 - **Verifiable source list** — `searxng_session_sources` returns the URLs the relay actually fetched for a caller, byte-exact and newest-first, with how much of each was read. Agents transcribe URLs badly when composing a final answer far from the tool call that produced them, and fabricate them outright when they never fetched one; this gives the model ground truth to copy from instead of recall. Delivered in a CDATA-encoded fence so URLs survive the round trip unescaped.
 - **Response caching** with configurable TTL and per-request cache bypass
-- **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`.
+- **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`; both require an explicit port, so allow-listing a wiki never also exposes the Redis or kubelet listener beside it.
 - **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging
 - **Per-caller rate limiting** — token-bucket throttle keyed by identity when authenticated and by source IP otherwise. Configurable RPS and burst, default 5 rps / burst 10. Exposed at `mcp_rate_limit_rejections_total`.
 - **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients. The signing key is per-process by default, or operator-supplied via `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE` when a verifier needs a stable fingerprint to pin.
@@ -171,6 +171,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKENS` | HTTP mode¹ | — | Comma-separated `identity:token` pairs for small static fleets, e.g. `alice:abc...,bob:def...` |
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
 | `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
+| `MCP_METRICS_TOKEN` | to scrape | — | Bearer token that gates `GET /metrics`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset, `/metrics` returns `401` to everyone, including callers holding a valid MCP token. Same 32-character minimum. Required if you scrape metrics (see [Metrics](#metrics)) |
 | `MCP_STATELESS` | no | `false` | If `true`, the SDK skips session-ID validation and treats each request as a fresh temporary session. See "Session modes" below |
 | `MCP_SESSION_MAX_AGE` | no | `168h` | Stateful mode only. How long a session may live before the janitor closes it. Go duration syntax (`30m`, `12h`, `168h` — no `d` or `w`) |
 | `MCP_SESSION_JANITOR_INTERVAL` | no | `15m` | Stateful mode only. How often the janitor sweeps for expired sessions. Same duration syntax |
@@ -190,8 +191,8 @@ All configuration is via environment variables. The server will refuse to start 
 | `MAX_EXTRACTED_CHARS` | no | `1000000` | Cap on *extracted text* kept (and cached) per URL, as distinct from the `MAX_*_BYTES` caps on the raw response body. This is what `searxng_read_url` pagination pages through; each response returns at most 100k characters of it. Memory note: worst case the cache holds `CACHE_MAX_ENTRIES × MAX_EXTRACTED_CHARS` bytes of content (~1 GB at defaults, though real pages rarely approach the cap) — lower either value on tight memory budgets, raise this one to page deeper into very large documents |
 | `EXTRACT_LINKS` | no | `true` | Whether hyperlink targets from fetched **HTML** are surfaced to the model. When enabled, anchors render as Markdown links (`[label](https://resolved-target)`) in both prose and table cells, matching what Office documents already produce. Relative hrefs are resolved against the page URL; only `http`/`https` targets are emitted (`javascript:`, `data:` and friends are dropped). Set to `false` to restore the previous behaviour of emitting anchor text only. Does not affect Office documents, whose links come through the `office_oxide` converter either way |
 | `PRUNE_SELECTOR` | no | `[class*="related"], [id*="related"]` | CSS selector whose matches are removed **before** trafilatura decides which subtree is the article. Without it, sites that wrap boilerplate in an attractive-looking container can have that container selected instead of the story — silently, with plausible text and no error. The default is the narrowest selector measured to fix a real case (a Register article where the most-popular sidebar was extracted in place of the body) with no change to a heise article. Set to an empty string to disable pruning. A malformed selector fails startup rather than being silently ignored. Note that `header` and `footer` are deliberately **not** included: `<article><header><h1>` is ordinary HTML5 and pruning it decapitates articles |
-| `FETCH_ALLOWED_HOSTS` | no | — | Comma-separated hostnames whose fetches bypass the public-IP SSRF check, so the fetch tool can reach named internal resources (e.g. `confluence.corp,wiki.internal`). Matched exactly on the request hostname (case- and trailing-dot-insensitive; no subdomain wildcards) and re-checked on every redirect hop. See [SSRF protection](#security-notes) |
-| `FETCH_ALLOWED_CIDRS` | no | — | Comma-separated IP ranges treated as reachable even though the default policy would block them (e.g. `10.0.0.0/8,192.168.0.0/16`). Checked against the *resolved* IP at dial time and on each redirect, so it stays robust against DNS rebinding. A malformed entry fails startup. See [SSRF protection](#security-notes) |
+| `FETCH_ALLOWED_HOSTS` | no | — | Comma-separated `host:port` entries whose fetches bypass the public-IP SSRF check, so the fetch tool can reach named internal resources (e.g. `confluence.corp:443,wiki.internal:8443`). **The port is mandatory** — a bare hostname fails startup. Matched exactly on the request hostname (case- and trailing-dot-insensitive; no subdomain wildcards) and re-checked on every redirect hop. See [SSRF protection](#security-notes) |
+| `FETCH_ALLOWED_CIDRS` | no | — | Comma-separated `range/prefix:port` entries treated as reachable even though the default policy would block them (e.g. `10.1.2.0/24:443,192.168.5.0/24:8443`). **The port is mandatory**; a default route (`0.0.0.0/0`, `::/0`) is refused. Checked against the *resolved* IP at dial time and on each redirect, so it stays robust against DNS rebinding. Each range's size is logged at startup. See [SSRF protection](#security-notes) |
 | `FETCH_PROXY` | no | — | Egress proxy for the fetch tool (`http`, `https`, `socks5`, `socks5h`), e.g. `http://proxy.corp:3128`. On its own it applies **only** to hosts on `FETCH_ALLOWED_HOSTS`. Deliberately *not* read from `HTTP_PROXY`/`HTTPS_PROXY`. A malformed URL or unsupported scheme fails startup. See [SSRF protection](#security-notes) |
 | `FETCH_PROXY_ALL` | no | `false` | Route **every** fetch through `FETCH_PROXY`, not just allow-listed hosts. For networks with no direct egress. Delegates the per-IP SSRF policy to the proxy: `FETCH_ALLOWED_CIDRS` and the public-IP check stop applying. Setting it without `FETCH_PROXY` fails startup. See [SSRF protection](#security-notes) |
 | `FENCE_SIGNING_KEY` | no | — | Ed25519 private key used to sign `<sec:fence>` elements, supplied inline. Accepts PKCS#8 PEM, base64 PKCS#8 DER, a base64 32-byte seed, or a base64 64-byte private key — the encoding is auto-detected, and line-wrapped base64 is fine. When unset (the default) a fresh key is generated at every process start. Mutually exclusive with `FENCE_SIGNING_KEY_FILE`: setting both fails startup, as does a malformed key. See [Fence signing key](#security-notes) |
@@ -568,10 +569,47 @@ Both checks run before any byte hits the wire, and the redirect chain is revalid
 
 *Reaching internal resources (opt-in).* The default above blocks all non-public addresses, which is the right posture for a tool that fetches attacker-influenced URLs. Operators who run the relay inside a trusted network and want it to read internal resources — a self-hosted Confluence, Jira, GitLab, or wiki — can widen the policy with two allow-lists, **both empty by default** (so the default behaviour is unchanged):
 
-- `FETCH_ALLOWED_HOSTS` — exact hostnames that skip the public-IP check entirely. The match is on the *request* hostname, not a resolved IP, so you can name an internal host without pinning its address; the caller cannot forge it (the hostname comes from the URL an authenticated caller asked for) and you control DNS for your own names, so this does not reopen the rebinding hole. Matching is case- and trailing-dot-insensitive and exact — `confluence.corp` does **not** match `sub.confluence.corp`.
-- `FETCH_ALLOWED_CIDRS` — IP ranges treated as reachable. Checked against the *resolved* IP at dial time and on every redirect hop, so it remains rebinding-safe: an attacker who rebinds a public-looking name to a private IP is still blocked unless that exact IP falls inside a range you listed.
+- `FETCH_ALLOWED_HOSTS` — exact `host:port` entries that skip the public-IP check. The match is on the *request* hostname, not a resolved IP, so you can name an internal host without pinning its address; the caller cannot forge it (the hostname comes from the URL an authenticated caller asked for) and you control DNS for your own names, so this does not reopen the rebinding hole. Matching is case- and trailing-dot-insensitive and exact — `confluence.corp:443` does **not** match `sub.confluence.corp:443`.
 
-The two are independent (OR semantics): a fetch is permitted if its host is allow-listed, **or** its resolved IP is public, **or** its resolved IP is inside an allowed CIDR. Both are re-evaluated on every redirect hop, so an open redirect on an allow-listed host still cannot pivot to a blocked internal address.
+  **The port is mandatory.** Write `host:port`; a bare hostname is a startup error. This is because allow-listing a hostname alone would hand the fetch tool whatever *else* that machine is listening on — Redis on 6379, etcd on 2379, a kubelet on 10250. An authenticated caller only has to ask for `http://confluence.corp:6379/`, and a redirect from the allow-listed service reaches the same places. Naming the port makes you state the reach you actually intend:
+
+  ```
+  FETCH_ALLOWED_HOSTS=confluence.corp:443,wiki.internal:8443
+  ```
+
+  **You do not have to spell the port out in URLs.** The entry is compared against the request's *effective* port, with the scheme default filled in first, so `confluence.corp:443` matches a plain `https://confluence.corp/page` and `wiki.internal:80` matches `http://wiki.internal/page`. A host serving both schemes needs both entries (`wiki.internal:80,wiki.internal:443`); ports accumulate per host rather than overwriting.
+
+  IPv6 literals take the bracketed URL form: `[fd00::1]:8443`.
+
+  A bad entry — no port, an empty or out-of-range port, or a value that is really a URL — fails startup with a message naming the entry and the form expected. It is never silently dropped: an allow-list line that parses but can never match is the worst outcome available here, because you would believe access was granted and the fetch would fail far from the config that caused it.
+- `FETCH_ALLOWED_CIDRS` — IP ranges treated as reachable, written `range/prefix:port`. Checked against the *resolved* IP at dial time and on every redirect hop, so it remains rebinding-safe: an attacker who rebinds a public-looking name to a private IP is still blocked unless that exact IP falls inside a range you listed, on a port you listed.
+
+  **The port is mandatory here too, and it matters more than it does for hostnames.** A hostname names one machine, so the port was the whole of its exposure. A range already covers many machines, and leaving the port open multiplies that by 65535:
+
+  | Entry | Addresses | Reachable address:port pairs |
+  |---|---:|---:|
+  | `10.1.2.0/24:443` | 256 | 256 |
+  | `10.1.2.0/24` *(rejected)* | 256 | 16,776,960 |
+  | `10.0.0.0/8:443` | 16,777,216 | 16,777,216 |
+  | `10.0.0.0/8` *(rejected)* | 16,777,216 | 1,099,494,850,560 |
+
+  IPv6 works the same way — `fd00:1234::/64:8443`. The colons are not ambiguous: a CIDR always ends in `/<prefixlen>`, and a prefix length is digits only, so the port is whatever follows the last colon after the slash.
+
+  **A default route is refused, not warned about.** `0.0.0.0/0` or `::/0` does not widen the address policy, it removes it — loopback, link-local and the cloud metadata endpoint all become reachable, and the fetch tool is left with no address restriction at all. If enforcement genuinely belongs somewhere else, say so with `FETCH_PROXY_ALL`, which is explicit about the delegation.
+
+  **Width is reported, not capped.** Every allowed range is logged at startup with the number of addresses it covers, and separately if it sweeps in a sensitive address:
+
+  ```
+  WARN fetch allow-list covers an IP range cidr=10.0.0.0/8 addresses=16777216 ports=443
+  WARN fetch allow-list covers a sensitive address cidr=169.254.0.0/16 address=169.254.169.254
+       what="cloud metadata endpoint (IMDS) — hands out instance credentials"
+  ```
+
+  A flat internal `/8` is unusual but real, and refusing it would push operators to `FETCH_PROXY_ALL` — which stops the relay resolving destinations at all. A wide-but-visible range is the better outcome. The distinction the warning draws is deliberate versus swept-up: `127.0.0.1/32:8080` is someone who meant it; a `/8` that happens to contain link-local is someone who did not look.
+
+  **Prefer `FETCH_ALLOWED_HOSTS` where you can.** A hostname names the one service you meant. Reach for a range only when you genuinely cannot pin the names.
+
+The two are independent (OR semantics): a fetch is permitted if its host and port are allow-listed, **or** its resolved IP is public, **or** its resolved IP and port are inside an allowed CIDR entry. Both are re-evaluated on every redirect hop, so an open redirect on an allow-listed host still cannot pivot to a blocked internal address — nor, when the entry is port-scoped, to a different port on the allow-listed host itself.
 
 Two cautions when using these:
 
@@ -614,7 +652,7 @@ Rejections return HTTP `429 Too Many Requests` with a `Retry-After` header conta
 
 The bucket store is an LRU capped at 10,000 entries. Identities are bounded by the configured auth-token table so they all fit comfortably; the cap bounds memory under an IP-rotation attack, at the cost that evicted buckets reset to full on next contact (which doesn't materially affect throttling for distinct attackers).
 
-**What this doesn't cover.** `/health` is never rate-limited so a polling load balancer can't be flagged as abusive. `/metrics` is also exempt — a scraper that's polling on a fixed interval shouldn't produce gaps in Prometheus that look like outages, and an abusive scraper is better contained by withholding the token than by 429-ing the metrics endpoint. `/fence/public-key` is unauthenticated and unthrottled (it's a public key, public). Stdio mode has no HTTP middleware and therefore no rate limit, but it's also a single trusted process with no remote attack surface.
+**What this doesn't cover.** `/health` is never rate-limited so a polling load balancer can't be flagged as abusive. `/metrics` is also exempt — a scraper that's polling on a fixed interval shouldn't produce gaps in Prometheus that look like outages, and an abusive scraper is better contained by rotating `MCP_METRICS_TOKEN` than by 429-ing the metrics endpoint. Because that token is separate from the MCP tokens, revoking it costs the scraper nothing but its own access. `/fence/public-key` is unauthenticated and unthrottled (it's a public key, public). Stdio mode has no HTTP middleware and therefore no rate limit, but it's also a single trusted process with no remote attack surface.
 
 **Exempt list.** `MCP_RATE_LIMIT_EXEMPT=ci,uptime-monitor` skips the limiter entirely for those identities. Use it for internal monitoring agents that hit the MCP root endpoint (rather than `/metrics`), and for CI pipelines that run high-rate functional tests against the live service. Tokens for exempt identities should still come from a strong source — exemption is about volume, not trust.
 
@@ -763,7 +801,20 @@ The `session_id` field joins each tool call back to the `"session initialized"` 
 
 ## Metrics
 
-In HTTP mode, `GET /metrics` returns Prometheus text-format counters. Authentication applies (same bearer token as the tool endpoints).
+In HTTP mode, `GET /metrics` returns Prometheus text-format counters, gated by `MCP_METRICS_TOKEN`.
+
+> **⚠️ `MCP_METRICS_TOKEN` is required to scrape.** With it unset, `/metrics` returns `401` to *every* caller — including one holding a valid MCP token. Set it to a value from `openssl rand -hex 32` and give that value to your scraper:
+>
+> ```
+> MCP_METRICS_TOKEN=<openssl rand -hex 32>
+> ```
+>
+> **It must not be one of your MCP tokens.** `mcp_fetches_by_domain_total` names up to 512 destination hostnames this relay has fetched, across *all* callers. Served to the MCP token table, that lets each tenant read which hosts every other tenant has been reading — and on a relay with `FETCH_ALLOWED_HOSTS` configured, those are your internal hostnames. A scraper is not a tenant and a tenant is not a scraper; the credential separates them in both directions.
+>
+> The endpoint is closed rather than open by default because a boundary that only exists once configured is not a boundary — it would silently fail to hold on every deployment that had not yet read this paragraph. `/health` takes the opposite default (open unless `MCP_HEALTH_TOKEN` is set) because it discloses two fixed fields, not the fleet's egress profile.
+>
+> The startup banner's `metrics auth` row reports `CLOSED` when no token is set, and the server logs a warn line at startup saying so, so a blank dashboard is diagnosable from this end rather than from the scraper's.
+
 
 The exposed series are:
 
