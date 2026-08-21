@@ -128,6 +128,11 @@ func main() {
 			"allowed_hosts", cfg.FetchAllowedHosts,
 			"allowed_cidrs", cfg.FetchAllowedCIDRs,
 			"hint", "the fetch tool can now reach these internal hosts/ranges; keep the lists tight")
+		// Per-range detail. A prefix length does not convey its own size —
+		// "10.0.0.0/8" is eleven characters that grant reach to 16.7 million
+		// addresses — so the count and any sensitive address the range sweeps
+		// in are stated explicitly rather than left to be inferred.
+		acl.logCIDRBlastRadius()
 	}
 
 	// A proxy scoped to allow-listed hosts changes reach but not enforcement,

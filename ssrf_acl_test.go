@@ -15,7 +15,7 @@ import (
 func TestNewFetchACL_ValidInput(t *testing.T) {
 	a, err := newFetchACL(
 		[]string{"Confluence.Internal.:443", " wiki.corp:80 ", ""},
-		[]string{"10.0.0.0/8", " 192.168.0.0/16 "},
+		[]string{"10.0.0.0/8:443", " 192.168.0.0/16:8443 "},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -38,7 +38,7 @@ func TestNewFetchACL_ValidInput(t *testing.T) {
 }
 
 func TestNewFetchACL_InvalidCIDRFailsLoud(t *testing.T) {
-	_, err := newFetchACL(nil, []string{"10.0.0.0/8", "not-a-cidr"})
+	_, err := newFetchACL(nil, []string{"10.0.0.0/8:443", "not-a-cidr:443"})
 	if err == nil {
 		t.Fatal("expected an error for malformed CIDR, got nil")
 	}
@@ -53,11 +53,11 @@ func TestEmptyFetchACL_BehavesStrict(t *testing.T) {
 		t.Error("emptyFetchACL should report empty")
 	}
 	// A private IP must still be rejected by assertReachable when no CIDR is allowed.
-	if err := a.assertReachable(net.ParseIP("10.1.2.3")); err == nil {
+	if err := a.assertReachable(net.ParseIP("10.1.2.3"), "443"); err == nil {
 		t.Error("empty ACL should still block private IPs")
 	}
 	// A public IP passes.
-	if err := a.assertReachable(net.ParseIP("93.184.216.34")); err != nil {
+	if err := a.assertReachable(net.ParseIP("93.184.216.34"), "443"); err != nil {
 		t.Errorf("empty ACL should allow public IPs, got: %v", err)
 	}
 }
@@ -65,27 +65,125 @@ func TestEmptyFetchACL_BehavesStrict(t *testing.T) {
 // ── assertReachable: CIDR override ────────────────────────────────────────────
 
 func TestAssertReachable_AllowedCIDROverridesPrivateBlock(t *testing.T) {
-	a, _ := newFetchACL(nil, []string{"10.0.0.0/8"})
+	a, _ := newFetchACL(nil, []string{"10.0.0.0/8:443"})
 
-	if err := a.assertReachable(net.ParseIP("10.20.30.40")); err != nil {
-		t.Errorf("10.20.30.40 is inside allowed 10.0.0.0/8, want allow, got: %v", err)
+	if err := a.assertReachable(net.ParseIP("10.20.30.40"), "443"); err != nil {
+		t.Errorf("10.20.30.40:443 is inside allowed 10.0.0.0/8:443, want allow, got: %v", err)
 	}
 	// A private IP OUTSIDE the allowed range is still blocked.
-	if err := a.assertReachable(net.ParseIP("192.168.1.1")); err == nil {
+	if err := a.assertReachable(net.ParseIP("192.168.1.1"), "443"); err == nil {
 		t.Error("192.168.1.1 is outside the allowed range, want block")
 	}
 	// A public IP is unaffected.
-	if err := a.assertReachable(net.ParseIP("1.1.1.1")); err != nil {
+	if err := a.assertReachable(net.ParseIP("1.1.1.1"), "443"); err != nil {
 		t.Errorf("public IP should pass, got: %v", err)
 	}
 }
 
+// The finding this closes on the CIDR side: an allowed range must not make
+// every port on every address it covers reachable.
+func TestAssertReachable_CIDRPortScoped(t *testing.T) {
+	a, _ := newFetchACL(nil, []string{"10.0.0.0/8:443"})
+
+	for _, port := range []string{"6379", "2379", "10250", "80", "22"} {
+		if err := a.assertReachable(net.ParseIP("10.20.30.40"), port); err == nil {
+			t.Errorf("10.20.30.40:%s is not on the allowed port, want block", port)
+		}
+	}
+}
+
+// Several entries naming the same range accumulate their ports rather than
+// the later one replacing the earlier.
+func TestNewFetchACL_CIDRPortsAccumulate(t *testing.T) {
+	a, _ := newFetchACL(nil, []string{"10.0.0.0/8:80", "10.0.0.0/8:443"})
+	if len(a.allowedCIDRs) != 1 {
+		t.Fatalf("same range listed twice should collapse to one entry, got %d", len(a.allowedCIDRs))
+	}
+	for _, port := range []string{"80", "443"} {
+		if err := a.assertReachable(net.ParseIP("10.1.2.3"), port); err != nil {
+			t.Errorf("port %s should be allowed, got: %v", port, err)
+		}
+	}
+	if err := a.assertReachable(net.ParseIP("10.1.2.3"), "6379"); err == nil {
+		t.Error("an unlisted port must stay blocked")
+	}
+}
+
+// A CIDR entry without a port is rejected at startup, for the same reason a
+// bare hostname is — except the stakes are higher, since a range multiplies
+// the unscoped-port exposure by every address it covers.
+func TestNewFetchACL_CIDRWithoutPortRejected(t *testing.T) {
+	for _, bad := range []string{"10.0.0.0/8", "fd00::/8", "10.1.2.3"} {
+		if _, err := newFetchACL(nil, []string{bad}); err == nil {
+			t.Errorf("CIDR entry %q without a port must be rejected, got nil error", bad)
+		}
+	}
+}
+
+// A default-route prefix is refused outright: it does not widen the address
+// policy, it removes it. Checked for both families.
+func TestNewFetchACL_DefaultRouteRefused(t *testing.T) {
+	for _, bad := range []string{"0.0.0.0/0:443", "::/0:443"} {
+		_, err := newFetchACL(nil, []string{bad})
+		if err == nil {
+			t.Fatalf("entry %q must be refused, got nil error", bad)
+		}
+		if !strings.Contains(err.Error(), "every address") {
+			t.Errorf("error for %q should explain what it grants, got: %v", bad, err)
+		}
+	}
+}
+
+// The IPv6 form parses despite the address itself containing colons: the port
+// is whatever follows the last colon after the slash, and a prefix length is
+// digits only, so the split is exact.
+func TestParseAllowedCIDREntry_IPv6(t *testing.T) {
+	n, port, err := parseAllowedCIDREntry("fd00:1234::/64:8443")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := n.String(); got != "fd00:1234::/64" {
+		t.Errorf("range = %q, want fd00:1234::/64", got)
+	}
+	if port != "8443" {
+		t.Errorf("port = %q, want 8443", port)
+	}
+	a, _ := newFetchACL(nil, []string{"fd00:1234::/64:8443"})
+	if err := a.assertReachable(net.ParseIP("fd00:1234::5"), "8443"); err != nil {
+		t.Errorf("address inside the allowed v6 range should pass, got: %v", err)
+	}
+	if err := a.assertReachable(net.ParseIP("fd00:1234::5"), "6379"); err == nil {
+		t.Error("an unlisted port in the v6 range must stay blocked")
+	}
+}
+
+// cidrAddressCount is what the startup warning reports; a wrong number here
+// would understate the blast radius in exactly the place an operator is
+// relying on it.
+func TestCIDRAddressCount(t *testing.T) {
+	cases := map[string]string{
+		"10.1.2.0/24:443":    "256",
+		"10.0.0.0/8:443":     "16777216",
+		"10.1.2.3/32:443":    "1",
+		"fd00:1234::/64:443": "18446744073709551616",
+	}
+	for entry, want := range cases {
+		n, _, err := parseAllowedCIDREntry(entry)
+		if err != nil {
+			t.Fatalf("%s: %v", entry, err)
+		}
+		if got := cidrAddressCount(n).String(); got != want {
+			t.Errorf("cidrAddressCount(%s) = %s, want %s", entry, got, want)
+		}
+	}
+}
+
 func TestAssertReachable_IPv6AllowedCIDR(t *testing.T) {
-	a, _ := newFetchACL(nil, []string{"fd00::/8"}) // ULA range
-	if err := a.assertReachable(net.ParseIP("fd12:3456::1")); err != nil {
+	a, _ := newFetchACL(nil, []string{"fd00::/8:443"}) // ULA range
+	if err := a.assertReachable(net.ParseIP("fd12:3456::1"), "443"); err != nil {
 		t.Errorf("ULA address inside allowed fd00::/8 should pass, got: %v", err)
 	}
-	if err := a.assertReachable(net.ParseIP("fe80::1")); err == nil {
+	if err := a.assertReachable(net.ParseIP("fe80::1"), "443"); err == nil {
 		t.Error("link-local fe80::1 outside allowed range should be blocked")
 	}
 }
@@ -142,7 +240,7 @@ func TestLiveDial_AllowedCIDRLetsLoopbackThrough(t *testing.T) {
 	defer srv.Close()
 
 	// Allow the loopback range explicitly.
-	a, err := newFetchACL(nil, []string{"127.0.0.0/8"})
+	a, err := newFetchACL(nil, []string{"127.0.0.0/8:" + portOf(t, srv.URL)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +317,17 @@ func TestCheckRedirect_StopsAfterFiveHops(t *testing.T) {
 	if err := a.safeCheckRedirect(req, via); err == nil {
 		t.Error("expected redirect chain to stop after 5 hops")
 	}
+}
+
+// portOf extracts the port from a URL, for building a FETCH_ALLOWED_CIDRS
+// entry against an httptest server's ephemeral port.
+func portOf(t *testing.T, rawURL string) string {
+	t.Helper()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(rawURL, "http://"))
+	if err != nil {
+		t.Fatalf("could not split port from %q: %v", rawURL, err)
+	}
+	return port
 }
 
 // authorityOf extracts "host:port" from a URL, which is the form a

@@ -27,9 +27,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -79,6 +81,14 @@ import (
 //     public-looking name to a private IP is still blocked unless that exact
 //     IP falls inside a range the operator explicitly listed.
 //
+//     Like host entries, these carry a mandatory port ("10.1.2.0/24:443").
+//     The port matters more here, not less: a hostname names one machine, so
+//     the port was the whole of its exposure, but a range already covers many
+//     machines and an unscoped port multiplies that by 65535.  A bare
+//     10.0.0.0/8 reaches ~16.7 million addresses; unscoped, that is over a
+//     trillion reachable address/port pairs, which is a scanner rather than
+//     an allow-list.
+//
 // The two are independent (OR semantics): a fetch is permitted if its host
 // is allow-listed OR its resolved IP is public OR its resolved IP is inside
 // an allowed CIDR.  An allowed CIDR overrides *all* default blocks for the
@@ -88,7 +98,7 @@ import (
 // intend to expose the cloud metadata endpoint.
 type fetchACL struct {
 	allowedHosts map[string]allowedPorts // lower-cased, trailing-dot-stripped exact matches
-	allowedCIDRs []*net.IPNet
+	allowedCIDRs []allowedCIDR
 
 	// Egress proxy for the fetch tool (FETCH_PROXY / FETCH_PROXY_ALL).
 	// nil proxyURL means no proxy — the historical behaviour, in which
@@ -101,6 +111,14 @@ type fetchACL struct {
 	// explicit port) to recognise a dial that is heading for the proxy.
 	proxyAuthority string
 	proxyAll       bool
+}
+
+// allowedCIDR is one operator-allowed IP range together with the ports it is
+// allowed on.  Entries naming the same range accumulate their ports, matching
+// the behaviour of host entries.
+type allowedCIDR struct {
+	net   *net.IPNet
+	ports allowedPorts
 }
 
 // allowedPorts is the set of ports allow-listed for one hostname.  There is
@@ -133,18 +151,89 @@ func newFetchACL(hosts, cidrs []string) (*fetchACL, error) {
 		}
 		a.allowedHosts[host][port] = struct{}{}
 	}
-	for _, c := range cidrs {
-		c = strings.TrimSpace(c)
-		if c == "" {
+	byRange := make(map[string]int, len(cidrs)) // canonical CIDR → index in a.allowedCIDRs
+	for _, raw := range cidrs {
+		if strings.TrimSpace(raw) == "" {
 			continue
 		}
-		_, n, err := net.ParseCIDR(c)
+		n, port, err := parseAllowedCIDREntry(raw)
 		if err != nil {
-			return nil, fmt.Errorf("FETCH_ALLOWED_CIDRS: invalid CIDR %q: %w", c, err)
+			return nil, fmt.Errorf("FETCH_ALLOWED_CIDRS: %w", err)
 		}
-		a.allowedCIDRs = append(a.allowedCIDRs, n)
+		key := n.String()
+		idx, seen := byRange[key]
+		if !seen {
+			a.allowedCIDRs = append(a.allowedCIDRs, allowedCIDR{net: n, ports: make(allowedPorts, 1)})
+			idx = len(a.allowedCIDRs) - 1
+			byRange[key] = idx
+		}
+		a.allowedCIDRs[idx].ports[port] = struct{}{}
 	}
 	return a, nil
+}
+
+// parseAllowedCIDREntry splits one FETCH_ALLOWED_CIDRS entry into a range and
+// its port.  The port is mandatory, for the same reason it is on host entries
+// — see the allowedCIDRs comment above.
+//
+// Accepted forms:
+//
+//	10.1.2.0/24:443
+//	fd00:1234::/64:8443
+//
+// The IPv6 colons are not ambiguous here: a CIDR always ends in "/<prefixlen>"
+// and a prefix length is digits only, so the port is whatever follows the last
+// colon that comes after the slash.  Splitting there is exact, not heuristic.
+func parseAllowedCIDREntry(raw string) (*net.IPNet, string, error) {
+	entry := strings.TrimSpace(raw)
+
+	slash := strings.LastIndex(entry, "/")
+	if slash < 0 {
+		return nil, "", fmt.Errorf("entry %q is not a CIDR range; write range/prefix:port "+
+			"(e.g. \"10.1.2.0/24:443\"). To allow a single address, use a host-length "+
+			"prefix: \"10.1.2.3/32:443\"", raw)
+	}
+	colon := strings.LastIndex(entry[slash:], ":")
+	if colon < 0 {
+		return nil, "", fmt.Errorf("entry %q has no port; write range/prefix:port "+
+			"(e.g. \"10.1.2.0/24:443\"). A range without a port would allow every port "+
+			"on every address it covers", raw)
+	}
+	colon += slash
+
+	cidr, port := entry[:colon], entry[colon+1:]
+	if err := validatePort(port, raw); err != nil {
+		return nil, "", err
+	}
+	_, n, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid CIDR %q in entry %q: %w", cidr, raw, err)
+	}
+	if err := rejectCatastrophicCIDR(n, raw); err != nil {
+		return nil, "", err
+	}
+	return n, port, nil
+}
+
+// rejectCatastrophicCIDR refuses the entries that do not widen the policy so
+// much as switch it off.
+//
+// A default-route prefix covers every address there is, including loopback,
+// link-local and the cloud metadata endpoint, which leaves the fetch tool with
+// no address policy at all.  There is no legitimate reading of "allow every
+// address" for a control whose entire job is to restrict addresses; an
+// operator who genuinely has no egress policy to enforce here should say so
+// with FETCH_PROXY_ALL, which is explicit about handing enforcement to the
+// proxy and logs a warning saying so.  Refusing at startup rather than
+// warning is the difference between a wide policy and no policy.
+func rejectCatastrophicCIDR(n *net.IPNet, raw string) error {
+	if ones, _ := n.Mask.Size(); ones == 0 {
+		return fmt.Errorf("entry %q allows every address, which disables the fetch tool's "+
+			"address policy entirely (loopback, link-local and cloud metadata included). "+
+			"List the ranges you actually need, or set FETCH_PROXY_ALL if enforcement "+
+			"genuinely belongs to an egress proxy", raw)
+	}
+	return nil
 }
 
 // emptyFetchACL returns an ACL with no allowances — identical behaviour to
@@ -243,25 +332,50 @@ func (a *fetchACL) hostAllowed(host, port string) bool {
 	return ok
 }
 
-// ipInAllowedCIDR reports whether ip falls inside any operator-allowed range.
-// net.IPNet.Contains normalises v4/v6 representations internally, matching the
-// behaviour matchReservedCIDR already relies on.
-func (a *fetchACL) ipInAllowedCIDR(ip net.IP) bool {
-	for _, n := range a.allowedCIDRs {
-		if n.Contains(ip) {
-			return true
+// ipPortInAllowedCIDR reports whether ip:port is covered by an operator-allowed
+// range.  net.IPNet.Contains normalises v4/v6 representations internally,
+// matching the behaviour matchReservedCIDR already relies on.
+//
+// The second return value distinguishes "the address is in a listed range but
+// this port is not allowed on it" from "the address is in no listed range at
+// all".  Both are refusals, but only the first is worth telling the operator
+// about: it means their allow-list nearly matched, which is the case that
+// otherwise costs an afternoon to diagnose from a generic error.
+func (a *fetchACL) ipPortInAllowedCIDR(ip net.IP, port string) (allowed, rangeMatched bool) {
+	for _, c := range a.allowedCIDRs {
+		if !c.net.Contains(ip) {
+			continue
+		}
+		rangeMatched = true
+		if _, ok := c.ports[port]; ok {
+			return true, true
 		}
 	}
-	return false
+	return false, rangeMatched
 }
 
-// assertReachable is the per-IP gate for the default (non-host-allow-listed)
-// path.  An operator-allowed CIDR wins over every default block; otherwise the
-// standard public-only policy applies.
-func (a *fetchACL) assertReachable(ip net.IP) error {
-	if a.ipInAllowedCIDR(ip) {
-		slog.Debug("SSRF: address in operator-allowed CIDR", "ip", ip)
+// assertReachable is the per-address gate for the default (non-host-allow-
+// listed) path.  An operator-allowed range wins over every default block for
+// the ports it lists; otherwise the standard public-only policy applies.
+//
+// A near miss — the address is inside a listed range but on a port that range
+// does not allow — is logged at warn rather than debug.  The error returned to
+// the caller stays the generic one from assertPublicIP, because naming the
+// reason would let a caller map internal network layout; but the operator
+// reading their own logs is not the attacker, and "your allow-list covers this
+// address but not this port" is the one sentence that turns a mystifying
+// generic refusal into a one-line config fix.
+func (a *fetchACL) assertReachable(ip net.IP, port string) error {
+	allowed, rangeMatched := a.ipPortInAllowedCIDR(ip, port)
+	if allowed {
+		slog.Debug("SSRF: address in operator-allowed CIDR", "ip", ip, "port", port)
 		return nil
+	}
+	if rangeMatched {
+		slog.Warn("SSRF: address is in an allowed CIDR but the port is not",
+			"ip", ip,
+			"port", port,
+			"hint", "add the port to FETCH_ALLOWED_CIDRS (e.g. \"10.1.2.0/24:"+port+"\") if this fetch should be permitted")
 	}
 	return assertPublicIP(ip)
 }
@@ -464,8 +578,13 @@ func (a *fetchACL) safeDialContext(ctx context.Context, network, addr string) (n
 		slog.Debug("SSRF: host on allow-list, skipping public-IP check",
 			"host", host, "port", port)
 	} else {
+		// Same near-miss diagnostic as assertReachable, for the host list:
+		// the name is allow-listed but not on this port.  Logged before the
+		// per-IP checks run so the operator sees the specific reason rather
+		// than only the generic address refusal those produce.
+		a.warnHostPortNearMiss(host, port)
 		for _, ia := range addrs {
-			if err := a.assertReachable(ia.IP); err != nil {
+			if err := a.assertReachable(ia.IP, port); err != nil {
 				return nil, err
 			}
 		}
@@ -509,12 +628,37 @@ func (a *fetchACL) safeCheckRedirect(req *http.Request, via []*http.Request) err
 	if err != nil {
 		return fmt.Errorf("failed to resolve redirect host: %w", err)
 	}
+	a.warnHostPortNearMiss(host, port)
 	for _, ia := range addrs {
-		if err := a.assertReachable(ia.IP); err != nil {
+		if err := a.assertReachable(ia.IP, port); err != nil {
 			return fmt.Errorf("redirect blocked: %w", err)
 		}
 	}
 	return nil
+}
+
+// warnHostPortNearMiss logs when a hostname is on FETCH_ALLOWED_HOSTS but the
+// port being dialled is not among the ports listed for it.  Counterpart to the
+// CIDR near-miss branch in assertReachable, and silent when the host is not on
+// the list at all — that is an ordinary refusal, not a config mistake.
+func (a *fetchACL) warnHostPortNearMiss(host, port string) {
+	ports, ok := a.allowedHosts[normaliseHost(host)]
+	if !ok || len(ports) == 0 {
+		return
+	}
+	if _, allowed := ports[port]; allowed {
+		return
+	}
+	listed := make([]string, 0, len(ports))
+	for p := range ports {
+		listed = append(listed, p)
+	}
+	sort.Strings(listed)
+	slog.Warn("SSRF: host is on FETCH_ALLOWED_HOSTS but the port is not",
+		"host", host,
+		"port", port,
+		"allowed_ports", strings.Join(listed, ","),
+		"hint", "add \""+host+":"+port+"\" to FETCH_ALLOWED_HOSTS if this fetch should be permitted")
 }
 
 // reservedCIDRs lists IP ranges that are not globally routable but are NOT
@@ -612,4 +756,79 @@ func assertPublicIP(ip net.IP) error {
 	}
 	slog.Debug("SSRF: blocked non-public address", "ip", ip, "kind", kind)
 	return fmt.Errorf("URL resolves to a non-public address")
+}
+
+// ── Blast-radius reporting ───────────────────────────────────────────────────
+//
+// FETCH_ALLOWED_CIDRS is the widest control this server has, and its config
+// syntax hides how wide: "10.0.0.0/8" is eleven characters that grant reach to
+// 16.7 million addresses.  Nothing about reading the line conveys that, so the
+// server says it out loud at startup instead of leaving the operator to work
+// it out from a prefix length.
+//
+// Deliberately warnings, not errors.  A flat internal /8 is unusual but real,
+// and refusing it would push operators to FETCH_PROXY_ALL — which stops the
+// relay resolving destinations at all and moves enforcement wholesale to the
+// proxy.  A wide-but-visible range is better than that.  The one entry that is
+// refused rather than reported is the default route, handled in
+// rejectCatastrophicCIDR: that is not a wide policy, it is no policy.
+
+// notableAddresses are addresses whose presence in an allowed range is worth
+// calling out by name.  Each is somewhere an SSRF ordinarily aims: the cloud
+// metadata endpoints hand out credentials, and loopback/link-local reach
+// services that assume only the local host can talk to them.
+var notableAddresses = []struct {
+	ip   string
+	what string
+}{
+	{"169.254.169.254", "cloud metadata endpoint (IMDS) — hands out instance credentials"},
+	{"fd00:ec2::254", "IPv6 cloud metadata endpoint (IMDS)"},
+	{"127.0.0.1", "IPv4 loopback"},
+	{"::1", "IPv6 loopback"},
+	{"169.254.0.1", "IPv4 link-local"},
+	{"fe80::1", "IPv6 link-local"},
+}
+
+// cidrAddressCount returns how many addresses a range covers, as a big.Int
+// because an IPv6 /64 does not fit in one.
+func cidrAddressCount(n *net.IPNet) *big.Int {
+	ones, bits := n.Mask.Size()
+	return new(big.Int).Lsh(big.NewInt(1), uint(bits-ones))
+}
+
+// logCIDRBlastRadius emits one audit line per allowed range, giving the
+// address count and the ports it covers, plus a separate warning naming any
+// notable address the range sweeps in.
+//
+// The notable-address check is about deliberate versus swept-up, not about
+// width: "127.0.0.1/32:8080" is an operator who meant it and gets the same
+// line as anyone else, while a /8 that happens to contain link-local is an
+// operator who did not look.  Both are permitted — the operator's network is
+// theirs — but neither should be invisible.
+func (a *fetchACL) logCIDRBlastRadius() {
+	for _, c := range a.allowedCIDRs {
+		ports := make([]string, 0, len(c.ports))
+		for p := range c.ports {
+			ports = append(ports, p)
+		}
+		sort.Strings(ports)
+
+		slog.Warn("fetch allow-list covers an IP range",
+			"cidr", c.net.String(),
+			"addresses", cidrAddressCount(c.net).String(),
+			"ports", strings.Join(ports, ","),
+			"hint", "every address in this range is reachable on these ports by any authenticated caller; narrow the prefix if it is wider than the service you meant to expose")
+
+		for _, na := range notableAddresses {
+			ip := net.ParseIP(na.ip)
+			if ip == nil || !c.net.Contains(ip) {
+				continue
+			}
+			slog.Warn("fetch allow-list covers a sensitive address",
+				"cidr", c.net.String(),
+				"address", na.ip,
+				"what", na.what,
+				"hint", "if you did not mean to expose this, narrow the prefix; the fetch tool can reach it on the ports listed for this range")
+		}
+	}
 }
