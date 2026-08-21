@@ -21,6 +21,16 @@ import (
 // itself would otherwise grow without bound for the process lifetime.
 const maxTrackedDomains = 512
 
+// maxTrackedEngines caps how many distinct SearXNG backend names are tracked
+// in the per-engine failure counter. Engine names come from the operator's own
+// SearXNG configuration, not from anything a caller supplies, so cardinality is
+// naturally bounded by the instance's enabled-engine list — this cap exists so
+// that a misconfigured or compromised upstream returning junk names cannot grow
+// the map without bound. 256 is comfortably above any real instance's enabled
+// set (SearXNG ships ~200 engine definitions in total, of which a deployment
+// enables a fraction).
+const maxTrackedEngines = 256
+
 // domainStats holds atomic per-domain success / failure counters.
 type domainStats struct {
 	successes atomic.Int64
@@ -122,6 +132,30 @@ type Metrics struct {
 	FetchDomainOverflowOK    atomic.Int64
 	FetchDomainOverflowError atomic.Int64
 
+	// ── SearXNG backend engine health ────────────────────────────────────────
+	//
+	// SearchesDegraded counts searches where at least one backend failed to
+	// respond. Its ratio against SearchTotal is the number that matters:
+	// "what fraction of my searches ran on incomplete backends". A search
+	// that is degraded is still successful — SearXNG returns 200 with
+	// whatever survived — so this is deliberately NOT counted in
+	// SearchErrors, which would conflate "returned fewer results than it
+	// should have" with "returned nothing".
+	SearchesDegraded atomic.Int64
+
+	// engineErrors is a bounded map of SearXNG backend name → failure count,
+	// mirroring the domains map above: the mutex guards map mutation, the
+	// atomic.Int64 behind each entry is updated lock-free once it exists.
+	// Past maxTrackedEngines, further names roll up into the overflow
+	// counter.
+	//
+	// This answers the second question, once the ratio above says there is a
+	// problem: *which* backend. An engine that has quietly stopped answering
+	// shows up here days before anyone notices thinner results.
+	enginesMu           sync.RWMutex
+	engineErrors        map[string]*atomic.Int64
+	EngineErrorOverflow atomic.Int64
+
 	// ── cache ─────────────────────────────────────────────────────────────────
 	CacheHits         atomic.Int64 // readURL served from cache
 	CacheMisses       atomic.Int64 // readURL triggered a network fetch
@@ -203,6 +237,40 @@ func (m *Metrics) recordFetchByDomain(domain string, ok bool) {
 	} else {
 		ds.failures.Add(1)
 	}
+}
+
+// recordEngineFailure bumps the failure counter for one SearXNG backend.
+// Same two-phase shape as recordFetchByDomain: a read-locked fast path once
+// the entry exists, a write lock only on first sight of a name.
+func (m *Metrics) recordEngineFailure(engine string) {
+	if engine == "" {
+		engine = "unknown"
+	}
+
+	m.enginesMu.RLock()
+	c, exists := m.engineErrors[engine]
+	m.enginesMu.RUnlock()
+
+	if !exists {
+		m.enginesMu.Lock()
+		// Re-check under the write lock — another goroutine may have inserted.
+		c, exists = m.engineErrors[engine]
+		if !exists {
+			if len(m.engineErrors) >= maxTrackedEngines {
+				m.enginesMu.Unlock()
+				m.EngineErrorOverflow.Add(1)
+				return
+			}
+			if m.engineErrors == nil {
+				m.engineErrors = make(map[string]*atomic.Int64, 16)
+			}
+			c = &atomic.Int64{}
+			m.engineErrors[engine] = c
+		}
+		m.enginesMu.Unlock()
+	}
+
+	c.Add(1)
 }
 
 // escapePromLabel escapes a Prometheus label value per the text exposition
@@ -309,6 +377,38 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		m.FetchDomainOverflowOK.Load())
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_domain_total{domain=\"__overflow__\",outcome=\"error\"} %d\n\n",
 		m.FetchDomainOverflowError.Load())
+
+	// SearXNG backend engine health.
+	//
+	// The pair to read together is mcp_searches_degraded_total over
+	// mcp_searches_total — the fraction of searches that ran on incomplete
+	// backends. That ratio is what decides whether backend flakiness is a
+	// background hum or the thing making answers worse.
+	writeCounter("mcp_searches_degraded_total",
+		"Total searches where at least one SearXNG backend engine failed to respond. Read as a ratio against mcp_searches_total. Degraded searches still succeed, so they are NOT counted in mcp_search_errors_total.",
+		&m.SearchesDegraded)
+
+	type engineSnap struct {
+		engine string
+		errors int64
+	}
+	m.enginesMu.RLock()
+	engineSnaps := make([]engineSnap, 0, len(m.engineErrors))
+	for e, c := range m.engineErrors {
+		engineSnaps = append(engineSnaps, engineSnap{engine: e, errors: c.Load()})
+	}
+	m.enginesMu.RUnlock()
+	sort.Slice(engineSnaps, func(i, j int) bool { return engineSnaps[i].engine < engineSnaps[j].engine })
+
+	_, _ = fmt.Fprintf(w, "# HELP mcp_searxng_engine_errors_total Failures per SearXNG backend engine, as reported in the upstream unresponsive_engines field.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_searxng_engine_errors_total counter\n")
+	for _, snap := range engineSnaps {
+		_, _ = fmt.Fprintf(w, "mcp_searxng_engine_errors_total{engine=\"%s\"} %d\n",
+			escapePromLabel(snap.engine), snap.errors)
+	}
+	// Overflow bucket — engine names beyond the tracked cap aggregate here.
+	_, _ = fmt.Fprintf(w, "mcp_searxng_engine_errors_total{engine=\"__overflow__\"} %d\n\n",
+		m.EngineErrorOverflow.Load())
 
 	// Cache
 	writeCounter("mcp_cache_hits_total",

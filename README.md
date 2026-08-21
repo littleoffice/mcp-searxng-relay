@@ -59,6 +59,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Readability-style content extraction** — navigation bars, footers, sidebars, and cookie banners are stripped automatically
 - **Degraded-search visibility** — SearXNG answers with HTTP 200 even when some of its backends failed, so a search silently returns thinner results and the first visible symptom is usually someone concluding the model has regressed. The relay reads the `unresponsive_engines` field SearXNG reports and logs a `WARN` naming the engines and why they failed, so a broken backend is diagnosed from the relay's own logs rather than mistaken for a relay or model bug
 - **Engine attribution on search results** — each result includes the list of SearXNG backend engines that returned it. A URL surfaced by three engines is a different signal than one surfaced by one, and the agent can weigh that without the server imposing a ranking on top. The `engines` search parameter closes the loop: an agent can re-query the specific backend that surfaced a promising result.
+- **Backend engine health metrics** — `/metrics` exposes `mcp_searches_degraded_total` and `mcp_searxng_engine_errors_total{engine="…"}`. The first, read against `mcp_searches_total`, gives the fraction of searches that ran on incomplete backends; the second names the engine to go and fix. An engine that has quietly stopped answering shows up here days before anyone notices thinner results and starts blaming the model.
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
 - **Verifiable source list** — `searxng_session_sources` returns the URLs the relay actually fetched for a caller, byte-exact and newest-first, with how much of each was read. Agents transcribe URLs badly when composing a final answer far from the tool call that produced them, and fabricate them outright when they never fetched one; this gives the model ground truth to copy from instead of recall. Delivered in a CDATA-encoded fence so URLs survive the round trip unescaped.
 - **Response caching** with configurable TTL and per-request cache bypass
@@ -807,6 +808,8 @@ level=WARN msg="searxng search was degraded: some engines did not respond"
         before treating thin results as a relay or model problem"
 ```
 
+The same event increments `mcp_searches_degraded_total` and `mcp_searxng_engine_errors_total{engine="…"}`; see [Metrics](#metrics). The log line is how you diagnose one incident, the counters are how you find out there is one — a WARN nobody greps is not monitoring.
+
 Engines break — upstream markup changes, an API is deprecated, a captcha wall goes up — and SearXNG suspends them and carries on. Without this line the degradation is invisible all the way up the stack: fewer results reach the agent, its answers get worse, and nothing anywhere says why. Deployments with many engines configured will see intermittent entries as engines cycle through suspension; that is noise worth having, because the alternative is silence.
 
 The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
@@ -836,6 +839,8 @@ The exposed series are:
 |---|---|---|
 | `mcp_searches_total` | — | All calls to `searxng_web_search` |
 | `mcp_search_errors_total` | — | Subset of the above that returned an error |
+| `mcp_searches_degraded_total` | — | Subset of the above where at least one SearXNG backend engine failed to respond. **Read as a ratio against `mcp_searches_total`** — it is the single number that says whether backend flakiness is background noise or the thing making your agents' answers worse. Degraded searches still succeed, so they are deliberately *not* counted in `mcp_search_errors_total` |
+| `mcp_searxng_engine_errors_total` | `engine=<name>` | Failures per SearXNG backend, from the upstream `unresponsive_engines` field. Answers *which* engine, once the ratio above says there is a problem. Bounded to 256 distinct names, remainder under `engine="__overflow__"` |
 | `mcp_metadata_total` | — | All calls to `searxng_url_metadata` |
 | `mcp_metadata_errors_total` | — | Subset of the above that returned an error |
 | `mcp_session_sources_total` | — | All calls to `searxng_session_sources`. Read as a ratio against `mcp_fetches_total`: it says how often agents verify their URLs before answering |

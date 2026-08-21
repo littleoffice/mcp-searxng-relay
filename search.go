@@ -305,6 +305,15 @@ func (s *Server) search(
 	// noisy but correct — the alternative is the silence that caused the
 	// misdiagnosis in the first place.
 	if failures := parseUnresponsiveEngines(searxResp.UnresponsiveEngines); len(failures) > 0 {
+		// Counted as well as logged.  The log line is how an operator
+		// diagnoses one incident; the counters are how they find out there
+		// is one — and, read against mcp_searches_total, how they learn
+		// whether backend flakiness is a background hum or the thing making
+		// answers worse.  A log line nobody greps is not monitoring.
+		s.metrics.SearchesDegraded.Add(1)
+		for _, f := range failures {
+			s.metrics.recordEngineFailure(f.Engine)
+		}
 		callerLogger(ctx).Warn("searxng search was degraded: some engines did not respond",
 			"unresponsive_engines", strings.Join(engineNames(failures), ","),
 			"unresponsive_count", len(failures),
