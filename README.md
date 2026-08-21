@@ -64,6 +64,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Image responses** — JPEG, PNG, GIF, and WebP URLs come back as MCP `ImageContent` blocks for vision-model consumption (the SDK base64-encodes the raw bytes on the wire). SVG is intentionally excluded — more useful to the model as text than as a binary blob. Raw size is capped by `MAX_IMAGE_BYTES`, separately from `MAX_BODY_BYTES`, so image and text limits can be tuned independently.
 - **Automatic charset detection** — non-UTF-8 pages (Shift-JIS, windows-1252, ISO-8859-1, …) are decoded correctly before parsing
 - **Readability-style content extraction** — navigation bars, footers, sidebars, and cookie banners are stripped automatically
+- **Degraded-search visibility** — SearXNG answers with HTTP 200 even when some of its backends failed, so a search silently returns thinner results and the first visible symptom is usually someone concluding the model has regressed. The relay reads the `unresponsive_engines` field SearXNG reports and logs a `WARN` naming the engines and why they failed, so a broken backend is diagnosed from the relay's own logs rather than mistaken for a relay or model bug
 - **Engine attribution on search results** — each result includes the list of SearXNG backend engines that returned it. A URL surfaced by three engines is a different signal than one surfaced by one, and the agent can weigh that without the server imposing a ranking on top. The `engines` search parameter closes the loop: an agent can re-query the specific backend that surfaced a promising result.
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
 - **Response caching** with configurable TTL and per-request cache bypass
@@ -800,6 +801,19 @@ time=2026-05-24T07:43:52.253Z level=INFO msg="fetch completed" url=https://githu
 time=2026-05-24T07:44:07.656Z level=INFO msg="url fetched" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md content_type="text/plain; charset=utf-8" bytes_raw=58874 chars_extracted=58873
 time=2026-05-24T07:44:07.657Z level=INFO msg="fetch completed" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
 ```
+
+A search where some SearXNG backends failed is not an error — the upstream answers `200` with whatever the surviving engines produced — but it is a degraded answer, and it is logged as one:
+
+```
+level=WARN msg="searxng search was degraded: some engines did not respond"
+  unresponsive_engines=google,bing unresponsive_count=2
+  detail="google: Suspended: Access denied; bing: timeout"
+  query="..." results=7
+  hint="results are incomplete; check the named engines in your SearXNG instance
+        before treating thin results as a relay or model problem"
+```
+
+Engines break — upstream markup changes, an API is deprecated, a captcha wall goes up — and SearXNG suspends them and carries on. Without this line the degradation is invisible all the way up the stack: fewer results reach the agent, its answers get worse, and nothing anywhere says why. Deployments with many engines configured will see intermittent entries as engines cycle through suspension; that is noise worth having, because the alternative is silence.
 
 The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
 
