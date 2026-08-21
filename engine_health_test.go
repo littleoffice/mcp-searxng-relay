@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -129,4 +131,134 @@ func TestSearch_HealthyIsSilent(t *testing.T) {
 	if strings.Contains(buf.String(), "degraded") {
 		t.Errorf("a healthy search must not warn, got: %s", buf.String())
 	}
+}
+
+// ── Metrics ──────────────────────────────────────────────────────────────────
+
+// A degraded search increments the degraded counter once and each failing
+// engine's counter once. The ratio of the former to mcp_searches_total is the
+// number that decides whether backend flakiness is worth acting on.
+func TestMetrics_DegradedSearchCounted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://e.example","content":"C"}],
+		                        "unresponsive_engines":` + searxUnresponsiveWire + `}`))
+	}))
+	defer srv.Close()
+	s := &Server{config: Config{SearxngURL: srv.URL}, client: srv.Client()}
+
+	for i := 0; i < 3; i++ {
+		if _, err := s.search(context.Background(), "q", 1, "", "all", "", 0, ""); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+
+	if got := s.metrics.SearchesDegraded.Load(); got != 3 {
+		t.Errorf("SearchesDegraded = %d, want 3", got)
+	}
+	// A degraded search is still a successful one — conflating the two would
+	// make "returned fewer results than it should have" indistinguishable
+	// from "returned nothing".
+	if got := s.metrics.SearchErrors.Load(); got != 0 {
+		t.Errorf("SearchErrors = %d, want 0: a degraded search is not a failed search", got)
+	}
+
+	body := serveMetricsBody(t, s)
+	for _, want := range []string{
+		`mcp_searches_degraded_total 3`,
+		`mcp_searxng_engine_errors_total{engine="bing"} 3`,
+		`mcp_searxng_engine_errors_total{engine="google"} 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("/metrics missing %q", want)
+		}
+	}
+}
+
+// A healthy search touches neither counter, and the series are still exposed
+// at zero so a dashboard does not show gaps before the first failure.
+func TestMetrics_HealthySearchNotCounted(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://e.example","content":"C"}],
+		                        "unresponsive_engines":[]}`))
+	}))
+	defer srv.Close()
+	s := &Server{config: Config{SearxngURL: srv.URL}, client: srv.Client()}
+
+	if _, err := s.search(context.Background(), "q", 1, "", "all", "", 0, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := s.metrics.SearchesDegraded.Load(); got != 0 {
+		t.Errorf("SearchesDegraded = %d, want 0", got)
+	}
+	if body := serveMetricsBody(t, s); !strings.Contains(body, "mcp_searches_degraded_total 0") {
+		t.Error("the degraded series should be exposed at zero, not omitted")
+	}
+}
+
+// Engine-name cardinality is bounded even though the names come from upstream
+// rather than from a caller: a misconfigured or compromised SearXNG must not
+// be able to grow the map without limit.
+func TestMetrics_EngineCardinalityBounded(t *testing.T) {
+	var m Metrics
+	for i := 0; i < maxTrackedEngines+50; i++ {
+		m.recordEngineFailure(fmt.Sprintf("engine-%04d", i))
+	}
+	m.enginesMu.RLock()
+	tracked := len(m.engineErrors)
+	m.enginesMu.RUnlock()
+
+	if tracked > maxTrackedEngines {
+		t.Errorf("tracked %d engines, cap is %d", tracked, maxTrackedEngines)
+	}
+	if got := m.EngineErrorOverflow.Load(); got != 50 {
+		t.Errorf("overflow = %d, want 50", got)
+	}
+}
+
+// An empty engine name is bucketed rather than creating an unlabelled series.
+func TestMetrics_EmptyEngineName(t *testing.T) {
+	var m Metrics
+	m.recordEngineFailure("")
+	m.enginesMu.RLock()
+	_, ok := m.engineErrors["unknown"]
+	m.enginesMu.RUnlock()
+	if !ok {
+		t.Error("an empty engine name should be recorded as \"unknown\"")
+	}
+}
+
+// Concurrent recording of the same and different engines must not race and
+// must not lose counts — the -race detector plus an exact total.
+func TestMetrics_EngineFailuresConcurrent(t *testing.T) {
+	var m Metrics
+	var wg sync.WaitGroup
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				m.recordEngineFailure(fmt.Sprintf("engine-%d", i%5))
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	var total int64
+	m.enginesMu.RLock()
+	for _, c := range m.engineErrors {
+		total += c.Load()
+	}
+	m.enginesMu.RUnlock()
+	if total != 1000 {
+		t.Errorf("total recorded failures = %d, want 1000", total)
+	}
+}
+
+// serveMetricsBody renders /metrics for a server, for assertions on the
+// exposition format rather than on the counters behind it.
+func serveMetricsBody(t *testing.T, s *Server) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	s.ServeMetrics(w, httptest.NewRequest("GET", "/metrics", nil))
+	return w.Body.String()
 }
