@@ -5,6 +5,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 )
@@ -13,19 +14,19 @@ import (
 
 func TestNewFetchACL_ValidInput(t *testing.T) {
 	a, err := newFetchACL(
-		[]string{"Confluence.Internal.", " wiki.corp ", ""},
+		[]string{"Confluence.Internal.:443", " wiki.corp:80 ", ""},
 		[]string{"10.0.0.0/8", " 192.168.0.0/16 "},
 	)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !a.hostAllowed("confluence.internal") {
-		t.Error("expected confluence.internal to be allowed (case/dot-normalised)")
+	if !a.hostAllowed("confluence.internal", "443") {
+		t.Error("expected confluence.internal:443 to be allowed (case/dot-normalised)")
 	}
-	if !a.hostAllowed("WIKI.CORP") {
-		t.Error("expected wiki.corp to be allowed (trim + case-insensitive)")
+	if !a.hostAllowed("WIKI.CORP", "80") {
+		t.Error("expected wiki.corp:80 to be allowed (trim + case-insensitive)")
 	}
-	if a.hostAllowed("evil.example.com") {
+	if a.hostAllowed("evil.example.com", "443") {
 		t.Error("did not expect evil.example.com to be allowed")
 	}
 	if len(a.allowedCIDRs) != 2 {
@@ -92,13 +93,13 @@ func TestAssertReachable_IPv6AllowedCIDR(t *testing.T) {
 // ── hostAllowed normalisation ─────────────────────────────────────────────────
 
 func TestHostAllowed_Normalisation(t *testing.T) {
-	a, _ := newFetchACL([]string{"jira.corp"}, nil)
+	a, _ := newFetchACL([]string{"jira.corp:443"}, nil)
 	for _, in := range []string{"jira.corp", "JIRA.CORP", "jira.corp.", "  jira.corp  "} {
-		if !a.hostAllowed(in) {
+		if !a.hostAllowed(in, "443") {
 			t.Errorf("hostAllowed(%q) = false, want true", in)
 		}
 	}
-	if a.hostAllowed("sub.jira.corp") {
+	if a.hostAllowed("sub.jira.corp", "443") {
 		t.Error("exact-match allow-list must not match subdomains")
 	}
 }
@@ -161,11 +162,9 @@ func TestLiveDial_AllowedHostLetsLoopbackThrough(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// httptest serves on 127.0.0.1:PORT — the URL host is the literal
-	// "127.0.0.1". Allow-list that host by name; the dial should now bypass
-	// the loopback block even with NO allowed CIDR.
-	host := hostOf(t, srv.URL) // "127.0.0.1"
-	a, _ := newFetchACL([]string{host}, nil)
+	// httptest serves on 127.0.0.1:PORT. Allow-list that exact authority; the
+	// dial should now bypass the loopback block even with NO allowed CIDR.
+	a, _ := newFetchACL([]string{authorityOf(t, srv.URL)}, nil)
 
 	resp, err := clientFor(a).Get(srv.URL)
 	if err != nil {
@@ -178,7 +177,7 @@ func TestLiveDial_AllowedHostLetsLoopbackThrough(t *testing.T) {
 
 	// Sanity: a DIFFERENT host name that resolves to loopback is still blocked.
 	// "localhost" also resolves to 127.0.0.1 but is not on the allow-list.
-	b, _ := newFetchACL([]string{"some.other.host"}, nil)
+	b, _ := newFetchACL([]string{"some.other.host:80"}, nil)
 	altURL := strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
 	if _, err := clientFor(b).Get(altURL); err == nil {
 		t.Error("localhost (not allow-listed) resolving to loopback should be blocked")
@@ -191,7 +190,7 @@ func TestLiveDial_AllowedHostLetsLoopbackThrough(t *testing.T) {
 // blocked internal address via redirect. We drive safeCheckRedirect directly.
 
 func TestCheckRedirect_BlocksNonAllowedInternalHop(t *testing.T) {
-	a, _ := newFetchACL([]string{"127.0.0.1"}, nil) // entry host allowed
+	a, _ := newFetchACL([]string{"127.0.0.1:80"}, nil) // entry host allowed
 
 	// Redirect target "localhost" resolves to loopback but is not allow-listed
 	// and 127.0.0.0/8 is not in an allowed CIDR → must be blocked.
@@ -206,7 +205,7 @@ func TestCheckRedirect_BlocksNonAllowedInternalHop(t *testing.T) {
 }
 
 func TestCheckRedirect_AllowsAllowListedHop(t *testing.T) {
-	a, _ := newFetchACL([]string{"127.0.0.1"}, nil)
+	a, _ := newFetchACL([]string{"127.0.0.1:80"}, nil)
 	req, _ := http.NewRequestWithContext(context.Background(), "GET", "http://127.0.0.1/next", nil)
 	if err := a.safeCheckRedirect(req, nil); err != nil {
 		t.Errorf("redirect to allow-listed host should pass, got: %v", err)
@@ -222,14 +221,173 @@ func TestCheckRedirect_StopsAfterFiveHops(t *testing.T) {
 	}
 }
 
-// hostOf extracts the host (no port) from a URL for test convenience.
-func hostOf(t *testing.T, rawURL string) string {
+// authorityOf extracts "host:port" from a URL, which is the form a
+// FETCH_ALLOWED_HOSTS entry now takes.
+func authorityOf(t *testing.T, rawURL string) string {
 	t.Helper()
 	// srv.URL looks like http://127.0.0.1:PORT
 	trimmed := strings.TrimPrefix(rawURL, "http://")
-	host, _, err := net.SplitHostPort(trimmed)
-	if err != nil {
-		t.Fatalf("could not split host from %q: %v", rawURL, err)
+	if _, _, err := net.SplitHostPort(trimmed); err != nil {
+		t.Fatalf("could not split host:port from %q: %v", rawURL, err)
 	}
-	return host
+	return trimmed
+}
+
+// ── Port scoping ──────────────────────────────────────────────────────────────
+//
+// A bare hostname allows every port (the historical behaviour, kept so an
+// upgrade does not silently narrow a working allow-list). A "host:port" entry
+// allows only that port, which is what stops "let the agent read the wiki"
+// from also granting the Redis, etcd, or kubelet listener on the same machine.
+
+func TestHostAllowed_PortScoped(t *testing.T) {
+	a, err := newFetchACL([]string{"wiki.corp:8443"}, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !a.hostAllowed("wiki.corp", "8443") {
+		t.Error("scoped entry should allow its own port")
+	}
+	for _, port := range []string{"6379", "2379", "10250", "443", "80"} {
+		if a.hostAllowed("wiki.corp", port) {
+			t.Errorf("scoped entry must not allow port %s", port)
+		}
+	}
+}
+
+// A bare hostname is rejected at startup rather than being read as "all
+// ports". This is the property that makes the fix apply to every deployment
+// instead of only the ones that opt in: an operator upgrading with a bare
+// entry is stopped and told what to write, rather than silently keeping the
+// wide allowance or silently losing access to a service on another port.
+func TestNewFetchACL_BareHostnameRejected(t *testing.T) {
+	_, err := newFetchACL([]string{"wiki.corp"}, nil)
+	if err == nil {
+		t.Fatal("a bare hostname must be rejected, got nil error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"wiki.corp", "host:port", "every port"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error should mention %q so it is actionable, got: %v", want, err)
+		}
+	}
+}
+
+// A bare unbracketed IPv6 literal is also rejected — it has no port, and
+// guessing where the address ends and a port begins is exactly the ambiguity
+// the bracket form exists to remove.
+func TestNewFetchACL_BareIPv6Rejected(t *testing.T) {
+	for _, bad := range []string{"fd00::1", "[fd00::1]"} {
+		if _, err := newFetchACL([]string{bad}, nil); err == nil {
+			t.Errorf("bare IPv6 entry %q must be rejected, got nil error", bad)
+		}
+	}
+}
+
+// Several scoped entries for one host accumulate rather than overwrite.
+func TestHostAllowed_MultipleScopedPorts(t *testing.T) {
+	a, _ := newFetchACL([]string{"wiki.corp:443", "wiki.corp:8443"}, nil)
+	if !a.hostAllowed("wiki.corp", "443") || !a.hostAllowed("wiki.corp", "8443") {
+		t.Error("both listed ports should be allowed")
+	}
+	if a.hostAllowed("wiki.corp", "8080") {
+		t.Error("an unlisted port must stay blocked")
+	}
+}
+
+func TestParseAllowedHostEntry(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantHost string
+		wantPort string
+	}{
+		{"confluence.corp:8443", "confluence.corp", "8443"},
+		{"  Confluence.Corp.:8443  ", "confluence.corp", "8443"},
+		{"CONFLUENCE.CORP:8443", "confluence.corp", "8443"},
+		{"10.1.2.3:8080", "10.1.2.3", "8080"},
+		{"[fd00::1]:8443", "fd00::1", "8443"},
+	}
+	for _, c := range cases {
+		host, port, err := parseAllowedHostEntry(c.in)
+		if err != nil {
+			t.Errorf("parseAllowedHostEntry(%q) errored: %v", c.in, err)
+			continue
+		}
+		if host != c.wantHost || port != c.wantPort {
+			t.Errorf("parseAllowedHostEntry(%q) = (%q, %q), want (%q, %q)",
+				c.in, host, port, c.wantHost, c.wantPort)
+		}
+	}
+}
+
+// A malformed entry stops startup rather than sitting in the allow-list
+// matching nothing — the failure mode where an operator believes access was
+// granted and the fetch fails far away from the config that caused it.
+func TestNewFetchACL_InvalidHostEntryFailsLoud(t *testing.T) {
+	for _, bad := range []string{
+		"confluence.corp",         // no port at all
+		"confluence.corp:",        // empty port
+		"confluence.corp:https",   // non-numeric port
+		"confluence.corp:0",       // out of range
+		"confluence.corp:65536",   // out of range
+		"https://confluence.corp", // a URL, not a host
+		"confluence.corp/wiki",    // a path
+	} {
+		if _, err := newFetchACL([]string{bad}, nil); err == nil {
+			t.Errorf("expected an error for entry %q, got nil", bad)
+		}
+	}
+}
+
+// The IPv6 forms have to agree with what the dialer and url.URL.Hostname
+// actually hand to hostAllowed, which is the unbracketed literal.
+func TestHostAllowed_IPv6Forms(t *testing.T) {
+	a, _ := newFetchACL([]string{"[fd00::1]:8443"}, nil)
+	if !a.hostAllowed("fd00::1", "8443") {
+		t.Error("bracketed entry should match the unbracketed dial host")
+	}
+	if a.hostAllowed("fd00::1", "6379") {
+		t.Error("scoped IPv6 entry must not allow other ports")
+	}
+}
+
+// urlHostPort fills in the scheme default so a "wiki.corp:443" entry matches
+// a plain https:// URL that never spells the port out.
+func TestURLHostPort_SchemeDefaults(t *testing.T) {
+	cases := []struct{ raw, host, port string }{
+		{"https://wiki.corp/page", "wiki.corp", "443"},
+		{"http://wiki.corp/page", "wiki.corp", "80"},
+		{"https://wiki.corp:8443/page", "wiki.corp", "8443"},
+		{"http://WIKI.CORP./page", "wiki.corp", "80"},
+	}
+	for _, c := range cases {
+		u, err := url.Parse(c.raw)
+		if err != nil {
+			t.Fatalf("bad test URL %q: %v", c.raw, err)
+		}
+		host, port := urlHostPort(u)
+		if host != c.host || port != c.port {
+			t.Errorf("urlHostPort(%q) = (%q, %q), want (%q, %q)",
+				c.raw, host, port, c.host, c.port)
+		}
+	}
+}
+
+// The end-to-end shape of the finding this scoping closes: an allow-listed
+// wiki on 443 must not make every other port on that machine reachable.
+func TestCheckRedirect_BlocksPortPivotOnAllowedHost(t *testing.T) {
+	a, _ := newFetchACL([]string{"127.0.0.1:443"}, nil)
+
+	// The allowed port passes.
+	ok, _ := http.NewRequestWithContext(context.Background(), "GET", "https://127.0.0.1/page", nil)
+	if err := a.safeCheckRedirect(ok, nil); err != nil {
+		t.Errorf("redirect to the allow-listed port should pass, got: %v", err)
+	}
+
+	// A redirect to a different port on the same allow-listed host falls back
+	// to the per-IP policy, which blocks loopback.
+	pivot, _ := http.NewRequestWithContext(context.Background(), "GET", "http://127.0.0.1:6379/", nil)
+	if err := a.safeCheckRedirect(pivot, nil); err == nil {
+		t.Fatal("redirect to an unlisted port on an allow-listed host should be blocked")
+	}
 }

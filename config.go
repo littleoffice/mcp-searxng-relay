@@ -57,7 +57,7 @@ type Config struct {
 	// FetchACL is the compiled, validated form populated in main() (see
 	// newFetchACL). Storing the raw lists too keeps the startup banner and any
 	// future /config introspection honest about what was configured.
-	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: hostnames exempt from the public-IP check
+	FetchAllowedHosts []string  // FETCH_ALLOWED_HOSTS: host:port entries exempt from the public-IP check
 	FetchAllowedCIDRs []string  // FETCH_ALLOWED_CIDRS: IP ranges treated as reachable
 	FetchACL          *fetchACL // compiled form; nil until main() validates the two lists
 
@@ -233,9 +233,14 @@ func configFromEnv() Config {
 	// per trust boundary keeps the enforcement where it cannot be bypassed.
 	c.SearxngTokens = parseCSV(os.Getenv("SEARXNG_TOKENS"))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
-	// CIDRs are compiled and validated in main() via newFetchACL so a bad
-	// entry fails startup with a clear message instead of being silently
+	// hosts and CIDRs are compiled and validated in main() via newFetchACL so
+	// a bad entry fails startup with a clear message instead of being silently
 	// dropped. Empty (the default) leaves the strict public-only policy.
+	//
+	// Host entries must be written "host:port"; a bare hostname is a startup
+	// error rather than a shorthand for "every port". See the allowedHosts
+	// comment in ssrf.go for why the port is mandatory and why the bare form
+	// is rejected instead of being reinterpreted as some default.
 	c.FetchAllowedHosts = parseCSV(os.Getenv("FETCH_ALLOWED_HOSTS"))
 	c.FetchAllowedCIDRs = parseCSV(os.Getenv("FETCH_ALLOWED_CIDRS"))
 	// Egress proxy — validated in main() via fetchACL.setProxy so a bad URL

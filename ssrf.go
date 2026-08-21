@@ -30,6 +30,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -54,6 +55,23 @@ import (
 //     this does not reopen the DNS-rebinding hole the dialer closes for the
 //     default path.
 //
+//     Every entry MUST name a port ("confluence.corp:8443"); the allowance
+//     covers that port and nothing else.  A bare hostname is a startup
+//     error, not a shorthand for "all ports", because allow-listing a
+//     hostname alone also exposes whatever else that machine happens to be
+//     listening on — Redis on 6379, etcd on 2379, a kubelet on 10250 —
+//     which is never what "let the agent read our wiki" was meant to
+//     grant.  Requiring the port makes the operator state the reach they
+//     actually intend instead of inheriting the widest possible one from a
+//     default.
+//
+//     Rejecting the bare form at startup rather than reinterpreting it as
+//     some default port is deliberate.  A silent reinterpretation would
+//     leave an entry that still parses but no longer matches, and the
+//     failure would surface at fetch time far from the config that caused
+//     it — the worst failure mode available for an allow-list, and the one
+//     the malformed-entry check below already exists to prevent.
+//
 //   - allowedCIDRs: IP ranges that are treated as reachable even though the
 //     default policy (IsPrivate / reserved / etc.) would block them.  This
 //     is checked against the *resolved* IP at dial time and on each redirect
@@ -69,7 +87,7 @@ import (
 // ranges tight; in particular do not list 169.254.0.0/16 unless you truly
 // intend to expose the cloud metadata endpoint.
 type fetchACL struct {
-	allowedHosts map[string]struct{} // lower-cased, trailing-dot-stripped exact matches
+	allowedHosts map[string]allowedPorts // lower-cased, trailing-dot-stripped exact matches
 	allowedCIDRs []*net.IPNet
 
 	// Egress proxy for the fetch tool (FETCH_PROXY / FETCH_PROXY_ALL).
@@ -85,17 +103,35 @@ type fetchACL struct {
 	proxyAll       bool
 }
 
+// allowedPorts is the set of ports allow-listed for one hostname.  There is
+// no "any port" member by construction: newFetchACL rejects an entry that
+// does not name a port, so the widest reach an operator can express for a
+// host is the set of ports they wrote down.
+type allowedPorts map[string]struct{}
+
 // newFetchACL compiles the operator-supplied host and CIDR allow-lists.
-// Hostnames are normalised (trimmed, lower-cased, trailing FQDN dot removed).
-// Every CIDR must parse; a malformed entry returns an error so startup fails
-// loudly rather than silently leaving a range unconfigured — a typo in a
-// security control should stop the server, not degrade it quietly.
+// Host entries are normalised (trimmed, lower-cased, trailing FQDN dot
+// removed) and must be written "host:port".  Every host entry and every CIDR
+// must parse; a malformed entry returns an error so startup fails loudly
+// rather than silently leaving a control mis-scoped — a typo in a security
+// control should stop the server, not degrade it quietly.
+//
+// Several entries may name the same host, in which case their ports
+// accumulate: "wiki.corp:80,wiki.corp:443" allows exactly those two.
 func newFetchACL(hosts, cidrs []string) (*fetchACL, error) {
-	a := &fetchACL{allowedHosts: make(map[string]struct{}, len(hosts))}
-	for _, h := range hosts {
-		if h = normaliseHost(h); h != "" {
-			a.allowedHosts[h] = struct{}{}
+	a := &fetchACL{allowedHosts: make(map[string]allowedPorts, len(hosts))}
+	for _, raw := range hosts {
+		if strings.TrimSpace(raw) == "" {
+			continue
 		}
+		host, port, err := parseAllowedHostEntry(raw)
+		if err != nil {
+			return nil, fmt.Errorf("FETCH_ALLOWED_HOSTS: %w", err)
+		}
+		if a.allowedHosts[host] == nil {
+			a.allowedHosts[host] = make(allowedPorts, 1)
+		}
+		a.allowedHosts[host][port] = struct{}{}
 	}
 	for _, c := range cidrs {
 		c = strings.TrimSpace(c)
@@ -115,7 +151,7 @@ func newFetchACL(hosts, cidrs []string) (*fetchACL, error) {
 // the original public-only policy.  Used as the nil-safe default so a Server
 // constructed directly in tests (with a zero Config) keeps strict semantics.
 func emptyFetchACL() *fetchACL {
-	return &fetchACL{allowedHosts: map[string]struct{}{}}
+	return &fetchACL{allowedHosts: map[string]allowedPorts{}}
 }
 
 // isEmpty reports whether any allowance is configured. Used by the startup
@@ -130,12 +166,80 @@ func normaliseHost(h string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
 }
 
-// hostAllowed reports whether host was explicitly allow-listed by the operator.
-func (a *fetchACL) hostAllowed(host string) bool {
+// parseAllowedHostEntry splits one FETCH_ALLOWED_HOSTS entry into a
+// normalised hostname and its port.  The port is mandatory.
+//
+// Accepted forms:
+//
+//	confluence.corp:8443   hostname with port
+//	10.1.2.3:8080          IPv4 literal with port
+//	[fd00::1]:8443         IPv6 literal with port (brackets required, as in a URL)
+//
+// Everything else is an error: a bare hostname, an empty or non-numeric or
+// out-of-range port, a value carrying a scheme or a path.  Each returns a
+// message naming the offending entry and the form that was wanted, so the
+// operator can fix it without counting commas through an env var.
+//
+// The strictness is the point.  An allow-list line that parses but can never
+// match is the worst outcome available here: the operator believes they
+// granted access, the fetch fails at request time, and the reason is nowhere
+// near the config that caused it.  Failing at startup puts the error next to
+// the mistake.
+func parseAllowedHostEntry(raw string) (host, port string, err error) {
+	entry := strings.TrimSpace(raw)
+
+	if strings.Contains(entry, "/") {
+		return "", "", fmt.Errorf("entry %q looks like a URL; write host:port only "+
+			"(e.g. \"confluence.corp:8443\")", raw)
+	}
+
+	// SplitHostPort handles "host:port" and "[v6]:port". It fails for a bare
+	// hostname ("missing port") and for a bare unbracketed IPv6 literal ("too
+	// many colons"); both are entries we want to reject, so its error is the
+	// discrimination we need rather than something to work around.
+	h, p, splitErr := net.SplitHostPort(entry)
+	if splitErr != nil {
+		return "", "", fmt.Errorf("entry %q has no port; write host:port "+
+			"(e.g. \"confluence.corp:443\" for https, \"confluence.corp:8090\" for a "+
+			"service on another port). A bare hostname is rejected because it would "+
+			"allow every port on that host, including anything else it happens to be "+
+			"serving. IPv6 literals need brackets: \"[fd00::1]:8443\"", raw)
+	}
+	if err := validatePort(p, raw); err != nil {
+		return "", "", err
+	}
+	return normaliseHost(h), p, nil
+}
+
+// validatePort rejects the port spellings that would produce an entry no
+// request can ever match.  raw is echoed in the error so the operator can
+// find the offending line without counting commas.
+func validatePort(port, raw string) error {
+	if port == "" {
+		return fmt.Errorf("entry %q has an empty port; name one, "+
+			"e.g. \"confluence.corp:8443\"", raw)
+	}
+	n, convErr := strconv.Atoi(port)
+	if convErr != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("entry %q has an invalid port %q; want a number in 1-65535", raw, port)
+	}
+	return nil
+}
+
+// hostAllowed reports whether host:port was explicitly allow-listed by the
+// operator.  port is the concrete port the connection is heading for, with
+// the scheme default already filled in by the caller, so an entry written as
+// "wiki.corp:443" matches a plain https:// URL for that host and the operator
+// does not have to spell the port out in every URL.
+func (a *fetchACL) hostAllowed(host, port string) bool {
 	if len(a.allowedHosts) == 0 {
 		return false
 	}
-	_, ok := a.allowedHosts[normaliseHost(host)]
+	ports, ok := a.allowedHosts[normaliseHost(host)]
+	if !ok {
+		return false
+	}
+	_, ok = ports[port]
 	return ok
 }
 
@@ -265,10 +369,15 @@ func (a *fetchACL) isProxyAuthority(host, port string) bool {
 	return net.JoinHostPort(normaliseHost(host), port) == a.proxyAuthority
 }
 
-// requestAuthority returns the canonical "host:port" a request URL targets,
-// filling in the scheme default when the URL omits the port.
-func requestAuthority(u *url.URL) string {
-	port := u.Port()
+// urlHostPort returns the normalised hostname and the concrete port a request
+// URL targets, filling in the scheme default when the URL omits the port.
+//
+// Every allow-list decision goes through this so that "wiki.corp:443" on the
+// allow-list matches a plain "https://wiki.corp/page" request.  Comparing
+// against u.Port() directly would leave the scoped form matching only URLs
+// that spell the port out, which is not how anyone writes them.
+func urlHostPort(u *url.URL) (host, port string) {
+	port = u.Port()
 	if port == "" {
 		if u.Scheme == "https" {
 			port = "443"
@@ -276,7 +385,13 @@ func requestAuthority(u *url.URL) string {
 			port = "80"
 		}
 	}
-	return net.JoinHostPort(normaliseHost(u.Hostname()), port)
+	return normaliseHost(u.Hostname()), port
+}
+
+// requestAuthority returns the canonical "host:port" a request URL targets,
+// filling in the scheme default when the URL omits the port.
+func requestAuthority(u *url.URL) string {
+	return net.JoinHostPort(urlHostPort(u))
 }
 
 // proxyFor is used as http.Transport.Proxy for the fetchClient.  Returning
@@ -297,7 +412,7 @@ func (a *fetchACL) proxyFor(req *http.Request) (*url.URL, error) {
 	if a.proxyAuthority == requestAuthority(req.URL) {
 		return nil, fmt.Errorf("refusing to fetch the configured egress proxy")
 	}
-	if a.proxyAll || a.hostAllowed(req.URL.Hostname()) {
+	if a.proxyAll || a.hostAllowed(urlHostPort(req.URL)) {
 		return a.proxyURL, nil
 	}
 	return nil, nil
@@ -345,8 +460,9 @@ func (a *fetchACL) safeDialContext(ctx context.Context, network, addr string) (n
 	// an internal Confluence/Jira/wiki host).  We still resolve here and dial
 	// a concrete IP below rather than re-resolving, preserving the
 	// no-rebinding-window discipline of the default path.
-	if a.hostAllowed(host) {
-		slog.Debug("SSRF: host on allow-list, skipping public-IP check", "host", host)
+	if a.hostAllowed(host, port) {
+		slog.Debug("SSRF: host on allow-list, skipping public-IP check",
+			"host", host, "port", port)
 	} else {
 		for _, ia := range addrs {
 			if err := a.assertReachable(ia.IP); err != nil {
@@ -368,12 +484,15 @@ func (a *fetchACL) safeCheckRedirect(req *http.Request, via []*http.Request) err
 	if len(via) >= 5 {
 		return fmt.Errorf("stopped after 5 redirects")
 	}
-	host := req.URL.Hostname()
+	host, port := urlHostPort(req.URL)
 	// Same allow-list semantics as the dialer: a redirect *to* an
-	// allow-listed host is permitted regardless of the IP it resolves to,
-	// while every other host is re-validated per resolved IP so an open
+	// allow-listed host:port is permitted regardless of the IP it resolves
+	// to, while every other host is re-validated per resolved IP so an open
 	// redirect on a public host still cannot pivot to a blocked internal one.
-	if a.hostAllowed(host) {
+	// Carrying the port through matters here as much as at dial time: a
+	// redirect is the cheapest way to turn an allowed "wiki.corp:443" into
+	// a request for "wiki.corp:6379" if only the hostname were checked.
+	if a.hostAllowed(host, port) {
 		return nil
 	}
 	// Under FETCH_PROXY_ALL the proxy performs the connection and therefore
