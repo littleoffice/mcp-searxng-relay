@@ -50,8 +50,83 @@ type SearchResult struct {
 	Engines []string `json:"engines,omitempty"`
 }
 
+// searxNGResponse is the subset of SearXNG's format=json body this relay
+// reads.  Upstream builds it in searx/webutils.py:get_json_response, whose
+// full key set is query, results, answers, corrections, infoboxes,
+// suggestions and unresponsive_engines.
 type searxNGResponse struct {
 	Results []SearchResult `json:"results"`
+
+	// UnresponsiveEngines names the backends that failed to answer this
+	// query.  Upstream shape is a list of two-element arrays,
+	// [engine_name, message] — Python tuples from get_translated_errors,
+	// where the message is localised and gains a "Suspended: " prefix when
+	// the engine is in cooldown.
+	//
+	// Kept as RawMessage and decoded separately rather than typed directly
+	// as [][]string, because a strict decode here would fail the WHOLE
+	// response if upstream ever changed this field's shape — turning a
+	// diagnostic nicety into a total search outage.  Engine health is
+	// metadata about the answer; it must never be able to take the answer
+	// down with it.  parseUnresponsiveEngines degrades to "no engine
+	// information" instead.
+	UnresponsiveEngines json.RawMessage `json:"unresponsive_engines"`
+}
+
+// engineFailure is one backend that did not answer, as reported by SearXNG.
+type engineFailure struct {
+	Engine string
+	Reason string
+}
+
+// parseUnresponsiveEngines decodes the unresponsive_engines field.  Returns
+// nil for absent, empty, or unrecognised input — every failure mode here is
+// "we learned nothing about engine health", never an error that propagates.
+//
+// Entries with fewer than two elements are skipped rather than padded: a
+// shape we do not recognise is not something to guess at, and a half-parsed
+// engine name in a log line is worse than its absence.
+func parseUnresponsiveEngines(raw json.RawMessage) []engineFailure {
+	if len(raw) == 0 {
+		return nil
+	}
+	var pairs [][]string
+	if err := json.Unmarshal(raw, &pairs); err != nil {
+		return nil
+	}
+	out := make([]engineFailure, 0, len(pairs))
+	for _, p := range pairs {
+		if len(p) < 2 || p[0] == "" {
+			continue
+		}
+		out = append(out, engineFailure{Engine: p[0], Reason: p[1]})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// engineNames returns just the backend names, for the compact field of the
+// degraded-search log line.
+func engineNames(fs []engineFailure) []string {
+	names := make([]string, 0, len(fs))
+	for _, f := range fs {
+		names = append(names, f.Engine)
+	}
+	return names
+}
+
+// engineFailureDetail renders "engine: reason" pairs for the verbose field of
+// the same log line.  Two fields rather than one because they answer
+// different questions: the names are what you alert on and group by, the
+// reasons are what you read once the alert fires.
+func engineFailureDetail(fs []engineFailure) []string {
+	detail := make([]string, 0, len(fs))
+	for _, f := range fs {
+		detail = append(detail, f.Engine+": "+f.Reason)
+	}
+	return detail
 }
 
 func (s *Server) toolSearch(
@@ -214,6 +289,29 @@ func (s *Server) search(
 	var searxResp searxNGResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 10_000_000)).Decode(&searxResp); err != nil {
 		return nil, fmt.Errorf("failed to parse search response: %w", err)
+	}
+
+	// A search where some backends failed is not an error — SearXNG returns
+	// HTTP 200 with whatever the surviving engines produced — but it is a
+	// degraded answer, and until now nothing anywhere said so.  The engines
+	// go quiet, results get thinner, the agent's answers get worse, and the
+	// first visible symptom is someone concluding the model has regressed.
+	// That failure has already cost this project a misdiagnosis: two engines
+	// broke on an upstream API change and the relay was suspected first.
+	//
+	// Warn level, not info: this is the signal an operator needs to see
+	// unprompted.  A deployment with many engines configured may see
+	// intermittent entries as engines cycle through suspension, which is
+	// noisy but correct — the alternative is the silence that caused the
+	// misdiagnosis in the first place.
+	if failures := parseUnresponsiveEngines(searxResp.UnresponsiveEngines); len(failures) > 0 {
+		callerLogger(ctx).Warn("searxng search was degraded: some engines did not respond",
+			"unresponsive_engines", strings.Join(engineNames(failures), ","),
+			"unresponsive_count", len(failures),
+			"detail", strings.Join(engineFailureDetail(failures), "; "),
+			"query", query,
+			"results", len(searxResp.Results),
+			"hint", "results are incomplete; check the named engines in your SearXNG instance before treating thin results as a relay or model problem")
 	}
 
 	return searxResp.Results, nil
