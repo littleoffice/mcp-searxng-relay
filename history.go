@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -29,7 +30,7 @@ import (
 // actually asking about and which the model cannot reliably introspect.
 //
 // Storage shape.  One LRU keyed per caller, whose *value* is that caller's
-// entire history in a fixed-size ring.  The obvious alternative — one flat LRU
+// entire history in a fixed-size table of sources.  The obvious alternative — one flat LRU
 // with a synthetic "caller:seq" key — is wrong twice over: eviction becomes
 // global (one busy agent flushes every other caller's history) and answering
 // "what did this caller fetch?" requires walking the whole keyspace.  Here,
@@ -45,11 +46,15 @@ import (
 // and belongs to session affinity at the ingress, not to a datastore here.
 
 const (
-	// fetchHistoryEntries is the per-caller ring size.  The list is read
-	// into the context window on every call, so this is a token budget as
-	// much as a memory one: 50 entries is far more than a single research
-	// task produces and still costs well under a page of context.  Older
-	// entries are reported as a count rather than dropped silently.
+	// fetchHistoryEntries is how many distinct sources one caller retains.
+	// Repeat fetches of a URL already held — a metadata triage followed by
+	// a read, a paginated document, a re-read — fold into the entry that is
+	// there and cost no slot, so this is a count of sources and not of tool
+	// calls.  The list is read into the context window on every call, so it
+	// is a token budget as much as a memory one: 50 sources is far more than
+	// a single research task produces and still costs well under a page of
+	// context.  Sources dropped to make room are reported as a count rather
+	// than vanishing silently.
 	fetchHistoryEntries = 50
 
 	// fetchHistoryCallers bounds how many distinct callers we retain
@@ -93,24 +98,116 @@ type fetchRecord struct {
 	CharsRead  int
 	TotalChars int
 	FromCache  bool
+	Fetches    int // fetches folded into this entry, including the first
 }
 
-// fetchHistory is a fixed-size ring of fetchRecords for one caller.
+// fetchHistory is one caller's table of retained sources.
+//
+// A slot holds one *source*, not one fetch: a repeat fetch of a URL already
+// held folds into the entry that is there (see mergeRecord) rather than
+// consuming a slot.  Slot-per-fetch is the obvious shape and the wrong one,
+// because the things that repeat are exactly the things a research task does
+// most — triaging a URL with metadata before reading it, paging through a long
+// document one window at a time, re-reading after a cache hit.  Under
+// slot-per-fetch a single six-window read costs six of the fifty, and sources
+// the caller genuinely cited can fall out of the table while the same URL
+// occupies it six times over.  Deduplicating at read time, which is what this
+// once did, is too late to help: by then the evicted sources are gone.
+//
+// index maps a source's citable URL to its slot, which makes the fold O(1).
+// It is maintained in step with entries on every write, and an entry's citable
+// URL must never change without its index key changing with it.
 //
 // The mutex is not redundant with the LRU's own locking.  The cache returns a
 // *fetchHistory, and two concurrent requests from the same caller then write
 // through the same pointer; the cache's lock protects its map, not the value
 // behind the pointer.
 type fetchHistory struct {
-	mu    sync.Mutex
-	ring  [fetchHistoryEntries]fetchRecord
-	next  int // index of the next slot to write (== oldest, once wrapped)
-	count int // entries currently held, capped at fetchHistoryEntries
-	total int // entries ever appended; source of Seq
+	mu      sync.Mutex
+	entries [fetchHistoryEntries]fetchRecord
+	index   map[string]int // citable URL -> slot in entries
+	count   int            // slots in use
+	total   int            // fetches ever appended; source of Seq
+	evicted int            // distinct sources dropped to make room
 }
 
-// appendRecord stores r, assigning it the next sequence number, and returns
-// the assigned Seq.
+// citableURL is the URL an entry is filed and cited under: where the fetch
+// ended up, or where it was aimed when it never got there.  It is both the
+// index key and the url field the model copies, and those two must be the same
+// string — an entry filed under one and reported under another is unreachable
+// for eviction and mismatched for since_seq.
+func citableURL(r fetchRecord) string {
+	if r.FinalURL != "" {
+		return r.FinalURL
+	}
+	return r.URL
+}
+
+// depthRank orders read depths by how much of a document each one entitles the
+// caller to claim.  metadata and image rank together: both mean "the fetch
+// worked and no text came back".
+func depthRank(d readDepth) int {
+	switch d {
+	case readDepthFull:
+		return 4
+	case readDepthPartial:
+		return 3
+	case readDepthMetadata, readDepthImage:
+		return 2
+	default: // readDepthNone, or a record that never set the field
+		return 1
+	}
+}
+
+// mergeRecord folds a repeat fetch into the entry already held for that URL.
+//
+// The merged entry answers two questions whose answers can differ, so it takes
+// each group of fields from the record that actually knows:
+//
+//   - "how much of this did we ever manage to read?" — Read, Outcome, Err,
+//     Title, CharsRead and TotalChars come from the deepest read achieved.  A
+//     later metadata-only triage does not un-read a page already read in full,
+//     and a re-fetch that 404s does not erase the copy that was returned.
+//     Taking the newest record wholesale, as the old read-time dedup did,
+//     understated exactly the claim this tool exists to support.
+//   - "when was it last touched, and how?" — Seq, FetchedAt, Tool and
+//     FromCache come from the current fetch, which is what since_seq and the
+//     newest-first ordering are asking about.
+//
+// Equal depths resolve to the newer record: the same claim, more recently
+// worded.
+func mergeRecord(held, cur fetchRecord) fetchRecord {
+	best, other := cur, held
+	if depthRank(held.Read) > depthRank(cur.Read) {
+		best, other = held, cur
+	}
+
+	merged := best
+	// The URL pair comes from cur unconditionally: it determines the entry's
+	// citable URL, which is the key this record is indexed under.
+	merged.URL, merged.FinalURL = cur.URL, cur.FinalURL
+	merged.Seq, merged.FetchedAt = cur.Seq, cur.FetchedAt
+	merged.Tool, merged.FromCache = cur.Tool, cur.FromCache
+	merged.Fetches = held.Fetches + 1
+
+	// Character counts are a high-water mark rather than the winning
+	// record's own, so a re-read that returned less does not shrink what we
+	// report having held.
+	if other.CharsRead > merged.CharsRead {
+		merged.CharsRead = other.CharsRead
+	}
+	if other.TotalChars > merged.TotalChars {
+		merged.TotalChars = other.TotalChars
+	}
+	if merged.Title == "" {
+		merged.Title = other.Title
+	}
+	return merged
+}
+
+// appendRecord files r, assigning it the next sequence number, and returns the
+// assigned Seq.  A fetch of a URL already held updates that entry in place;
+// the Seq is still consumed, so total keeps counting fetches.
 //
 // Sequence numbers are monotonic per caller and are what the model uses to
 // order the list.  A timestamp answers "how stale is this"; a sequence number
@@ -124,29 +221,63 @@ func (h *fetchHistory) appendRecord(r fetchRecord) int {
 
 	h.total++
 	r.Seq = h.total
-	h.ring[h.next] = r
-	h.next = (h.next + 1) % fetchHistoryEntries
-	if h.count < fetchHistoryEntries {
+	r.Fetches = 1
+
+	if h.index == nil {
+		h.index = make(map[string]int, fetchHistoryEntries)
+	}
+	key := citableURL(r)
+	if idx, ok := h.index[key]; ok {
+		h.entries[idx] = mergeRecord(h.entries[idx], r)
+		return r.Seq
+	}
+
+	idx := h.count
+	if h.count == fetchHistoryEntries {
+		idx = h.evictLeastRecent()
+	} else {
 		h.count++
 	}
+	h.entries[idx] = r
+	h.index[key] = idx
 	return r.Seq
 }
 
-// list returns the retained records newest-first, along with the total number
-// ever appended for this caller.
+// evictLeastRecent frees the slot whose source was touched longest ago and
+// returns it.  Called with h.mu held, and only when every slot is in use.
+//
+// Least recently *touched*, not first seen: a merged entry keeps its slot but
+// takes a new Seq, so insertion order stops tracking recency the moment a
+// caller re-fetches anything, and evicting by slot order would drop the source
+// it had just re-read.  The scan is O(fetchHistoryEntries) and runs only on
+// overflow.
+func (h *fetchHistory) evictLeastRecent() int {
+	oldest := 0
+	for i := 1; i < h.count; i++ {
+		if h.entries[i].Seq < h.entries[oldest].Seq {
+			oldest = i
+		}
+	}
+	delete(h.index, citableURL(h.entries[oldest]))
+	h.evicted++
+	return oldest
+}
+
+// list returns the retained sources newest-first, the number of fetches ever
+// appended, and the number of distinct sources dropped to make room.
 //
 // Newest-first is deliberate: it makes recency positional, so the model reads
 // the ordering off the list rather than inferring it from sequence arithmetic.
-func (h *fetchHistory) list() (records []fetchRecord, total int) {
+// The ordering comes from Seq rather than from slot order because a merged
+// entry keeps its slot and takes a new Seq.
+func (h *fetchHistory) list() (records []fetchRecord, total, evicted int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	records = make([]fetchRecord, 0, h.count)
-	for i := 1; i <= h.count; i++ {
-		idx := ((h.next-i)%fetchHistoryEntries + fetchHistoryEntries) % fetchHistoryEntries
-		records = append(records, h.ring[idx])
-	}
-	return records, h.total
+	records = make([]fetchRecord, h.count)
+	copy(records, h.entries[:h.count])
+	sort.Slice(records, func(i, j int) bool { return records[i].Seq > records[j].Seq })
+	return records, h.total, h.evicted
 }
 
 // historyKey derives the cache key for the current caller.
@@ -241,6 +372,12 @@ type sourceEntry struct {
 	Fetches      int    `json:"fetches,omitempty"`
 }
 
+// sourcesPayload is the whole response.  The three counts describe different
+// things and are only useful apart: Total counts fetches (so it exceeds the
+// number of rows whenever a URL was fetched more than once), Returned counts
+// the rows actually sent after since_seq filtering, and Elided counts distinct
+// sources dropped to make room — the one number that says the list is no
+// longer complete.
 type sourcesPayload struct {
 	Note     string        `json:"note"`
 	Total    int           `json:"total_fetches"`
@@ -268,30 +405,21 @@ func (s *Server) toolSessionSources(
 
 	h := s.historyFor(ctx)
 	var records []fetchRecord
-	var total int
+	var total, evicted int
 	if h != nil {
-		records, total = h.list()
+		records, total, evicted = h.list()
 	}
 
-	// Deduplicate by the citable URL, keeping the newest record for each.
-	// Iteration is already newest-first, so first-seen wins and later hits
-	// only contribute to the repeat count.
-	seen := make(map[string]int, len(records))
+	// One row per source already: appendRecord folds repeat fetches into the
+	// entry they belong to, so records carries no duplicates and there is no
+	// second pass to make here.
 	entries := make([]sourceEntry, 0, len(records))
 	for _, r := range records {
 		if r.Seq <= in.SinceSeq {
 			continue
 		}
-		citable := r.FinalURL
-		if citable == "" {
-			citable = r.URL
-		}
-		if idx, ok := seen[citable]; ok {
-			entries[idx].Fetches++
-			continue
-		}
 		e := sourceEntry{
-			URL:        citable,
+			URL:        citableURL(r),
 			Title:      r.Title,
 			Read:       string(r.Read),
 			Outcome:    r.Outcome,
@@ -302,7 +430,7 @@ func (s *Server) toolSessionSources(
 			FromCache:  r.FromCache,
 			Tool:       r.Tool,
 			Seq:        r.Seq,
-			Fetches:    1,
+			Fetches:    r.Fetches,
 		}
 		// Only surface the requested URL when a redirect moved it; the
 		// two being equal is the common case and the extra field would
@@ -310,7 +438,6 @@ func (s *Server) toolSessionSources(
 		if r.FinalURL != "" && r.FinalURL != r.URL {
 			e.RequestedURL = r.URL
 		}
-		seen[citable] = len(entries)
 		entries = append(entries, e)
 	}
 
@@ -318,11 +445,8 @@ func (s *Server) toolSessionSources(
 		Note:     sourcesNote,
 		Total:    total,
 		Returned: len(entries),
-		Elided:   total - len(records),
+		Elided:   evicted,
 		Sources:  entries,
-	}
-	if payload.Elided < 0 {
-		payload.Elided = 0
 	}
 
 	jsonBytes, err := json.Marshal(payload)

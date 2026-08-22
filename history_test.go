@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -13,7 +14,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// ── ring buffer ───────────────────────────────────────────────────────────────
+// ── source table ──────────────────────────────────────────────────────────────
 
 func TestFetchHistoryOrderingIsNewestFirst(t *testing.T) {
 	h := &fetchHistory{}
@@ -21,9 +22,9 @@ func TestFetchHistoryOrderingIsNewestFirst(t *testing.T) {
 		h.appendRecord(fetchRecord{URL: "https://example.com/" + string(rune('a'+i-1))})
 	}
 
-	got, total := h.list()
-	if total != 3 {
-		t.Fatalf("total = %d, want 3", total)
+	got, total, evicted := h.list()
+	if total != 3 || evicted != 0 {
+		t.Fatalf("total = %d, evicted = %d, want 3 and 0", total, evicted)
 	}
 	if len(got) != 3 {
 		t.Fatalf("len = %d, want 3", len(got))
@@ -40,19 +41,22 @@ func TestFetchHistoryOrderingIsNewestFirst(t *testing.T) {
 	}
 }
 
-func TestFetchHistoryWrapsAndReportsTrueTotal(t *testing.T) {
+func TestFetchHistoryEvictsAndReportsTrueTotals(t *testing.T) {
 	h := &fetchHistory{}
 	const n = fetchHistoryEntries + 17
 	for i := 1; i <= n; i++ {
-		h.appendRecord(fetchRecord{CharsRead: i})
+		h.appendRecord(fetchRecord{URL: fmt.Sprintf("https://example.com/%d", i), CharsRead: i})
 	}
 
-	got, total := h.list()
+	got, total, evicted := h.list()
 	if total != n {
 		t.Errorf("total = %d, want %d — the count of everything ever appended, not what was retained", total, n)
 	}
 	if len(got) != fetchHistoryEntries {
 		t.Fatalf("retained = %d, want %d", len(got), fetchHistoryEntries)
+	}
+	if want := n - fetchHistoryEntries; evicted != want {
+		t.Errorf("evicted = %d, want %d — the count is what tells the caller the list is no longer complete", evicted, want)
 	}
 	if got[0].CharsRead != n {
 		t.Errorf("newest = %d, want %d", got[0].CharsRead, n)
@@ -60,15 +64,77 @@ func TestFetchHistoryWrapsAndReportsTrueTotal(t *testing.T) {
 	if want := n - fetchHistoryEntries + 1; got[len(got)-1].CharsRead != want {
 		t.Errorf("oldest retained = %d, want %d", got[len(got)-1].CharsRead, want)
 	}
-	// Sequence numbers must keep climbing past the ring size, otherwise
-	// since_seq would silently re-serve entries after a wrap.
+	// Sequence numbers must keep climbing past the table size, otherwise
+	// since_seq would silently re-serve entries after an eviction.
 	if got[0].Seq != n {
 		t.Errorf("newest seq = %d, want %d", got[0].Seq, n)
 	}
 }
 
+// The regression that motivated one slot per source: a paginated read is one
+// source and many fetches.  Under slot-per-fetch, six windows of one document
+// cost six of the fifty slots, and a caller who paged through a few long
+// documents could lose sources it had genuinely cited while the same URL sat
+// in the table six times over.
+func TestFetchHistoryRepeatFetchesDoNotConsumeSlots(t *testing.T) {
+	h := &fetchHistory{}
+
+	for i := 0; i < fetchHistoryEntries; i++ {
+		u := fmt.Sprintf("https://example.com/source/%d", i)
+		for window := 0; window < 6; window++ {
+			h.appendRecord(fetchRecord{URL: u, Outcome: "ok", Read: readDepthPartial})
+		}
+	}
+
+	got, total, evicted := h.list()
+	if len(got) != fetchHistoryEntries {
+		t.Fatalf("retained = %d sources, want %d — repeat fetches are consuming slots", len(got), fetchHistoryEntries)
+	}
+	if evicted != 0 {
+		t.Errorf("evicted = %d, want 0 — nothing is dropped while the source count fits", evicted)
+	}
+	if want := fetchHistoryEntries * 6; total != want {
+		t.Errorf("total = %d, want %d — total counts fetches, not sources", total, want)
+	}
+	if got[0].Fetches != 6 {
+		t.Errorf("fetches = %d, want 6", got[0].Fetches)
+	}
+}
+
+// Eviction goes by last touch, not by first sight.  A source re-read late in a
+// task is the one most likely to be cited, and dropping it because it was
+// first seen early is exactly the wrong choice.
+func TestFetchHistoryEvictsLeastRecentlyTouched(t *testing.T) {
+	h := &fetchHistory{}
+	for i := 0; i < fetchHistoryEntries; i++ {
+		h.appendRecord(fetchRecord{URL: fmt.Sprintf("https://example.com/%d", i)})
+	}
+
+	// Re-read the first source, then overflow the table by one.
+	h.appendRecord(fetchRecord{URL: "https://example.com/0"})
+	h.appendRecord(fetchRecord{URL: "https://example.com/new"})
+
+	got, _, evicted := h.list()
+	if evicted != 1 {
+		t.Fatalf("evicted = %d, want 1", evicted)
+	}
+	held := make(map[string]bool, len(got))
+	for _, r := range got {
+		held[r.URL] = true
+	}
+	if !held["https://example.com/0"] {
+		t.Error("dropped the re-fetched source: eviction is following insertion order, not recency")
+	}
+	if held["https://example.com/1"] {
+		t.Error("expected the least recently touched source (.../1) to be the one dropped")
+	}
+	if !held["https://example.com/new"] {
+		t.Error("the new source never made it into the table")
+	}
+}
+
 func TestFetchHistoryConcurrentAppend(t *testing.T) {
-	// The LRU protects its map, not the ring behind the returned pointer.
+	// The LRU protects its map, not the table behind the returned pointer.
 	// Run with -race.
 	h := &fetchHistory{}
 	var wg sync.WaitGroup
@@ -77,13 +143,126 @@ func TestFetchHistoryConcurrentAppend(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			h.appendRecord(fetchRecord{URL: "https://example.com/x"})
-			_, _ = h.list()
+			_, _, _ = h.list()
 		}()
 	}
 	wg.Wait()
 
-	if _, total := h.list(); total != 64 {
+	got, total, _ := h.list()
+	if total != 64 {
 		t.Errorf("total = %d, want 64 — lost or double-counted appends", total)
+	}
+	if len(got) != 1 {
+		t.Fatalf("sources = %d, want 1 — 64 fetches of one URL are one source", len(got))
+	}
+	if got[0].Fetches != 64 {
+		t.Errorf("fetches = %d, want 64 — merges raced", got[0].Fetches)
+	}
+}
+
+// ── merging repeat fetches ────────────────────────────────────────────────────
+
+// The claim an entry supports is the deepest read ever achieved for that URL.
+// Taking the newest record wholesale, as the old read-time dedup did, lets a
+// metadata-only triage call downgrade a page that was already read in full —
+// understating precisely the distinction this tool exists to carry.
+func TestMergeKeepsDeepestRead(t *testing.T) {
+	h := &fetchHistory{}
+	h.appendRecord(fetchRecord{
+		URL: "https://example.com/a", Tool: "searxng_read_url", Outcome: "ok",
+		Read: readDepthFull, CharsRead: 18422, TotalChars: 18422, Title: "Article",
+	})
+	h.appendRecord(fetchRecord{
+		URL: "https://example.com/a", Tool: "searxng_url_metadata", Outcome: "ok",
+		Read: readDepthMetadata,
+	})
+
+	got, _, _ := h.list()
+	if len(got) != 1 {
+		t.Fatalf("sources = %d, want 1", len(got))
+	}
+	if got[0].Read != readDepthFull {
+		t.Errorf("read = %q, want %q — a later metadata call does not un-read the page", got[0].Read, readDepthFull)
+	}
+	if got[0].CharsRead != 18422 || got[0].TotalChars != 18422 {
+		t.Errorf("chars = %d/%d, want 18422/18422", got[0].CharsRead, got[0].TotalChars)
+	}
+	if got[0].Title != "Article" {
+		t.Errorf("title = %q, want the one carried by the deeper read", got[0].Title)
+	}
+	// Recency fields still describe the most recent touch.
+	if got[0].Seq != 2 || got[0].Tool != "searxng_url_metadata" {
+		t.Errorf("seq/tool = %d/%q, want 2/searxng_url_metadata — recency comes from the newest fetch",
+			got[0].Seq, got[0].Tool)
+	}
+	if got[0].Fetches != 2 {
+		t.Errorf("fetches = %d, want 2", got[0].Fetches)
+	}
+}
+
+// A re-fetch that fails does not erase the copy already returned.
+func TestMergeSurvivesALaterFailure(t *testing.T) {
+	h := &fetchHistory{}
+	h.appendRecord(fetchRecord{URL: "https://example.com/a", Outcome: "ok", Read: readDepthFull, CharsRead: 900})
+	h.appendRecord(fetchRecord{URL: "https://example.com/a", Outcome: "error", Read: readDepthNone, Err: "URL returned HTTP 503"})
+
+	got, _, _ := h.list()
+	if got[0].Outcome != "ok" || got[0].Read != readDepthFull {
+		t.Errorf("outcome/read = %q/%q, want ok/full", got[0].Outcome, got[0].Read)
+	}
+	if got[0].Err != "" {
+		t.Errorf("err = %q, want empty — outcome and error travel together or the row contradicts itself", got[0].Err)
+	}
+	if got[0].CharsRead != 900 {
+		t.Errorf("chars_read = %d, want 900 — the failed re-fetch must not shrink what was read", got[0].CharsRead)
+	}
+}
+
+// When nothing was ever read, equal depths resolve to the newer record, so the
+// row carries the most recent failure rather than the first one.
+func TestMergeKeepsNewestErrorWhenNothingWasEverRead(t *testing.T) {
+	h := &fetchHistory{}
+	h.appendRecord(fetchRecord{URL: "https://example.com/a", Outcome: "error", Read: readDepthNone, Err: "dial tcp: i/o timeout"})
+	h.appendRecord(fetchRecord{URL: "https://example.com/a", Outcome: "error", Read: readDepthNone, Err: "URL returned HTTP 404"})
+
+	got, _, _ := h.list()
+	if len(got) != 1 {
+		t.Fatalf("sources = %d, want 1", len(got))
+	}
+	if got[0].Err != "URL returned HTTP 404" {
+		t.Errorf("err = %q, want the most recent failure", got[0].Err)
+	}
+}
+
+// A merged entry has to stay filed under the URL it is reported as.  If the
+// two diverge, eviction deletes the wrong index key: the stale key then points
+// at a slot holding someone else's source, and the entry it used to name can
+// never be merged into again.
+func TestMergeKeepsIndexKeyAndCitableURLInStep(t *testing.T) {
+	h := &fetchHistory{}
+	h.appendRecord(fetchRecord{
+		URL: "https://example.com/short", FinalURL: "https://www.example.com/full?id=7",
+		Outcome: "ok", Read: readDepthFull,
+	})
+	h.appendRecord(fetchRecord{
+		URL: "https://www.example.com/full?id=7", FinalURL: "https://www.example.com/full?id=7",
+		Outcome: "ok", Read: readDepthFull,
+	})
+
+	got, _, _ := h.list()
+	if len(got) != 1 {
+		t.Fatalf("sources = %d, want 1 — a redirect target and a direct fetch of it are one source", len(got))
+	}
+	if key := citableURL(got[0]); key != "https://www.example.com/full?id=7" {
+		t.Errorf("citable URL = %q, want the post-redirect URL", key)
+	}
+	if len(h.index) != 1 {
+		t.Fatalf("index holds %d keys, want 1", len(h.index))
+	}
+	for key, slot := range h.index {
+		if held := citableURL(h.entries[slot]); held != key {
+			t.Errorf("index key %q points at an entry citable as %q", key, held)
+		}
 	}
 }
 
@@ -123,7 +302,7 @@ func TestHistoryIsolatedPerCaller(t *testing.T) {
 	s.recordFetch(alice, fetchRecord{URL: "https://alice.example/1", Outcome: "ok", Read: readDepthFull})
 	s.recordFetch(bob, fetchRecord{URL: "https://bob.example/1", Outcome: "ok", Read: readDepthFull})
 
-	got, _ := s.historyFor(alice).list()
+	got, _, _ := s.historyFor(alice).list()
 	if len(got) != 1 || got[0].URL != "https://alice.example/1" {
 		t.Fatalf("alice sees %+v, want only her own fetch", got)
 	}
@@ -218,7 +397,7 @@ func TestSessionSourcesDeduplicatesAndCountsRepeats(t *testing.T) {
 	if len(p.Sources) != 2 {
 		t.Fatalf("sources = %d, want 2 (a deduplicated, b)", len(p.Sources))
 	}
-	// Newest first, and the newest record for a URL wins the row — so /a
+	// Newest first, and the deepest read for a URL wins the row — so /a
 	// reports read=full, not the earlier metadata-only call.
 	if p.Sources[0].URL != "https://example.com/b" {
 		t.Errorf("first = %q, want .../b", p.Sources[0].URL)
@@ -254,6 +433,68 @@ func TestSessionSourcesSinceSeq(t *testing.T) {
 	}
 	if p.Sources[0].Seq != 3 {
 		t.Fatalf("since_seq=2 returned seq %d, want 3", p.Sources[0].Seq)
+	}
+}
+
+// elided answers "is this list still complete?", so it counts sources dropped
+// to make room and nothing else.  Deriving it as total-minus-rows, as the
+// payload once did, made a caller who re-read ten URLs five times each look
+// like one who had lost forty sources.
+func TestSessionSourcesElidedCountsDroppedSourcesNotRepeats(t *testing.T) {
+	s := newSourcesTestServer(t)
+	ctx := sourcesTestCtx("alice")
+
+	for i := 0; i < 10; i++ {
+		u := fmt.Sprintf("https://example.com/%d", i)
+		for r := 0; r < 5; r++ {
+			s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: u, Outcome: "ok", Read: readDepthFull})
+		}
+	}
+
+	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	p := decodeSourcesPayload(t, textOf(t, res))
+
+	if p.Elided != 0 {
+		t.Errorf("elided = %d, want 0 — 50 fetches of 10 URLs drop nothing", p.Elided)
+	}
+	if p.Total != 50 {
+		t.Errorf("total_fetches = %d, want 50", p.Total)
+	}
+	if len(p.Sources) != 10 || p.Returned != 10 {
+		t.Fatalf("sources = %d (returned %d), want 10", len(p.Sources), p.Returned)
+	}
+	if p.Sources[0].Fetches != 5 {
+		t.Errorf("fetches = %d, want 5", p.Sources[0].Fetches)
+	}
+}
+
+// A source read again after a previous call is new information — the caller
+// went back to it — and since_seq is how the model asks what has changed.
+func TestSessionSourcesSinceSeqSurfacesARefetchedSource(t *testing.T) {
+	s := newSourcesTestServer(t)
+	ctx := sourcesTestCtx("alice")
+
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/1", Outcome: "ok", Read: readDepthMetadata})
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/2", Outcome: "ok", Read: readDepthFull})
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/1", Outcome: "ok", Read: readDepthFull})
+
+	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{SinceSeq: 2})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	p := decodeSourcesPayload(t, textOf(t, res))
+
+	if len(p.Sources) != 1 {
+		t.Fatalf("since_seq=2 returned %d sources, want 1: %+v", len(p.Sources), p.Sources)
+	}
+	if p.Sources[0].URL != "https://example.com/1" || p.Sources[0].Seq != 3 {
+		t.Errorf("got %q at seq %d, want .../1 at seq 3", p.Sources[0].URL, p.Sources[0].Seq)
+	}
+	if p.Sources[0].Read != string(readDepthFull) {
+		t.Errorf("read = %q, want full", p.Sources[0].Read)
 	}
 }
 
