@@ -46,7 +46,8 @@ import (
 // and belongs to session affinity at the ingress, not to a datastore here.
 
 const (
-	// fetchHistoryEntries is how many distinct sources one caller retains.
+	// fetchHistoryEntries is the default number of distinct sources one
+	// caller retains, overridable per deployment with MCP_HISTORY_ENTRIES.
 	// Repeat fetches of a URL already held — a metadata triage followed by
 	// a read, a paginated document, a re-read — fold into the entry that is
 	// there and cost no slot, so this is a count of sources and not of tool
@@ -55,13 +56,18 @@ const (
 	// a single research task produces and still costs well under a page of
 	// context.  Sources dropped to make room are reported as a count rather
 	// than vanishing silently.
+	//
+	// Raise it for agents whose tasks legitimately visit more sources than
+	// that; the ceiling on doing so is the context the list occupies on
+	// every call, not memory — see MCP_HISTORY_ENTRIES in config.go.
 	fetchHistoryEntries = 50
 
 	// fetchHistoryCallers bounds how many distinct callers we retain
 	// histories for.  Matched to maxSessions so the history cache cannot
 	// outgrow the session cap that already bounds this process.  Worst
-	// case is ~1000 × 50 small records, which is negligible next to the
-	// content cache (CACHE_MAX_ENTRIES × MAX_EXTRACTED_CHARS).
+	// case is ~1000 × MCP_HISTORY_ENTRIES small records, which at the
+	// default is negligible next to the content cache (CACHE_MAX_ENTRIES ×
+	// MAX_EXTRACTED_CHARS).
 	fetchHistoryCallers = maxSessions
 )
 
@@ -118,17 +124,34 @@ type fetchRecord struct {
 // It is maintained in step with entries on every write, and an entry's citable
 // URL must never change without its index key changing with it.
 //
+// entries is sized once, at construction, from MCP_HISTORY_ENTRIES.  It is a
+// slice rather than an array only because that size is a runtime value; it is
+// never appended to or resized, so len(entries) is the cap throughout.  The
+// zero value of this struct is usable and sizes itself to the default on first
+// write, which keeps a directly-constructed fetchHistory (tests, and any
+// future caller that has no config to hand) from being a nil-slice panic.
+//
 // The mutex is not redundant with the LRU's own locking.  The cache returns a
 // *fetchHistory, and two concurrent requests from the same caller then write
 // through the same pointer; the cache's lock protects its map, not the value
 // behind the pointer.
 type fetchHistory struct {
 	mu      sync.Mutex
-	entries [fetchHistoryEntries]fetchRecord
+	entries []fetchRecord  // fixed length; len is the cap
 	index   map[string]int // citable URL -> slot in entries
 	count   int            // slots in use
 	total   int            // fetches ever appended; source of Seq
 	evicted int            // distinct sources dropped to make room
+}
+
+// newFetchHistory returns a history retaining n sources, falling back to the
+// default for a non-positive n so a misconfigured cap cannot produce a table
+// that drops everything written to it.
+func newFetchHistory(n int) *fetchHistory {
+	if n <= 0 {
+		n = fetchHistoryEntries
+	}
+	return &fetchHistory{entries: make([]fetchRecord, n)}
 }
 
 // citableURL is the URL an entry is filed and cited under: where the fetch
@@ -206,8 +229,13 @@ func mergeRecord(held, cur fetchRecord) fetchRecord {
 }
 
 // appendRecord files r, assigning it the next sequence number, and returns the
-// assigned Seq.  A fetch of a URL already held updates that entry in place;
-// the Seq is still consumed, so total keeps counting fetches.
+// assigned Seq along with whether filing it dropped another source to make
+// room.  A fetch of a URL already held updates that entry in place; the Seq is
+// still consumed, so total keeps counting fetches.
+//
+// The eviction flag is reported rather than counted here because the metric it
+// feeds lives on the Server, and a fetchHistory deliberately knows nothing
+// about one.
 //
 // Sequence numbers are monotonic per caller and are what the model uses to
 // order the list.  A timestamp answers "how stale is this"; a sequence number
@@ -215,7 +243,7 @@ func mergeRecord(held, cur fetchRecord) fetchRecord {
 // the right URL out of a list.  Both are carried because they are different
 // questions — a cache hit at seq 47 can legitimately hold bytes retrieved at
 // seq 3.
-func (h *fetchHistory) appendRecord(r fetchRecord) int {
+func (h *fetchHistory) appendRecord(r fetchRecord) (seq int, evicted bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -223,24 +251,28 @@ func (h *fetchHistory) appendRecord(r fetchRecord) int {
 	r.Seq = h.total
 	r.Fetches = 1
 
+	if h.entries == nil {
+		h.entries = make([]fetchRecord, fetchHistoryEntries)
+	}
 	if h.index == nil {
-		h.index = make(map[string]int, fetchHistoryEntries)
+		h.index = make(map[string]int, len(h.entries))
 	}
 	key := citableURL(r)
 	if idx, ok := h.index[key]; ok {
 		h.entries[idx] = mergeRecord(h.entries[idx], r)
-		return r.Seq
+		return r.Seq, false
 	}
 
 	idx := h.count
-	if h.count == fetchHistoryEntries {
+	full := h.count == len(h.entries)
+	if full {
 		idx = h.evictLeastRecent()
 	} else {
 		h.count++
 	}
 	h.entries[idx] = r
 	h.index[key] = idx
-	return r.Seq
+	return r.Seq, full
 }
 
 // evictLeastRecent frees the slot whose source was touched longest ago and
@@ -249,7 +281,7 @@ func (h *fetchHistory) appendRecord(r fetchRecord) int {
 // Least recently *touched*, not first seen: a merged entry keeps its slot but
 // takes a new Seq, so insertion order stops tracking recency the moment a
 // caller re-fetches anything, and evicting by slot order would drop the source
-// it had just re-read.  The scan is O(fetchHistoryEntries) and runs only on
+// it had just re-read.  The scan is O(len(h.entries)) and runs only on
 // overflow.
 func (h *fetchHistory) evictLeastRecent() int {
 	oldest := 0
@@ -327,7 +359,7 @@ func (s *Server) historyFor(ctx context.Context) *fetchHistory {
 	if h, ok := s.history.Get(key); ok {
 		return h
 	}
-	h := &fetchHistory{}
+	h := newFetchHistory(s.config.HistoryEntries)
 	s.history.Add(key, h)
 	return h
 }
@@ -344,7 +376,9 @@ func (s *Server) recordFetch(ctx context.Context, r fetchRecord) {
 	if r.FetchedAt.IsZero() {
 		r.FetchedAt = time.Now()
 	}
-	h.appendRecord(r)
+	if _, evicted := h.appendRecord(r); evicted {
+		s.metrics.HistoryEvictions.Add(1)
+	}
 }
 
 // ── Tool: session sources ─────────────────────────────────────────────────────
@@ -469,6 +503,13 @@ func (s *Server) toolSessionSources(
 	fenced, err := s.wrapFenceCDATA(string(jsonBytes), FenceTypeData, FenceUntrusted, "mcp-searxng-relay:session-history")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
+	}
+
+	// Counted here rather than derived from the eviction counter: this is
+	// the number that answers "did an agent write an answer against an
+	// incomplete list", which is the question the cap is tuned against.
+	if payload.Elided > 0 {
+		s.metrics.SourcesElided.Add(1)
 	}
 
 	lg.Info("session sources listed",

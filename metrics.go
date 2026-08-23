@@ -139,6 +139,18 @@ type Metrics struct {
 	// agents verify their URLs before answering.
 	SourcesTotal atomic.Int64 // all calls to searxng_session_sources
 
+	// Whether the per-caller cap (MCP_HISTORY_ENTRIES) is big enough is an
+	// empirical question, and these two are how it gets answered instead of
+	// guessed.  HistoryEvictions counts sources dropped to make room, which
+	// says how far over the cap callers run.  SourcesElided counts the tool
+	// calls that came back short, which is the one that matters: it means an
+	// agent composed an answer against a list that no longer held everything
+	// it had read.  A persistently non-zero SourcesElided is the signal to
+	// raise the cap; evictions alone can be noise from one long-running
+	// caller that never reads its list back.
+	HistoryEvictions atomic.Int64
+	SourcesElided    atomic.Int64
+
 	// ── latency ──────────────────────────────────────────────────────────────
 	// Duration histograms for the two upstream operations an operator
 	// alerts on.  "Upstream is slow" is a more common incident than
@@ -254,6 +266,10 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Session sources
 	writeCounter("mcp_session_sources_total",
 		"Total number of searxng_session_sources tool calls.", &m.SourcesTotal)
+	writeCounter("mcp_session_sources_elided_total",
+		"Total number of searxng_session_sources calls that returned an incomplete list.", &m.SourcesElided)
+	writeCounter("mcp_history_evictions_total",
+		"Total number of sources dropped from a caller's history to make room.", &m.HistoryEvictions)
 
 	// Search
 	writeCounter("mcp_searches_total",

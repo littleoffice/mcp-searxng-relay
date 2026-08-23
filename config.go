@@ -57,6 +57,7 @@ type Config struct {
 	SessionJanitorInterval time.Duration // MCP_SESSION_JANITOR_INTERVAL: how often the janitor wakes
 	CacheTTL               time.Duration
 	CacheMaxEntries        int
+	HistoryEntries         int // MCP_HISTORY_ENTRIES: sources retained per caller
 	MaxBodyBytes           int64
 	MaxPDFBytes            int64
 	MaxOfficeBytes         int64
@@ -165,6 +166,22 @@ func configFromEnv() Config {
 	// memory budgets should lower CACHE_MAX_ENTRIES or this value; raising
 	// it lets pagination reach deeper into very large PDFs.
 	c.MaxExtractedChars = parseInt(os.Getenv("MAX_EXTRACTED_CHARS"), 1_000_000)
+	// HistoryEntries caps how many distinct sources searxng_session_sources
+	// retains per caller.  Slots hold sources, not fetches — repeat fetches
+	// of a URL already held fold into its entry — so this is a count of
+	// things an agent might cite, and 50 covers a research task with room
+	// to spare.
+	//
+	// The binding constraint on raising it is context, not memory.  The list
+	// is read into the model's context on every call, and it is called at
+	// the point in a conversation where context is scarcest; at roughly
+	// 40-80 tokens per entry, 50 sources cost well under a page and 500
+	// would cost several.  Memory is the lesser worry: the worst case is
+	// MCP_HISTORY_ENTRIES × 1,000 callers × a small record.  Raise it for
+	// long-running agents that genuinely visit more sources than the
+	// default, and watch mcp_history_evictions_total to find out whether
+	// they do.
+	c.HistoryEntries = parseInt(os.Getenv("MCP_HISTORY_ENTRIES"), fetchHistoryEntries)
 	c.Stateless = parseBool(os.Getenv("MCP_STATELESS"))
 	// Link extraction — on by default.  Setting EXTRACT_LINKS=false
 	// restores the historical behaviour of dropping hyperlink targets

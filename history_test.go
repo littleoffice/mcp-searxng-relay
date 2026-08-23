@@ -266,6 +266,69 @@ func TestMergeKeepsIndexKeyAndCitableURLInStep(t *testing.T) {
 	}
 }
 
+// ── cap configuration ─────────────────────────────────────────────────────────
+
+func TestHistoryEntriesConfigDefaultsAndRejectsNonsense(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"", fetchHistoryEntries},
+		{"200", 200},
+		{"0", fetchHistoryEntries},
+		{"-5", fetchHistoryEntries},
+		{"plenty", fetchHistoryEntries},
+	} {
+		t.Setenv("MCP_HISTORY_ENTRIES", tc.env)
+		if got := configFromEnv().HistoryEntries; got != tc.want {
+			t.Errorf("MCP_HISTORY_ENTRIES=%q gave %d, want %d", tc.env, got, tc.want)
+		}
+	}
+}
+
+func TestHistoryHonoursConfiguredCap(t *testing.T) {
+	s := &Server{history: newFetchHistoryCache()}
+	s.config.HistoryEntries = 3
+	ctx := sourcesTestCtx("alice")
+
+	for i := 1; i <= 5; i++ {
+		s.recordFetch(ctx, fetchRecord{
+			URL: fmt.Sprintf("https://example.com/%d", i), Outcome: "ok", Read: readDepthFull,
+		})
+	}
+
+	got, total, evicted := s.historyFor(ctx).list()
+	if len(got) != 3 {
+		t.Fatalf("retained = %d, want 3 — the configured cap is not reaching the table", len(got))
+	}
+	if total != 5 || evicted != 2 {
+		t.Errorf("total/evicted = %d/%d, want 5/2", total, evicted)
+	}
+	if got[0].URL != "https://example.com/5" {
+		t.Errorf("newest = %q, want .../5", got[0].URL)
+	}
+	if n := s.metrics.HistoryEvictions.Load(); n != 2 {
+		t.Errorf("mcp_history_evictions_total = %d, want 2", n)
+	}
+}
+
+// A history built without a cap must be usable and sized to the default, not
+// a zero-length table that silently drops everything written to it.
+func TestHistoryZeroCapSizesToDefault(t *testing.T) {
+	h := newFetchHistory(0)
+	for i := 0; i <= fetchHistoryEntries; i++ {
+		h.appendRecord(fetchRecord{URL: fmt.Sprintf("https://example.com/%d", i)})
+	}
+
+	got, _, evicted := h.list()
+	if len(got) != fetchHistoryEntries {
+		t.Fatalf("retained = %d, want the default %d", len(got), fetchHistoryEntries)
+	}
+	if evicted != 1 {
+		t.Errorf("evicted = %d, want 1", evicted)
+	}
+}
+
 // ── caller keying ─────────────────────────────────────────────────────────────
 
 func TestHistoryKeySeparatesCallersSharingASessionID(t *testing.T) {
@@ -495,6 +558,48 @@ func TestSessionSourcesSinceSeqSurfacesARefetchedSource(t *testing.T) {
 	}
 	if p.Sources[0].Read != string(readDepthFull) {
 		t.Errorf("read = %q, want full", p.Sources[0].Read)
+	}
+}
+
+// The counter that answers "is the cap big enough?".  A list that came back
+// short means an agent composed its answer against a record that no longer
+// held everything it had read — which is the condition worth alerting on, and
+// which nothing in the response itself makes visible to an operator.
+func TestSessionSourcesElidedMetricCountsShortLists(t *testing.T) {
+	s := newSourcesTestServer(t)
+	s.config.HistoryEntries = 2
+	ctx := sourcesTestCtx("alice")
+
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/1", Outcome: "ok", Read: readDepthFull})
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/2", Outcome: "ok", Read: readDepthFull})
+
+	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	if p := decodeSourcesPayload(t, textOf(t, res)); p.Elided != 0 {
+		t.Errorf("elided = %d, want 0 — the list is still complete", p.Elided)
+	}
+	if n := s.metrics.SourcesElided.Load(); n != 0 {
+		t.Errorf("mcp_session_sources_elided_total = %d, want 0", n)
+	}
+
+	// One source past the cap: the list is now short, and stays short.
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/3", Outcome: "ok", Read: readDepthFull})
+
+	res, _, err = s.toolSessionSources(ctx, nil, sessionSourcesInput{})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	p := decodeSourcesPayload(t, textOf(t, res))
+	if p.Elided != 1 {
+		t.Errorf("elided = %d, want 1", p.Elided)
+	}
+	if p.Total != 3 || len(p.Sources) != 2 {
+		t.Errorf("total_fetches/sources = %d/%d, want 3/2", p.Total, len(p.Sources))
+	}
+	if n := s.metrics.SourcesElided.Load(); n != 1 {
+		t.Errorf("mcp_session_sources_elided_total = %d, want 1", n)
 	}
 }
 
