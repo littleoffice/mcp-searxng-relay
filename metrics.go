@@ -151,6 +151,16 @@ type Metrics struct {
 	HistoryEvictions atomic.Int64
 	SourcesElided    atomic.Int64
 
+	// HistoryCallersEvicted counts whole callers pushed out of the history
+	// cache, a different event from HistoryEvictions above: that one drops a
+	// source from a caller's table, this one drops the table.  It is what
+	// makes key-cardinality abuse visible — in stateless mode the
+	// conversation half of the history key is client-asserted, so a caller
+	// rotating it mints unlimited keys and evicts everyone else's ledger.
+	// Steady growth against a stable caller count means someone is doing
+	// exactly that.
+	HistoryCallersEvicted atomic.Int64
+
 	// ── latency ──────────────────────────────────────────────────────────────
 	// Duration histograms for the two upstream operations an operator
 	// alerts on.  "Upstream is slow" is a more common incident than
@@ -270,6 +280,8 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		"Total number of searxng_session_sources calls that returned an incomplete list.", &m.SourcesElided)
 	writeCounter("mcp_history_evictions_total",
 		"Total number of sources dropped from a caller's history to make room.", &m.HistoryEvictions)
+	writeCounter("mcp_history_callers_evicted_total",
+		"Total number of callers whose entire fetch history was dropped from the cache.", &m.HistoryCallersEvicted)
 
 	// Search
 	writeCounter("mcp_searches_total",

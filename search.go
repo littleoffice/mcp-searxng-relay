@@ -136,7 +136,7 @@ func (s *Server) toolSearch(
 ) (*mcp.CallToolResult, any, error) {
 	// Bind the session ID into the context once, so the search pipeline
 	// below inherits full caller attribution without taking the request.
-	ctx = withSessionID(ctx, sessionIDOf(req))
+	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
 	lg := callerLogger(ctx)
 
 	if in.Query == "" {

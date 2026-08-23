@@ -14,6 +14,18 @@ import (
 // the SDK's internal session map from growing without bound.
 const maxSessions = 1000
 
+// sessionIDHeader is the MCP Streamable HTTP session header.  The SDK owns
+// this header on the wire; we read it in three places that are all our own
+// concerns (the initialize heuristic in limitSessions, debug request logs, and
+// the stateless correlation ID below) and never write it.
+const sessionIDHeader = "Mcp-Session-Id"
+
+// maxClientSessionIDLen bounds the client-asserted conversation ID we are
+// willing to carry.  The SDK's own IDs are 26-character crypto-random strings;
+// 128 leaves generous room for a client with a different scheme while keeping
+// the value short enough that it cannot bloat every log line it appears in.
+const maxClientSessionIDLen = 128
+
 // ── identity context plumbing ─────────────────────────────────────────────────
 //
 // After requireAuth matches a request to a configured token, it stuffs the
@@ -42,6 +54,82 @@ func identityFromContext(ctx context.Context) string {
 		return v
 	}
 	return ""
+}
+
+// ── stateless conversation correlation ──────────────────────────────────────
+//
+// Under MCP_STATELESS the SDK no longer reads Mcp-Session-Id at all: as of
+// go-sdk v1.7.0 a stateless server "does not read or set" the header, so
+// req.Session.ID() is empty for every request.  Before v1.7.0 the SDK echoed
+// the client's value back through the session, and this relay used it for two
+// things — the session_id field in audit logs, and the second half of the
+// per-caller key in history.go.
+//
+// Losing it is not a security problem: identity is the server-validated half
+// and is what keeps tenants apart.  It is a correctness problem for the source
+// ledger.  Two conversations sharing one token now land in one drawer, evicting
+// each other's sources and reading each other's URLs back — precisely the
+// "the model cannot tell which entries belong to the exchange it is currently
+// in" failure that history.go's Lifetime note warns about.
+//
+// So the relay reads the header itself, in stateless mode only.  What this
+// value is has not changed: a client-asserted string, useful for correlation
+// and worthless as an assertion of who the caller is.  What changed is who
+// reads it — it is now this relay's deliberate choice rather than an SDK
+// implementation detail we inherited, which is the honest way to carry a
+// property the MCP spec is moving away from (SEP-2567).  If clients stop
+// sending the header, this degrades back to an empty session ID rather than
+// breaking.
+//
+// It is deliberately NOT consulted in stateful mode.  There the SDK issues a
+// real, validated ID, and the "true sessionless" configuration documented in
+// the README (ServerOptions.GetSessionID returning "") is an operator asking
+// for no session IDs in their logs at all — a fallback that reinstated
+// client-supplied ones would quietly overturn that request.
+
+// clientSessionCtxKey carries the client-asserted conversation ID read off the
+// request in stateless mode.  Distinct from sessionCtxKey, which carries
+// whatever the tool handler resolved (SDK-issued, or this, or neither).
+type clientSessionCtxKey struct{}
+
+// withClientSessionID returns a child context carrying a validated
+// client-asserted conversation ID.
+func withClientSessionID(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, clientSessionCtxKey{}, id)
+}
+
+// clientSessionIDFromContext returns the validated client-asserted
+// conversation ID, or "" when the request carried none (every stateful
+// request, stdio, and any stateless request whose header failed validation).
+func clientSessionIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(clientSessionCtxKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// sanitizeClientSessionID returns id when it is safe to carry, and "" when it
+// is not.
+//
+// The value reaches two places that make its shape matter: a cache key in
+// history.go, and a log field.  Rejection is total rather than by truncation —
+// truncating would map two distinct conversations onto one key, which is the
+// exact confusion this ID exists to prevent, and would do it silently.
+//
+// The accepted set is printable ASCII with no spaces: broad enough for any
+// sane session-ID scheme (the SDK's own is base32), narrow enough that a value
+// cannot carry control characters, newlines, or non-UTF-8 bytes into a log
+// line or a metrics label.
+func sanitizeClientSessionID(id string) string {
+	if id == "" || len(id) > maxClientSessionIDLen {
+		return ""
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '!' || id[i] > '~' {
+			return ""
+		}
+	}
+	return id
 }
 
 // sessionCtxKey carries the MCP session ID the same way identityCtxKey
@@ -234,7 +322,7 @@ func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
 // it — but it bounds runaway growth, which is what we want.
 func (s *Server) limitSessions(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost && r.Header.Get("Mcp-Session-Id") == "" {
+		if r.Method == http.MethodPost && r.Header.Get(sessionIDHeader) == "" {
 			if n := s.sessionCount(); n >= maxSessions {
 				slog.Warn("session cap reached, rejecting initialize",
 					"active", n, "cap", maxSessions)
@@ -246,13 +334,33 @@ func (s *Server) limitSessions(next http.Handler) http.Handler {
 	})
 }
 
+// trackClientSession attaches the client-asserted conversation ID to the
+// request context in stateless mode, so tool handlers can fall back to it when
+// the SDK gives them no session ID of its own.
+//
+// A separate middleware rather than a few lines inside requireAuth: this is
+// correlation plumbing, not authentication, and requireAuth's identity attach
+// is deliberately conditional on a configured token table — a caller running
+// without tokens still has conversations worth keeping apart.
+func (s *Server) trackClientSession(next http.Handler) http.Handler {
+	if !s.config.Stateless {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if id := sanitizeClientSessionID(r.Header.Get(sessionIDHeader)); id != "" {
+			r = r.WithContext(withClientSessionID(r.Context(), id))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // logRequests logs each incoming HTTP request at debug level.
 func (s *Server) logRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("http request",
 			"method", r.Method,
 			"path", r.URL.Path,
-			"session_id", r.Header.Get("Mcp-Session-Id"))
+			"session_id", r.Header.Get(sessionIDHeader))
 		next.ServeHTTP(w, r)
 	})
 }
