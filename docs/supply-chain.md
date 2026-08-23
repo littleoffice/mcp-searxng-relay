@@ -63,12 +63,13 @@ documentation bug worth reporting.
 
 | Module | Purpose |
 |---|---|
-| `github.com/modelcontextprotocol/go-sdk` | The official Model Context Protocol SDK. Owns the JSON-RPC framing, the stdio and Streamable HTTP transports, session handling, and tool registration. This is the largest single dependency by surface area and the one most worth a reviewer's attention. Pinned at v1.6.1. The fixes for CVE-2026-27896 (case-sensitivity), GHSA-q382-vc8q-7jhj (null-byte JSON key collision), and CVE-2026-33252 (cross-site tool execution) landed by v1.4.1 and are carried forward in the current pin. |
+| `github.com/modelcontextprotocol/go-sdk` | The official Model Context Protocol SDK. Owns the JSON-RPC framing, the stdio and Streamable HTTP transports, session handling, and tool registration. This is the largest single dependency by surface area and the one most worth a reviewer's attention. Pinned at v1.7.0. The fixes for CVE-2026-27896 (case-sensitivity), GHSA-q382-vc8q-7jhj (null-byte JSON key collision), and CVE-2026-33252 (cross-site tool execution) landed by v1.4.1 and are carried forward in the current pin. |
 | `github.com/markusmobius/go-trafilatura` | HTML-to-Markdown extraction: identifies the main article subtree, strips boilerplate (navigation, sidebars, footers, cookie banners), and pulls structured metadata from `<meta>`, OpenGraph, and JSON-LD. Pinned at v1.12.2. See [The trafilatura trade-off](#the-trafilatura-trade-off) below — this dependency brings most of the transitive tree. |
 | `github.com/hashicorp/golang-lru/v2` | The bounded in-memory LRU cache used for fetched URL content and for the rate-limiter's per-caller token buckets. Small, single-purpose, widely used. Pinned at v2.0.7. |
-| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is one of the two dependencies with a non-standard installation path. Pinned at v0.3.61. |
-| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.2. |
-| `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.55.0. |
+| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is one of the two dependencies with a non-standard installation path. Pinned at v0.3.77. |
+| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.8. |
+| `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.4. |
+| `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.58.0. |
 
 ### Transitive dependencies
 
@@ -80,7 +81,7 @@ worth knowing about are:
   `go-shiori/dom`, `go-shiori/go-readability`,
   `markusmobius/go-domdistiller`, `markusmobius/go-htmldate`,
   `markusmobius/go-dateparser`, `araddon/dateparse`,
-  `andybalholm/cascadia`, `gogs/chardet`,
+  `gogs/chardet`,
   `RadhiFadlillah/whatlanggo`, `forPelevin/gomoji`, `yosssi/gohtml`,
   `rivo/uniseg`. Together these implement trafilatura's fallback
   extractors and metadata parsing.
@@ -182,10 +183,13 @@ The `Dockerfile` produces the runtime artifact, and its build is structured so
 that the result is auditable and reproducible:
 
 - **Pinned build toolchain by digest.** The builder stage pins
-  `golang:1.26.3-trixie` by content digest (`sha256:…`), not by tag. Tags are
+  `golang:1.26.6-trixie` by content digest (`sha256:…`), not by tag. Tags are
   mutable; digests are immutable. The pin is bumped deliberately as new patch
-  releases land, with the reason recorded in the `Dockerfile` comment.
-  1.26.3 (2026-05-07) fixes CVE-2026-33814.
+  releases land, with the reason recorded in the `Dockerfile` comment — and it
+  is checked against the `go` directive in `go.mod` by the pin-consistency
+  workflow, so CI cannot test one stdlib while the container ships another.
+  1.26.3 (2026-05-07) fixed CVE-2026-33814; the current pin carries that fix
+  and the patch releases since.
 - **Pinned `ca-certificates`.** The CA bundle copied into the final image
   comes from a specific `apt`-package version, so the set of trust anchors is
   itself a pinned input rather than a moving target.
