@@ -139,6 +139,28 @@ type Metrics struct {
 	// agents verify their URLs before answering.
 	SourcesTotal atomic.Int64 // all calls to searxng_session_sources
 
+	// Whether the per-caller cap (MCP_HISTORY_ENTRIES) is big enough is an
+	// empirical question, and these two are how it gets answered instead of
+	// guessed.  HistoryEvictions counts sources dropped to make room, which
+	// says how far over the cap callers run.  SourcesElided counts the tool
+	// calls that came back short, which is the one that matters: it means an
+	// agent composed an answer against a list that no longer held everything
+	// it had read.  A persistently non-zero SourcesElided is the signal to
+	// raise the cap; evictions alone can be noise from one long-running
+	// caller that never reads its list back.
+	HistoryEvictions atomic.Int64
+	SourcesElided    atomic.Int64
+
+	// HistoryCallersEvicted counts whole callers pushed out of the history
+	// cache, a different event from HistoryEvictions above: that one drops a
+	// source from a caller's table, this one drops the table.  It is what
+	// makes key-cardinality abuse visible — in stateless mode the
+	// conversation half of the history key is client-asserted, so a caller
+	// rotating it mints unlimited keys and evicts everyone else's ledger.
+	// Steady growth against a stable caller count means someone is doing
+	// exactly that.
+	HistoryCallersEvicted atomic.Int64
+
 	// ── latency ──────────────────────────────────────────────────────────────
 	// Duration histograms for the two upstream operations an operator
 	// alerts on.  "Upstream is slow" is a more common incident than
@@ -254,6 +276,12 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Session sources
 	writeCounter("mcp_session_sources_total",
 		"Total number of searxng_session_sources tool calls.", &m.SourcesTotal)
+	writeCounter("mcp_session_sources_elided_total",
+		"Total number of searxng_session_sources calls that returned an incomplete list.", &m.SourcesElided)
+	writeCounter("mcp_history_evictions_total",
+		"Total number of sources dropped from a caller's history to make room.", &m.HistoryEvictions)
+	writeCounter("mcp_history_callers_evicted_total",
+		"Total number of callers whose entire fetch history was dropped from the cache.", &m.HistoryCallersEvicted)
 
 	// Search
 	writeCounter("mcp_searches_total",

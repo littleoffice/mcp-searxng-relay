@@ -64,7 +64,7 @@ func (s *Server) toolReadURL(
 	// pipeline below inherits full caller attribution without taking the
 	// request.  Both URL tools do this; readURL itself never sees a
 	// CallToolRequest.
-	ctx = withSessionID(ctx, sessionIDOf(req))
+	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
 	lg := callerLogger(ctx)
 
 	if in.URL == "" {
@@ -268,7 +268,7 @@ func (s *Server) toolURLMetadata(
 	req *mcp.CallToolRequest,
 	in urlMetadataInput,
 ) (*mcp.CallToolResult, any, error) {
-	ctx = withSessionID(ctx, sessionIDOf(req))
+	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
 	lg := callerLogger(ctx)
 
 	if in.URL == "" {

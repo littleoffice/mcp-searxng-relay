@@ -6,8 +6,11 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -266,12 +269,77 @@ func TestMergeKeepsIndexKeyAndCitableURLInStep(t *testing.T) {
 	}
 }
 
+// ── cap configuration ─────────────────────────────────────────────────────────
+
+func TestHistoryEntriesConfigDefaultsAndRejectsNonsense(t *testing.T) {
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{
+		{"", fetchHistoryEntries},
+		{"200", 200},
+		{"0", fetchHistoryEntries},
+		{"-5", fetchHistoryEntries},
+		{"plenty", fetchHistoryEntries},
+	} {
+		t.Setenv("MCP_HISTORY_ENTRIES", tc.env)
+		if got := configFromEnv().HistoryEntries; got != tc.want {
+			t.Errorf("MCP_HISTORY_ENTRIES=%q gave %d, want %d", tc.env, got, tc.want)
+		}
+	}
+}
+
+func TestHistoryHonoursConfiguredCap(t *testing.T) {
+	s := &Server{history: newFetchHistoryCache(nil)}
+	s.config.HistoryEntries = 3
+	ctx := sourcesTestCtx("alice")
+
+	for i := 1; i <= 5; i++ {
+		s.recordFetch(ctx, fetchRecord{
+			URL: fmt.Sprintf("https://example.com/%d", i), Outcome: "ok", Read: readDepthFull,
+		})
+	}
+
+	got, total, evicted := s.historyFor(ctx).list()
+	if len(got) != 3 {
+		t.Fatalf("retained = %d, want 3 — the configured cap is not reaching the table", len(got))
+	}
+	if total != 5 || evicted != 2 {
+		t.Errorf("total/evicted = %d/%d, want 5/2", total, evicted)
+	}
+	if got[0].URL != "https://example.com/5" {
+		t.Errorf("newest = %q, want .../5", got[0].URL)
+	}
+	if n := s.metrics.HistoryEvictions.Load(); n != 2 {
+		t.Errorf("mcp_history_evictions_total = %d, want 2", n)
+	}
+}
+
+// A history built without a cap must be usable and sized to the default, not
+// a zero-length table that silently drops everything written to it.
+func TestHistoryZeroCapSizesToDefault(t *testing.T) {
+	h := newFetchHistory(0)
+	for i := 0; i <= fetchHistoryEntries; i++ {
+		h.appendRecord(fetchRecord{URL: fmt.Sprintf("https://example.com/%d", i)})
+	}
+
+	got, _, evicted := h.list()
+	if len(got) != fetchHistoryEntries {
+		t.Fatalf("retained = %d, want the default %d", len(got), fetchHistoryEntries)
+	}
+	if evicted != 1 {
+		t.Errorf("evicted = %d, want 1", evicted)
+	}
+}
+
 // ── caller keying ─────────────────────────────────────────────────────────────
 
 func TestHistoryKeySeparatesCallersSharingASessionID(t *testing.T) {
-	// The case this guards: MCP_STATELESS, or the documented configuration
-	// where GetSessionID returns "".  Keying on session alone would collapse
-	// every caller onto one history and hand one tenant another's URLs.
+	// The case this guards: a stateless caller that sends no Mcp-Session-Id
+	// header (since go-sdk v1.7.0 the SDK reads none of its own), or the
+	// documented configuration where GetSessionID returns "".  Keying on
+	// session alone would collapse every caller onto one history and hand one
+	// tenant another's URLs.
 	a := withSessionID(withIdentity(context.Background(), "alice"), "")
 	b := withSessionID(withIdentity(context.Background(), "bob"), "")
 
@@ -294,7 +362,7 @@ func TestHistoryKeyIsInjectiveOverDelimiter(t *testing.T) {
 }
 
 func TestHistoryIsolatedPerCaller(t *testing.T) {
-	s := &Server{history: newFetchHistoryCache()}
+	s := &Server{history: newFetchHistoryCache(nil)}
 
 	alice := withSessionID(withIdentity(context.Background(), "alice"), "S1")
 	bob := withSessionID(withIdentity(context.Background(), "bob"), "S1")
@@ -318,6 +386,169 @@ func TestRecordFetchNoOpWithoutHistoryCache(t *testing.T) {
 	}
 }
 
+// ── stateless conversation correlation ────────────────────────────────────────
+
+// The regression this exists to catch: go-sdk v1.7.0 stopped reading
+// Mcp-Session-Id in stateless mode, so req.Session.ID() is empty for every
+// request and the conversation half of the history key vanished.  Two agents
+// sharing one token would then share one ledger — evicting each other's
+// sources and reading each other's URLs back.
+func TestStatelessConversationsKeepSeparateHistories(t *testing.T) {
+	s := &Server{history: newFetchHistoryCache(nil)}
+	s.config.Stateless = true
+
+	// What the middleware produces: identity from the token, conversation ID
+	// from the validated header, no SDK-issued session ID at all.
+	convA := withClientSessionID(withIdentity(context.Background(), "alice"), "CONV-A")
+	convB := withClientSessionID(withIdentity(context.Background(), "alice"), "CONV-B")
+
+	// sessionIDOf is what the tool handlers call; a nil request stands in for
+	// the stateless case where the SDK has no session ID to offer.
+	ctxA := withSessionID(convA, sessionIDOf(convA, nil))
+	ctxB := withSessionID(convB, sessionIDOf(convB, nil))
+
+	s.recordFetch(ctxA, fetchRecord{URL: "https://example.com/a", Outcome: "ok", Read: readDepthFull})
+	s.recordFetch(ctxB, fetchRecord{URL: "https://example.com/b", Outcome: "ok", Read: readDepthFull})
+
+	gotA, _, _ := s.historyFor(ctxA).list()
+	gotB, _, _ := s.historyFor(ctxB).list()
+	if len(gotA) != 1 || gotA[0].URL != "https://example.com/a" {
+		t.Errorf("conversation A sees %+v, want only its own fetch", gotA)
+	}
+	if len(gotB) != 1 || gotB[0].URL != "https://example.com/b" {
+		t.Errorf("conversation B sees %+v, want only its own fetch", gotB)
+	}
+}
+
+// The same header value is the same conversation: a client that keeps sending
+// its ID must keep its ledger across calls.
+func TestStatelessSameConversationSharesOneHistory(t *testing.T) {
+	s := &Server{history: newFetchHistoryCache(nil)}
+	s.config.Stateless = true
+
+	ctx := withClientSessionID(withIdentity(context.Background(), "alice"), "CONV-A")
+	ctx = withSessionID(ctx, sessionIDOf(ctx, nil))
+
+	s.recordFetch(ctx, fetchRecord{URL: "https://example.com/1", Outcome: "ok", Read: readDepthFull})
+	s.recordFetch(ctx, fetchRecord{URL: "https://example.com/2", Outcome: "ok", Read: readDepthFull})
+
+	if got, _, _ := s.historyFor(ctx).list(); len(got) != 2 {
+		t.Errorf("retained %d sources across two calls in one conversation, want 2", len(got))
+	}
+}
+
+// An SDK-issued session ID always wins.  The fallback exists for the case
+// where there is none; letting it override a real one would mean a client
+// could pick which ledger it reads by setting a header.
+func TestSDKSessionIDBeatsTheClientAssertedOne(t *testing.T) {
+	ctx := withClientSessionID(context.Background(), "CLIENT-CLAIMED")
+	if got := sessionIDOf(ctx, nil); got != "CLIENT-CLAIMED" {
+		t.Fatalf("with no SDK session the fallback should apply, got %q", got)
+	}
+	// A stateful request carries a real session; the middleware never
+	// attaches a client-asserted ID in that mode, so the context is bare and
+	// the fallback yields nothing to override with.
+	if got := sessionIDOf(context.Background(), nil); got != "" {
+		t.Errorf("bare context gave %q, want empty", got)
+	}
+}
+
+// The documented "true sessionless" configuration — stateful mode with
+// GetSessionID returning "" — is an operator asking for no session IDs in
+// their logs.  The middleware must not hand them back client-supplied ones.
+func TestStatefulModeNeverAttachesClientSessionID(t *testing.T) {
+	s := &Server{}
+	s.config.Stateless = false
+
+	var seen string
+	next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = clientSessionIDFromContext(r.Context())
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Header.Set(sessionIDHeader, "CLIENT-CLAIMED")
+	s.trackClientSession(next).ServeHTTP(httptest.NewRecorder(), req)
+
+	if seen != "" {
+		t.Errorf("stateful mode carried a client-asserted session ID %q", seen)
+	}
+}
+
+func TestTrackClientSessionValidatesTheHeader(t *testing.T) {
+	s := &Server{}
+	s.config.Stateless = true
+
+	for _, tc := range []struct {
+		name, header, want string
+	}{
+		{"sdk-shaped", "O3GD67SQIYXDYN57XCVQMZYKDI", "O3GD67SQIYXDYN57XCVQMZYKDI"},
+		{"absent", "", ""},
+		{"newline", "abc\ndef", ""},
+		{"tab", "abc\tdef", ""},
+		{"space", "abc def", ""},
+		{"non-ascii", "abc\u00e9", ""},
+		// Rejected outright rather than truncated: truncation would map two
+		// distinct conversations onto one key, silently.
+		{"over-long", strings.Repeat("a", maxClientSessionIDLen+1), ""},
+		{"at-limit", strings.Repeat("a", maxClientSessionIDLen), strings.Repeat("a", maxClientSessionIDLen)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var seen string
+			next := http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+				seen = clientSessionIDFromContext(r.Context())
+			})
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			if tc.header != "" {
+				req.Header.Set(sessionIDHeader, tc.header)
+			}
+			s.trackClientSession(next).ServeHTTP(httptest.NewRecorder(), req)
+			if seen != tc.want {
+				t.Errorf("header %q carried %q, want %q", tc.header, seen, tc.want)
+			}
+		})
+	}
+}
+
+// A caller rotating its conversation ID mints unlimited cache keys and pushes
+// other callers out.  That is a restoration of the pre-v1.7.0 exposure rather
+// than a new one, and it degrades a convenience rather than leaking anything —
+// but it has to be visible, because from inside a response an evicted caller
+// is indistinguishable from one that never fetched.
+func TestHistoryCacheCountsEvictedCallers(t *testing.T) {
+	var evicted atomic.Int64
+	s := &Server{history: newFetchHistoryCache(func() { evicted.Add(1) })}
+	s.config.Stateless = true
+
+	for i := 0; i < fetchHistoryCallers+5; i++ {
+		ctx := withClientSessionID(withIdentity(context.Background(), "alice"), fmt.Sprintf("CONV-%d", i))
+		ctx = withSessionID(ctx, sessionIDOf(ctx, nil))
+		s.recordFetch(ctx, fetchRecord{URL: "https://example.com/x", Outcome: "ok", Read: readDepthFull})
+	}
+
+	if got := evicted.Load(); got != 5 {
+		t.Errorf("evicted callers = %d, want 5", got)
+	}
+}
+
+// Tables grow into their cap rather than being allocated at full size: with a
+// client-asserted key there can be up to fetchHistoryCallers of them, and
+// eager allocation would make idle callers cost the full MCP_HISTORY_ENTRIES.
+func TestHistoryTableGrowsLazily(t *testing.T) {
+	h := newFetchHistory(5000)
+	h.appendRecord(fetchRecord{URL: "https://example.com/1"})
+	h.appendRecord(fetchRecord{URL: "https://example.com/2"})
+
+	h.mu.Lock()
+	held := len(h.entries)
+	h.mu.Unlock()
+	if held != 2 {
+		t.Errorf("table holds %d records after 2 fetches, want 2 — allocation is not lazy", held)
+	}
+	if got, _, _ := h.list(); len(got) != 2 {
+		t.Errorf("list returned %d, want 2", len(got))
+	}
+}
+
 // ── tool output ───────────────────────────────────────────────────────────────
 
 // newSourcesTestServer builds a Server with both halves the sources tool
@@ -330,7 +561,7 @@ func TestRecordFetchNoOpWithoutHistoryCache(t *testing.T) {
 func newSourcesTestServer(t *testing.T) *Server {
 	t.Helper()
 	s := newTestFenceServer(t)
-	s.history = newFetchHistoryCache()
+	s.history = newFetchHistoryCache(nil)
 	return s
 }
 
@@ -495,6 +726,48 @@ func TestSessionSourcesSinceSeqSurfacesARefetchedSource(t *testing.T) {
 	}
 	if p.Sources[0].Read != string(readDepthFull) {
 		t.Errorf("read = %q, want full", p.Sources[0].Read)
+	}
+}
+
+// The counter that answers "is the cap big enough?".  A list that came back
+// short means an agent composed its answer against a record that no longer
+// held everything it had read — which is the condition worth alerting on, and
+// which nothing in the response itself makes visible to an operator.
+func TestSessionSourcesElidedMetricCountsShortLists(t *testing.T) {
+	s := newSourcesTestServer(t)
+	s.config.HistoryEntries = 2
+	ctx := sourcesTestCtx("alice")
+
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/1", Outcome: "ok", Read: readDepthFull})
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/2", Outcome: "ok", Read: readDepthFull})
+
+	res, _, err := s.toolSessionSources(ctx, nil, sessionSourcesInput{})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	if p := decodeSourcesPayload(t, textOf(t, res)); p.Elided != 0 {
+		t.Errorf("elided = %d, want 0 — the list is still complete", p.Elided)
+	}
+	if n := s.metrics.SourcesElided.Load(); n != 0 {
+		t.Errorf("mcp_session_sources_elided_total = %d, want 0", n)
+	}
+
+	// One source past the cap: the list is now short, and stays short.
+	s.recordFetch(ctx, fetchRecord{Tool: "searxng_read_url", URL: "https://example.com/3", Outcome: "ok", Read: readDepthFull})
+
+	res, _, err = s.toolSessionSources(ctx, nil, sessionSourcesInput{})
+	if err != nil {
+		t.Fatalf("tool returned error: %v", err)
+	}
+	p := decodeSourcesPayload(t, textOf(t, res))
+	if p.Elided != 1 {
+		t.Errorf("elided = %d, want 1", p.Elided)
+	}
+	if p.Total != 3 || len(p.Sources) != 2 {
+		t.Errorf("total_fetches/sources = %d/%d, want 3/2", p.Total, len(p.Sources))
+	}
+	if n := s.metrics.SourcesElided.Load(); n != 1 {
+		t.Errorf("mcp_session_sources_elided_total = %d, want 1", n)
 	}
 }
 

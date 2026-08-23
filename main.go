@@ -315,7 +315,8 @@ func runHTTP(cfg Config, server *Server, port string) {
 	)
 
 	mux := http.NewServeMux()
-	// MCP root: per-caller rate limit → bearer auth → soft session cap → SDK handler.
+	// MCP root: per-caller rate limit → bearer auth → conversation ID → soft
+	// session cap → SDK handler.
 	//
 	// Rate limit sits on the OUTSIDE so unauthenticated brute-force traffic
 	// from a single IP gets throttled at the network edge instead of
@@ -327,7 +328,12 @@ func runHTTP(cfg Config, server *Server, port string) {
 	// Cost of this ordering: authed requests hash the Authorization header
 	// twice (once in callerKey, once in requireAuth).  Two SHA-256s of a
 	// ~70-byte input — negligible compared to anything else on this path.
-	mux.Handle("/", server.rateLimit(server.requireAuth(server.limitSessions(mcpHandler))))
+	//
+	// trackClientSession sits after auth and is a no-op outside stateless
+	// mode: it attaches the client-asserted conversation ID that the SDK
+	// stopped reading in go-sdk v1.7.0, so audit lines and the per-caller
+	// source ledger can still tell two conversations under one token apart.
+	mux.Handle("/", server.rateLimit(server.requireAuth(server.trackClientSession(server.limitSessions(mcpHandler)))))
 	// /health is open by default for load balancers, and intentionally NOT
 	// rate-limited so a polling LB never gets 429. requireHealthAuth gates it
 	// behind MCP_HEALTH_TOKEN when that is set (a no-op wrapper otherwise);
@@ -444,6 +450,7 @@ func logConfig(server *Server, mode, port string) {
 		row("office limit", fmt.Sprintf("%d bytes", cfg.MaxOfficeBytes)),
 		row("image limit", fmt.Sprintf("%d bytes", cfg.MaxImageBytes)),
 		row("extract limit", fmt.Sprintf("%d chars", cfg.MaxExtractedChars)),
+		row("source history", fmt.Sprintf("%d per caller", cfg.HistoryEntries)),
 		row("log level", cfg.LogLevel),
 		row("log format", cfg.LogFormat),
 		// Session mode determines whether the SDK validates Mcp-Session-Id

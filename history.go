@@ -46,7 +46,8 @@ import (
 // and belongs to session affinity at the ingress, not to a datastore here.
 
 const (
-	// fetchHistoryEntries is how many distinct sources one caller retains.
+	// fetchHistoryEntries is the default number of distinct sources one
+	// caller retains, overridable per deployment with MCP_HISTORY_ENTRIES.
 	// Repeat fetches of a URL already held — a metadata triage followed by
 	// a read, a paginated document, a re-read — fold into the entry that is
 	// there and cost no slot, so this is a count of sources and not of tool
@@ -55,13 +56,18 @@ const (
 	// a single research task produces and still costs well under a page of
 	// context.  Sources dropped to make room are reported as a count rather
 	// than vanishing silently.
+	//
+	// Raise it for agents whose tasks legitimately visit more sources than
+	// that; the ceiling on doing so is the context the list occupies on
+	// every call, not memory — see MCP_HISTORY_ENTRIES in config.go.
 	fetchHistoryEntries = 50
 
 	// fetchHistoryCallers bounds how many distinct callers we retain
 	// histories for.  Matched to maxSessions so the history cache cannot
 	// outgrow the session cap that already bounds this process.  Worst
-	// case is ~1000 × 50 small records, which is negligible next to the
-	// content cache (CACHE_MAX_ENTRIES × MAX_EXTRACTED_CHARS).
+	// case is ~1000 × MCP_HISTORY_ENTRIES small records, which at the
+	// default is negligible next to the content cache (CACHE_MAX_ENTRIES ×
+	// MAX_EXTRACTED_CHARS).
 	fetchHistoryCallers = maxSessions
 )
 
@@ -118,17 +124,42 @@ type fetchRecord struct {
 // It is maintained in step with entries on every write, and an entry's citable
 // URL must never change without its index key changing with it.
 //
+// entries grows one slot at a time up to cap, rather than being allocated at
+// full size on creation.  The difference matters because how many of these
+// exist is not entirely up to us: in stateless mode the conversation half of
+// the cache key is client-asserted, so a caller rotating it can create up to
+// fetchHistoryCallers tables.  Eager allocation would make that cost
+// MCP_HISTORY_ENTRIES × 1,000 records of resident memory regardless of how
+// little was ever recorded in them — fine at the default 50, roughly 880 MB if
+// an operator raised the cap to 5,000.  Growing on demand makes the cost track
+// what callers actually fetched.
+//
+// The zero value of this struct is usable and takes the default cap on first
+// write, which keeps a directly-constructed fetchHistory (tests, and any
+// future caller with no config to hand) from being a zero-cap table that drops
+// everything written to it.
+//
 // The mutex is not redundant with the LRU's own locking.  The cache returns a
 // *fetchHistory, and two concurrent requests from the same caller then write
 // through the same pointer; the cache's lock protects its map, not the value
 // behind the pointer.
 type fetchHistory struct {
 	mu      sync.Mutex
-	entries [fetchHistoryEntries]fetchRecord
+	entries []fetchRecord  // grows to cap; len(entries) is what is in use
+	cap     int            // sources retained before eviction starts
 	index   map[string]int // citable URL -> slot in entries
-	count   int            // slots in use
 	total   int            // fetches ever appended; source of Seq
 	evicted int            // distinct sources dropped to make room
+}
+
+// newFetchHistory returns a history retaining n sources, falling back to the
+// default for a non-positive n so a misconfigured cap cannot produce a table
+// that drops everything written to it.
+func newFetchHistory(n int) *fetchHistory {
+	if n <= 0 {
+		n = fetchHistoryEntries
+	}
+	return &fetchHistory{cap: n}
 }
 
 // citableURL is the URL an entry is filed and cited under: where the fetch
@@ -206,8 +237,13 @@ func mergeRecord(held, cur fetchRecord) fetchRecord {
 }
 
 // appendRecord files r, assigning it the next sequence number, and returns the
-// assigned Seq.  A fetch of a URL already held updates that entry in place;
-// the Seq is still consumed, so total keeps counting fetches.
+// assigned Seq along with whether filing it dropped another source to make
+// room.  A fetch of a URL already held updates that entry in place; the Seq is
+// still consumed, so total keeps counting fetches.
+//
+// The eviction flag is reported rather than counted here because the metric it
+// feeds lives on the Server, and a fetchHistory deliberately knows nothing
+// about one.
 //
 // Sequence numbers are monotonic per caller and are what the model uses to
 // order the list.  A timestamp answers "how stale is this"; a sequence number
@@ -215,7 +251,7 @@ func mergeRecord(held, cur fetchRecord) fetchRecord {
 // the right URL out of a list.  Both are carried because they are different
 // questions — a cache hit at seq 47 can legitimately hold bytes retrieved at
 // seq 3.
-func (h *fetchHistory) appendRecord(r fetchRecord) int {
+func (h *fetchHistory) appendRecord(r fetchRecord) (seq int, evicted bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -223,37 +259,41 @@ func (h *fetchHistory) appendRecord(r fetchRecord) int {
 	r.Seq = h.total
 	r.Fetches = 1
 
+	if h.cap <= 0 {
+		h.cap = fetchHistoryEntries
+	}
 	if h.index == nil {
-		h.index = make(map[string]int, fetchHistoryEntries)
+		h.index = make(map[string]int)
 	}
 	key := citableURL(r)
 	if idx, ok := h.index[key]; ok {
 		h.entries[idx] = mergeRecord(h.entries[idx], r)
-		return r.Seq
+		return r.Seq, false
 	}
 
-	idx := h.count
-	if h.count == fetchHistoryEntries {
-		idx = h.evictLeastRecent()
-	} else {
-		h.count++
+	if len(h.entries) < h.cap {
+		h.entries = append(h.entries, r)
+		h.index[key] = len(h.entries) - 1
+		return r.Seq, false
 	}
+
+	idx := h.evictLeastRecent()
 	h.entries[idx] = r
 	h.index[key] = idx
-	return r.Seq
+	return r.Seq, true
 }
 
 // evictLeastRecent frees the slot whose source was touched longest ago and
-// returns it.  Called with h.mu held, and only when every slot is in use.
+// returns it.  Called with h.mu held, and only when the table is at capacity.
 //
 // Least recently *touched*, not first seen: a merged entry keeps its slot but
 // takes a new Seq, so insertion order stops tracking recency the moment a
 // caller re-fetches anything, and evicting by slot order would drop the source
-// it had just re-read.  The scan is O(fetchHistoryEntries) and runs only on
+// it had just re-read.  The scan is O(len(h.entries)) and runs only on
 // overflow.
 func (h *fetchHistory) evictLeastRecent() int {
 	oldest := 0
-	for i := 1; i < h.count; i++ {
+	for i := 1; i < len(h.entries); i++ {
 		if h.entries[i].Seq < h.entries[oldest].Seq {
 			oldest = i
 		}
@@ -274,8 +314,8 @@ func (h *fetchHistory) list() (records []fetchRecord, total, evicted int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	records = make([]fetchRecord, h.count)
-	copy(records, h.entries[:h.count])
+	records = make([]fetchRecord, len(h.entries))
+	copy(records, h.entries)
 	sort.Slice(records, func(i, j int) bool { return records[i].Seq > records[j].Seq })
 	return records, h.total, h.evicted
 }
@@ -283,14 +323,19 @@ func (h *fetchHistory) list() (records []fetchRecord, total, evicted int) {
 // historyKey derives the cache key for the current caller.
 //
 // Keying on session ID alone is unsafe here.  Under MCP_STATELESS the session
-// ID is client-asserted and is not validated by the SDK, and the README
-// documents a supported configuration in which it is empty for every request.
-// Either way, several callers would collapse onto one key and a caller could
-// be handed another caller's fetched URLs — a cross-tenant leak in exactly the
+// half is whatever the client asserted — since go-sdk v1.7.0 the SDK does not
+// read Mcp-Session-Id at all in that mode, so the value comes from this
+// relay's own transport middleware (see clientSessionCtxKey) and is empty for
+// any client that sends no header.  The README documents a further
+// configuration in which it is empty for every request.  In all of those
+// cases several callers would collapse onto one key and a caller could be
+// handed another caller's fetched URLs — a cross-tenant leak in exactly the
 // deployments this project is aimed at.
 //
 // Identity is server-validated in both session modes, so pairing the two keeps
 // callers separated even when the session half is empty, forged, or shared.
+// That half now does all the tenant-separating work in stateless mode: the
+// conversation half only decides how a single tenant's fetches are grouped.
 //
 // The identity is length-prefixed rather than merely delimited.  Identities are
 // arbitrary operator-chosen strings — addAuthToken validates only token length,
@@ -327,7 +372,7 @@ func (s *Server) historyFor(ctx context.Context) *fetchHistory {
 	if h, ok := s.history.Get(key); ok {
 		return h
 	}
-	h := &fetchHistory{}
+	h := newFetchHistory(s.config.HistoryEntries)
 	s.history.Add(key, h)
 	return h
 }
@@ -344,7 +389,9 @@ func (s *Server) recordFetch(ctx context.Context, r fetchRecord) {
 	if r.FetchedAt.IsZero() {
 		r.FetchedAt = time.Now()
 	}
-	h.appendRecord(r)
+	if _, evicted := h.appendRecord(r); evicted {
+		s.metrics.HistoryEvictions.Add(1)
+	}
 }
 
 // ── Tool: session sources ─────────────────────────────────────────────────────
@@ -399,7 +446,7 @@ func (s *Server) toolSessionSources(
 	req *mcp.CallToolRequest,
 	in sessionSourcesInput,
 ) (*mcp.CallToolResult, any, error) {
-	ctx = withSessionID(ctx, sessionIDOf(req))
+	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
 	lg := callerLogger(ctx)
 	s.metrics.SourcesTotal.Add(1)
 
@@ -471,6 +518,13 @@ func (s *Server) toolSessionSources(
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
 
+	// Counted here rather than derived from the eviction counter: this is
+	// the number that answers "did an agent write an answer against an
+	// incomplete list", which is the question the cap is tuned against.
+	if payload.Elided > 0 {
+		s.metrics.SourcesElided.Add(1)
+	}
+
 	lg.Info("session sources listed",
 		"returned", len(entries),
 		"total_fetches", total,
@@ -484,8 +538,17 @@ func (s *Server) toolSessionSources(
 
 // newFetchHistoryCache builds the per-caller history cache.  Split out so
 // NewServer stays readable and so tests can construct one directly.
-func newFetchHistoryCache() *lru.Cache[string, *fetchHistory] {
-	c, err := lru.New[string, *fetchHistory](fetchHistoryCallers)
+//
+// onEvict fires when a caller is pushed out of the cache entirely, losing its
+// whole ledger.  That is invisible from inside the response — the caller just
+// sees an empty list, indistinguishable from having fetched nothing — so it is
+// worth counting.  May be nil in tests.
+func newFetchHistoryCache(onEvict func()) *lru.Cache[string, *fetchHistory] {
+	c, err := lru.NewWithEvict(fetchHistoryCallers, func(string, *fetchHistory) {
+		if onEvict != nil {
+			onEvict()
+		}
+	})
 	if err != nil {
 		// Only fails for size <= 0, and the size is a positive constant.
 		panic("failed to initialise fetch history cache: " + err.Error())

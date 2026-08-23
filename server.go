@@ -148,9 +148,15 @@ func NewServer(cfg Config) *Server {
 		fenceSigningKey: priv,
 		fencePublicKey:  pub,
 		rateLimiter:     newRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst, cfg.RateLimitExempt),
-		history:         newFetchHistoryCache(),
 		sessions:        make(map[string]*sessionInfo),
 	}
+	// Wired after the literal so the eviction hook can reach s.metrics.  A
+	// caller evicted here loses its whole ledger silently, which is worth a
+	// counter: with a client-asserted conversation ID in the key, one caller
+	// rotating that ID can push every other caller's history out.
+	s.history = newFetchHistoryCache(func() {
+		s.metrics.HistoryCallersEvicted.Add(1)
+	})
 	s.mcpServer = s.buildMCPServer()
 	return s
 }
@@ -244,11 +250,17 @@ func (s *Server) buildMCPServer() *mcp.Server {
 // either the request or its session is nil (defensive: stateless mode
 // may pass an ephemeral session, and unit tests may construct a request
 // without one).  Tool handlers use this for audit log lines.
-func sessionIDOf(req *mcp.CallToolRequest) string {
-	if req == nil || req.Session == nil {
-		return ""
+func sessionIDOf(ctx context.Context, req *mcp.CallToolRequest) string {
+	if req != nil && req.Session != nil {
+		if id := req.Session.ID(); id != "" {
+			return id
+		}
 	}
-	return req.Session.ID()
+	// Stateless mode: the SDK issues no session ID, so fall back to the
+	// client-asserted one the transport validated for us.  Empty unless
+	// MCP_STATELESS is set — see the note above clientSessionCtxKey for why
+	// this must not reach into stateful requests.
+	return clientSessionIDFromContext(ctx)
 }
 
 // handleInitialized is the ServerOptions.InitializedHandler hook fired when
