@@ -23,6 +23,8 @@ The shipped [`Caddyfile`](./Caddyfile) points at an internal ACME directory, whi
 - **Self-signed, local-only** — replace it with `tls internal`. The client will need the Caddy root in its trust store.
 - **Bring your own cert** — `tls /path/to/cert.pem /path/to/key.pem`, plus a bind-mount in [`docker-compose.yaml`](./docker-compose.yaml).
 
+Caddy also fronts SearXNG here, so this stack keeps it. If you only need the relay and would rather not run a reverse proxy, the relay can terminate TLS itself via `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME` (including against a private step-ca) — see [TLS](../../README.md#tls) in the main README.
+
 ## 3. Set the relay auth token
 
 The shipped [`envs/.mcp-searxng-relay.env`](./envs/.mcp-searxng-relay.env) is intentionally minimalistic; the relay refuses to start in HTTP mode without an `MCP_AUTH_TOKEN` of at least 32 characters. Generate one:

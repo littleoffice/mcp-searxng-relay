@@ -9,6 +9,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/yfedoseev/office_oxide/go v0.1.8
 	github.com/yfedoseev/pdf_oxide/go v0.3.77
+	golang.org/x/crypto v0.55.0
 	golang.org/x/net v0.58.0
 )
 

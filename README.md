@@ -179,6 +179,14 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
 | `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
 | `MCP_METRICS_TOKEN` | to scrape | — | Bearer token that gates `GET /metrics`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset, `/metrics` returns `401` to everyone, including callers holding a valid MCP token. Same 32-character minimum. Required if you scrape metrics (see [Metrics](#metrics)) |
+| `MCP_TLS_CERT` | no | — | Path to a PEM certificate. With `MCP_TLS_KEY`, the relay serves HTTPS directly instead of plain HTTP. The pair is hot-reloaded on file change, so a renewal is picked up without a restart. Mutually exclusive with `MCP_TLS_ACME`. See [TLS](#tls) |
+| `MCP_TLS_KEY` | no | — | Path to the PEM private key for `MCP_TLS_CERT`. Both are required together; one alone fails startup |
+| `MCP_TLS_ACME` | no | `false` | If `true`, obtain certificates automatically via ACME (challenges served over TLS-ALPN-01 on the same port, so no second port is needed). Requires `MCP_TLS_ACME_DOMAINS` and `MCP_TLS_ACME_CACHE_DIR`. Mutually exclusive with `MCP_TLS_CERT`. See [TLS](#tls) |
+| `MCP_TLS_ACME_DOMAINS` | with ACME | — | Comma-separated hostnames the certificate may cover (the ACME host allow-list) |
+| `MCP_TLS_ACME_CACHE_DIR` | with ACME | — | Writable directory where issued certificates are cached so they survive restarts (without it, every restart re-requests and can hit CA rate limits) |
+| `MCP_TLS_ACME_EMAIL` | no | — | ACME account contact address |
+| `MCP_TLS_ACME_DIRECTORY` | no | Let's Encrypt | ACME directory URL. Point it at a private CA (e.g. step-ca) to use one instead of Let's Encrypt |
+| `MCP_TLS_ACME_CA_ROOTS` | no | — | Path to a PEM bundle the ACME client should trust, for a private ACME directory whose own TLS certificate is not in the system trust store. Scoped to the ACME client only |
 | `MCP_STATELESS` | no | `false` | If `true`, the SDK issues no session IDs and treats each request as a fresh temporary session; the relay reads `Mcp-Session-Id` itself for correlation. See "Session modes" below |
 | `MCP_SESSION_MAX_AGE` | no | `168h` | Stateful mode only. How long a session may live before the janitor closes it. Go duration syntax (`30m`, `12h`, `168h` — no `d` or `w`) |
 | `MCP_SESSION_JANITOR_INTERVAL` | no | `15m` | Stateful mode only. How often the janitor sweeps for expired sessions. Same duration syntax |
@@ -461,7 +469,7 @@ If you prefer to run the server as a persistent background process rather than s
 }
 ```
 
-> **Note:** Run the HTTP server behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik) in any non-local deployment. The server itself speaks plain HTTP.
+> **Note:** In any non-local deployment the MCP endpoint must be reached over TLS — its bearer tokens travel in whatever wraps it. Either front it with a TLS-terminating reverse proxy (nginx, Caddy, Traefik) or an Ingress, or have the relay serve HTTPS itself with `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME` (see [TLS](#tls)). With none of these, the relay serves plain HTTP and logs a warning at startup.
 
 ---
 
@@ -750,6 +758,35 @@ When fronting the server with a reverse proxy (recommended for any non-local dep
 - **Traefik.** Use the `forwardingTimeouts.responseHeaderTimeout` field and ensure the entrypoint is not configured with an aggressive idle timeout.
 
 If you see tool calls failing with truncated SSE streams in a reverse-proxy deployment, the proxy's read/write timeout is almost always the cause, not the relay's.
+
+### TLS
+
+By default the relay speaks plain HTTP and TLS is terminated by whatever fronts it — the Caddy service in the [podman stack](deploy/podman), an Ingress in [Kubernetes](deploy/kubernetes). That remains the recommended shape wherever such a terminator already exists. For a deployment with no proxy — the relay running by itself — it can also serve HTTPS directly, in one of two modes (mutually exclusive; configuring both fails startup):
+
+**Manual certificate.** Point `MCP_TLS_CERT` and `MCP_TLS_KEY` at a PEM certificate and key:
+
+```bash
+docker run -e MCP_PORT=8443 -e MCP_TLS_CERT=/tls/tls.crt -e MCP_TLS_KEY=/tls/tls.key ...
+```
+
+The pair is loaded once at startup (a bad path or a mismatched cert/key fails startup, not the first handshake) and re-read on the next handshake whenever the files change — so an in-place renewal (cert-manager rewriting a mounted Secret, a certbot deploy hook) is picked up **without a restart**.
+
+**Automatic certificates (ACME).** Set `MCP_TLS_ACME=true` with the hostname(s) to certify and a writable cache directory:
+
+```bash
+docker run -e MCP_PORT=443 \
+  -e MCP_TLS_ACME=true \
+  -e MCP_TLS_ACME_DOMAINS=relay.example.com \
+  -e MCP_TLS_ACME_EMAIL=admin@example.com \
+  -e MCP_TLS_ACME_CACHE_DIR=/var/cache/mcp-acme \
+  -v mcp-acme:/var/cache/mcp-acme ...
+```
+
+Certificates are obtained on demand for the allow-listed hostnames and cached on disk so they survive restarts (mount the cache on a volume; without persistence, restarts re-request and can hit CA rate limits). Challenges are answered over **TLS-ALPN-01 on the same listener**, so only the one TLS port needs to be reachable — no `:80` responder.
+
+- **Private CA (e.g. step-ca).** `MCP_TLS_ACME_DIRECTORY` selects the ACME directory (default: Let's Encrypt production). If that CA's own TLS certificate is not publicly trusted, give its roots to the ACME client with `MCP_TLS_ACME_CA_ROOTS=/path/to/ca-roots.pem`. This is the in-process equivalent of the ACME setup the bundled [`Caddyfile`](deploy/podman/Caddyfile) already uses.
+
+In Kubernetes, prefer terminating TLS at an Ingress with cert-manager ([`ingress.example.yaml`](deploy/kubernetes/ingress.example.yaml)); the in-pod `MCP_TLS_*` path is there for running the relay alone in a namespace with no Ingress (see the [Kubernetes README](deploy/kubernetes/README.md#tls)).
 
 ---
 
