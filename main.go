@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -176,6 +177,19 @@ func main() {
 	cfg.FenceKey = fenceKey
 	cfg.FenceKeySource = fenceKeySource
 
+	// Compile the in-process TLS configuration (MCP_TLS_CERT/MCP_TLS_KEY or the
+	// MCP_TLS_ACME_* family). Same fail-loud stance as the controls above: a
+	// half-configured pair, a manual+ACME conflict, an unwritable ACME cache,
+	// or a bad directory URL stops the server rather than silently falling back
+	// to plain HTTP. Nil (the default) leaves the historical plain-HTTP
+	// behaviour, with TLS terminated by whatever fronts the relay.
+	tlsSettings, err := newTLSSettings(cfg)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.TLS = tlsSettings
+
 	server := NewServer(cfg)
 
 	// Leave an audit line when the signing key outlives the process. This
@@ -235,8 +249,27 @@ func runHealthCheck() {
 		_, _ = fmt.Fprintln(os.Stderr, "healthcheck: MCP_PORT is not set")
 		os.Exit(1)
 	}
+	// When in-process TLS is configured the loopback endpoint is HTTPS, so the
+	// probe must speak TLS too. Verification is ON by default: because the
+	// probe dials 127.0.0.1, the served certificate must be valid for the
+	// loopback address (add 127.0.0.1/localhost as SANs) for it to pass. A
+	// deployment that serves a public-hostname-only certificate (typical for
+	// ACME) — where a loopback probe can never verify — opts out with
+	// MCP_TLS_HEALTHCHECK_INSECURE. It defaults to false so verification is
+	// never silently disabled. The env vars are the same ones newTLSSettings
+	// reads, so a single configuration covers both.
+	scheme := "http"
 	client := &http.Client{Timeout: 5 * time.Second}
-	req, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+port+"/health", nil)
+	if healthProbeUsesTLS() {
+		scheme = "https"
+		client.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{
+				MinVersion:         tls.VersionTLS12,
+				InsecureSkipVerify: healthProbeInsecure(), //nolint:gosec // opt-in, defaults false; loopback self-probe only
+			},
+		}
+	}
+	req, err := http.NewRequest(http.MethodGet, scheme+"://127.0.0.1:"+port+"/health", nil)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
 		os.Exit(1)
@@ -258,6 +291,24 @@ func runHealthCheck() {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// healthProbeUsesTLS reports whether the --healthcheck probe should use HTTPS,
+// i.e. whether in-process TLS is configured. It reads the same env vars
+// newTLSSettings does (checking for a manual cert or ACME being enabled)
+// rather than the compiled config, because the probe runs as its own process
+// and never builds a full Config.
+func healthProbeUsesTLS() bool {
+	return strings.TrimSpace(os.Getenv("MCP_TLS_CERT")) != "" || parseBool(os.Getenv("MCP_TLS_ACME"))
+}
+
+// healthProbeInsecure reports whether the --healthcheck TLS probe should skip
+// certificate verification. It defaults to false — verification stays on unless
+// an operator explicitly opts out — for deployments whose serving certificate
+// cannot be verified against the loopback probe address (e.g. a public-hostname
+// ACME certificate probed over 127.0.0.1).
+func healthProbeInsecure() bool {
+	return parseBool(os.Getenv("MCP_TLS_HEALTHCHECK_INSECURE"))
 }
 
 // runHTTP runs the MCP server over the Streamable HTTP transport, plus
@@ -285,6 +336,17 @@ func runHTTP(cfg Config, server *Server, port string) {
 	if len(cfg.MetricsToken) == 0 {
 		slog.Warn("/metrics is closed: MCP_METRICS_TOKEN is not set",
 			"hint", "generate one with `openssl rand -hex 32`; it is deliberately NOT the MCP auth token, because /metrics discloses the destination hosts fetched for every caller")
+	}
+
+	// When the relay serves plain HTTP, the bearer tokens that authenticate
+	// every request travel in whatever the operator wraps around us. That is
+	// the expected shape behind a TLS-terminating proxy or Ingress, but a
+	// deployment that exposes this port directly is handing out credentials in
+	// cleartext with nothing here to stop it. Say so once — the counterpart to
+	// the SearXNG basic-auth-over-http warning above.
+	if !cfg.TLS.enabled() {
+		slog.Warn("MCP endpoint is serving plain HTTP; bearer tokens depend on an external TLS terminator",
+			"hint", "expected when a reverse proxy or Ingress terminates TLS (Caddy, nginx, cert-manager); otherwise set MCP_TLS_CERT+MCP_TLS_KEY or MCP_TLS_ACME to serve HTTPS directly")
 	}
 
 	logConfig(server, "streamable-http", port)
@@ -361,6 +423,12 @@ func runHTTP(cfg Config, server *Server, port string) {
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
+	// When in-process TLS is configured, its tls.Config carries the
+	// GetCertificate hook (manual cert reloader or the ACME manager), so the
+	// cert/key arguments to ListenAndServeTLS are left empty below.
+	if cfg.TLS.enabled() {
+		srv.TLSConfig = cfg.TLS.tlsConfig
+	}
 
 	// ctx is cancelled when SIGTERM or SIGINT is received.
 	// stop restores default signal handling once we are done with it.
@@ -377,8 +445,16 @@ func runHTTP(cfg Config, server *Server, port string) {
 	}
 
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("server error", "error", err)
+		var serveErr error
+		if cfg.TLS.enabled() {
+			// Certs come from srv.TLSConfig.GetCertificate, so the file
+			// arguments are empty in both the manual and ACME cases.
+			serveErr = srv.ListenAndServeTLS("", "")
+		} else {
+			serveErr = srv.ListenAndServe()
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			slog.Error("server error", "error", serveErr)
 			os.Exit(1)
 		}
 	}()
@@ -505,6 +581,11 @@ func logConfig(server *Server, mode, port string) {
 		// operator whose dashboards have gone blank should find the reason
 		// here rather than in the scraper's logs.
 		row("metrics auth", metricsAuthLabel(mode, len(cfg.MetricsToken) > 0)),
+		// TLS: whether the relay terminates TLS itself, and in which mode.
+		// "disabled" is the common, correct state behind a TLS-terminating
+		// proxy or Ingress; it is shown so a direct-exposure deployment can
+		// see at a glance that it is serving cleartext.
+		row("tls", tlsModeLabel(mode, cfg.TLS)),
 		// Rate limit: shown unconditionally so it's obvious whether the
 		// throttle is engaged.  "disabled" appears when RPS == 0.
 		row("rate limit", server.rateLimiter.describe()),
@@ -603,6 +684,17 @@ func metricsAuthLabel(mode string, configured bool) string {
 		return "enabled (MCP_METRICS_TOKEN set)"
 	}
 	return "CLOSED (/metrics returns 401 — set MCP_METRICS_TOKEN to enable scraping)"
+}
+
+// tlsModeLabel renders the in-process TLS state for the banner. Mode-aware
+// like healthAuthLabel/metricsAuthLabel: stdio serves no network socket, so
+// TLS cannot apply there and "disabled" would be misleading. In HTTP mode it
+// defers to tlsSettings.describe (nil-safe → "disabled (plain HTTP)").
+func tlsModeLabel(mode string, t *tlsSettings) string {
+	if mode != "streamable-http" {
+		return "n/a (stdio serves no network socket)"
+	}
+	return t.describe()
 }
 
 // sessionModeLabel renders the cfg.Stateless bool as the human-readable

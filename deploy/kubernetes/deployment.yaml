@@ -36,6 +36,10 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            # Uncomment for in-pod TLS (set MCP_PORT to 8443 to match, and
+            # point the Service/probes at this port instead of http):
+            # - name: https
+            #   containerPort: 8443
           env:
             - name: MCP_PORT
               value: "8080"
@@ -78,6 +82,32 @@ spec:
             # extra volume is needed.  See README "Fence signing key".
             # - name: FENCE_SIGNING_KEY_FILE
             #   value: /etc/mcp-auth/fence-key
+            # ── In-pod TLS (optional) ──────────────────────────────────────
+            # The recommended shape terminates TLS at an Ingress (see
+            # ingress.example.yaml) and leaves this pod on plain HTTP. But if
+            # you run the relay by itself in a namespace with no Ingress, it
+            # can serve HTTPS directly. Uncomment ONE of the two modes below,
+            # plus the acme-cache volume/mount and the 443 port further down.
+            # See the main README "TLS" section for all MCP_TLS_* variables.
+            #
+            # Manual cert/key (e.g. a cert-manager Certificate mounted as a
+            # Secret at /etc/mcp-tls). Hot-reloaded on renewal, no restart:
+            # - name: MCP_TLS_CERT
+            #   value: /etc/mcp-tls/tls.crt
+            # - name: MCP_TLS_KEY
+            #   value: /etc/mcp-tls/tls.key
+            #
+            # Or automatic certificates via ACME (needs the writable
+            # acme-cache volume below; for a private CA also set
+            # MCP_TLS_ACME_DIRECTORY and MCP_TLS_ACME_CA_ROOTS):
+            # - name: MCP_TLS_ACME
+            #   value: "true"
+            # - name: MCP_TLS_ACME_DOMAINS
+            #   value: relay.example.com
+            # - name: MCP_TLS_ACME_EMAIL
+            #   value: admin@example.com
+            # - name: MCP_TLS_ACME_CACHE_DIR
+            #   value: /var/cache/mcp-acme
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -87,6 +117,14 @@ spec:
             - name: auth
               mountPath: /etc/mcp-auth
               readOnly: true
+            # Writable ACME cache for in-pod MCP_TLS_ACME (keeps
+            # readOnlyRootFilesystem: true). Not needed for manual-cert TLS.
+            # - name: acme-cache
+            #   mountPath: /var/cache/mcp-acme
+            # Manual-cert TLS mounts the cert Secret here (see MCP_TLS_CERT):
+            # - name: tls
+            #   mountPath: /etc/mcp-tls
+            #   readOnly: true
           # Liveness uses a TCP probe deliberately: the /health endpoint
           # checks the upstream SearXNG, and we don't want a transient
           # SearXNG outage to cascade into K8s killing this pod.  Liveness
@@ -134,3 +172,16 @@ spec:
             # something else ever ran in the pod it couldn't read the
             # token file.
             defaultMode: 0400
+        # Writable scratch volume for the ACME cert cache when using in-pod
+        # MCP_TLS_ACME (paired with the acme-cache volumeMount above). emptyDir
+        # is per-pod and does not survive rescheduling, so certs re-issue on a
+        # fresh node — fine for low replica counts; use a PVC if you must avoid
+        # re-issuing against a rate-limited CA.
+        # - name: acme-cache
+        #   emptyDir: {}
+        # Certificate Secret for manual-cert in-pod TLS (e.g. produced by a
+        # cert-manager Certificate resource):
+        # - name: tls
+        #   secret:
+        #     secretName: mcp-searxng-tls
+        #     defaultMode: 0400
