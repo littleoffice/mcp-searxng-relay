@@ -17,7 +17,10 @@
 # in .github/dependabot.yml promises.
 #
 # The fix when this fails is one line: edit the `go` directive in go.mod (and
-# `toolchain`, if you add one) to match the Dockerfile, or vice versa.
+# `toolchain`, if you add one) to match the Dockerfile, or vice versa. On
+# Dependabot docker bumps that edit is made automatically by
+# sync-go-version.yml; this workflow remains the secret-free invariant guard
+# that catches any mismatch the auto-sync misses.
 #
 # This job reads two files and runs no third-party code; it needs no secrets and
 # only read access, so it is safe to run on pull_request from Dependabot.
