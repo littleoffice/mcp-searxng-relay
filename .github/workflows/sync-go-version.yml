@@ -22,12 +22,26 @@
 # or GitHub App token), which does re-trigger CI.
 #
 # ---------------------------------------------------------------------------
-# Security model (this uses pull_request_target -- read before editing)
+# Security model (deliberately uses `pull_request`, NOT pull_request_target)
 # ---------------------------------------------------------------------------
-# pull_request_target runs in the base-repo context WITH secrets, so it must be
-# treated carefully. Three independent, layered controls keep it safe -- and the
-# branch NAME (github.head_ref) is deliberately NOT one of them, because a PR
-# author can name a branch `dependabot/docker/anything` and forge it:
+# This triggers on `pull_request`, not `pull_request_target`. That is a security
+# choice, not an oversight -- do not "fix" it to pull_request_target:
+#
+#   * pull_request_target runs in the PRIVILEGED base context (write token +
+#     secrets) while checking out the PR head. Checking out untrusted PR code in
+#     a privileged context is the classic CodeQL "unsafe checkout" finding and a
+#     real foot-gun.
+#   * On `pull_request`, secrets are WITHHELD from fork PRs entirely, so an
+#     external attacker's PR can never reach GO_SYNC_TOKEN no matter what. We do
+#     not rely on GITHUB_TOKEN to push (it is read-only for Dependabot anyway);
+#     we push with the GO_SYNC_TOKEN PAT below, which -- because Dependabot's
+#     branches live in THIS repo (not a fork) -- Dependabot-triggered
+#     `pull_request` runs still receive. So the automation works while the
+#     privileged-checkout exposure is gone.
+#
+# On top of that, three independent, layered controls apply -- and the branch
+# NAME (github.head_ref) is deliberately NOT one of them, because a PR author can
+# name a branch `dependabot/docker/anything` and forge it:
 #
 #   1. github.actor == 'dependabot[bot]'. Unlike head_ref, actor is a GitHub-set
 #      authenticated identity a PR author cannot forge. Cheap first-line gate.
@@ -37,16 +51,14 @@
 #
 #   3. THE REAL BACKSTOP: GO_SYNC_TOKEN is stored ONLY as a *Dependabot* secret.
 #      GitHub injects Dependabot secrets solely into runs whose actor is
-#      dependabot[bot]; every other pull_request_target run gets the Actions
-#      secret store, where this token does not exist -- so the push cannot
-#      authenticate even if the `if` gates above were removed. Do NOT also add
-#      GO_SYNC_TOKEN as an Actions secret, or you weaken this control.
+#      dependabot[bot]; every other run gets the Actions secret store, where this
+#      token does not exist -- so the push cannot authenticate even if the `if`
+#      gates above were removed. Do NOT also add GO_SYNC_TOKEN as an Actions
+#      secret, or you weaken this control.
 #
 # Finally, this job never BUILDS or EXECUTES anything from the PR head -- it only
-# reads the Dockerfile with a strict numeric regex and rewrites one go.mod line.
-# So the classic pull_request_target risk (running attacker code to exfiltrate
-# secrets) does not apply; same "reads files, runs no third-party code" posture
-# as pin-consistency.yml.
+# reads the Dockerfile with a strict numeric regex and rewrites one go.mod line
+# (same "reads files, runs no third-party code" posture as pin-consistency.yml).
 #
 # ---------------------------------------------------------------------------
 # One-time setup required for this to do anything
@@ -65,7 +77,7 @@
 name: Sync go.mod to Dockerfile Go version
 
 on:
-  pull_request_target:
+  pull_request:
     branches: [main]
     types: [opened, synchronize, reopened]
     paths:
@@ -97,11 +109,11 @@ jobs:
         if: steps.meta.outputs.package-ecosystem == 'docker'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # Check out the PR branch (in this same repo for Dependabot) so we can
-          # amend it. Layer 3: authenticate with the Dependabot-only token so the
-          # later push both succeeds AND re-triggers ci.yml. On a non-Dependabot
+          # Check out the PR branch tip (same repo -- Dependabot pushes here, not
+          # from a fork) so we can add a commit to it. Authenticate with the
+          # Dependabot-only PAT so the later push both succeeds AND re-triggers
+          # ci.yml; persist-credentials keeps it for that push. On a non-Dependabot
           # run this secret is empty and the push step below fails closed.
-          repository: ${{ github.event.pull_request.head.repo.full_name }}
           ref: ${{ github.event.pull_request.head.ref }}
           token: ${{ secrets.GO_SYNC_TOKEN }}
           fetch-depth: 0
