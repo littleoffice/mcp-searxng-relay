@@ -86,7 +86,15 @@ jobs:
           # Dependabot does NOT bump it -- update this line by hand when you
           # want a newer linter (or move golangci-lint into a go.mod `tool`
           # directive and invoke the binary directly to get it tracked).
-          version: v2.12.2
+          #
+          # v2.13.2 is the first release built with Go 1.27 (its release
+          # workflow sets GO_VERSION: 1.27.0). golangci-lint refuses to lint a
+          # module whose `go` directive targets a newer language version than
+          # the linter itself was built with, so this must move in step with the
+          # go.mod `go` directive (now go 1.27.0) -- v2.12.2 was built with Go
+          # 1.26 and errors out with "the Go language version (go1.26) ... is
+          # lower than the targeted Go version (1.27.0)".
+          version: v2.13.2
           # --timeout because the WASM-backed transitive deps make first-run
           # analysis a bit slow on cold cache. Tune downward later if you want.
           args: --timeout=5m
