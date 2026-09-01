@@ -51,10 +51,14 @@ updates:
   # container updated" half; the gomod entry above is the "keep the libraries
   # updated" half.
   #
-  # Dependabot does NOT know that the go directive in go.mod must move with
-  # it. That drift is deliberate here: pin-consistency.yml fails the PR until
-  # you edit the one line, which keeps the mismatch visible instead of letting
-  # CI silently test against a different stdlib than the image ships.
+  # Dependabot does NOT know that the go directive in go.mod must move with it.
+  # That drift is now closed automatically: sync-go-version.yml rewrites the `go`
+  # directive to match the bumped base image and pushes it onto this PR, so CI
+  # re-runs against the stdlib the image ships. pin-consistency.yml is retained
+  # as the secret-free invariant guard -- it fails the PR on ANY mismatch, so if
+  # the auto-sync is ever skipped or its GO_SYNC_TOKEN is missing, the drift is
+  # still caught (failure mode is "back to a manual one-line edit", never
+  # "silently merged").
   - package-ecosystem: docker
     directory: "/"
     schedule:

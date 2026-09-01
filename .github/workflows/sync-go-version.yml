@@ -1,0 +1,193 @@
+# .github/workflows/sync-go-version.yml
+#
+# Auto-companion to pin-consistency.yml. When Dependabot's `docker` ecosystem
+# bumps the builder base image to a new Go patch (e.g. golang:1.26.6 ->
+# golang:1.27.0), this workflow rewrites the `go` directive in go.mod to match
+# and pushes that one-line commit onto the same PR branch. pin-consistency.yml
+# then flips green, and -- because the commit is pushed with a token that is NOT
+# the default GITHUB_TOKEN (see below) -- the full ci.yml matrix re-runs against
+# the stdlib the container will actually ship.
+#
+# This does NOT replace pin-consistency.yml. That workflow stays as the
+# secret-free invariant guard that blocks merge on ANY mismatch, so if this
+# auto-sync is ever skipped or fails, the drift is still caught.
+#
+# ---------------------------------------------------------------------------
+# Why a token other than GITHUB_TOKEN is required
+# ---------------------------------------------------------------------------
+# A commit pushed with the built-in GITHUB_TOKEN never re-triggers workflows
+# (GitHub's loop-prevention). If we pushed the go.mod sync with GITHUB_TOKEN,
+# ci.yml would NOT re-run -- so CI would keep testing against the old stdlib,
+# defeating the point. We therefore push with GO_SYNC_TOKEN (a fine-grained PAT
+# or GitHub App token), which does re-trigger CI.
+#
+# ---------------------------------------------------------------------------
+# Security model (deliberately uses `pull_request`, NOT pull_request_target)
+# ---------------------------------------------------------------------------
+# This triggers on `pull_request`, not `pull_request_target`. That is a security
+# choice, not an oversight -- do not "fix" it to pull_request_target:
+#
+#   * pull_request_target runs in the PRIVILEGED base context (write token +
+#     secrets) while checking out the PR head. Checking out untrusted PR code in
+#     a privileged context is the classic CodeQL "unsafe checkout" finding and a
+#     real foot-gun.
+#   * On `pull_request`, secrets are WITHHELD from fork PRs entirely, so an
+#     external attacker's PR can never reach GO_SYNC_TOKEN no matter what. We do
+#     not rely on GITHUB_TOKEN to push (it is read-only for Dependabot anyway);
+#     we push with the GO_SYNC_TOKEN PAT below, which -- because Dependabot's
+#     branches live in THIS repo (not a fork) -- Dependabot-triggered
+#     `pull_request` runs still receive. So the automation works while the
+#     privileged-checkout exposure is gone.
+#
+# On top of that, three independent, layered controls apply -- and the branch
+# NAME (github.head_ref) is deliberately NOT one of them, because a PR author can
+# name a branch `dependabot/docker/anything` and forge it:
+#
+#   1. github.actor == 'dependabot[bot]'. Unlike head_ref, actor is a GitHub-set
+#      authenticated identity a PR author cannot forge. Cheap first-line gate.
+#
+#   2. dependabot/fetch-metadata confirms this is a genuine Dependabot update and
+#      that its package-ecosystem is `docker`. Stronger than any string match.
+#
+#   3. THE REAL BACKSTOP: GO_SYNC_TOKEN is stored ONLY as a *Dependabot* secret.
+#      GitHub injects Dependabot secrets solely into runs whose actor is
+#      dependabot[bot]; every other run gets the Actions secret store, where this
+#      token does not exist -- so the push cannot authenticate even if the `if`
+#      gates above were removed. Do NOT also add GO_SYNC_TOKEN as an Actions
+#      secret, or you weaken this control.
+#
+# Finally, this job never BUILDS or EXECUTES anything from the PR head -- it only
+# reads the Dockerfile with a strict numeric regex and rewrites one go.mod line
+# (same "reads files, runs no third-party code" posture as pin-consistency.yml).
+#
+# ---------------------------------------------------------------------------
+# One-time setup required for this to do anything
+# ---------------------------------------------------------------------------
+# Create a fine-grained PAT scoped to THIS repository only, with the single
+# permission Contents: Read and write. Store it as a *Dependabot* secret named
+# GO_SYNC_TOKEN (repo Settings -> Secrets and variables -> Dependabot), NOT as an
+# Actions secret. Without it this workflow is inert (the push step is skipped),
+# and pin-consistency.yml simply keeps failing the PR as before -- i.e. failure
+# mode is "back to manual", never "silently merged".
+#
+# Prefer a non-expiring, non-user-bound credential? Replace the "Resolve token"
+# step with actions/create-github-app-token using APP_ID / PRIVATE_KEY stored as
+# Dependabot secrets; nothing else changes.
+
+name: Sync go.mod to Dockerfile Go version
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'Dockerfile'
+
+# The default job token stays minimal; the push uses GO_SYNC_TOKEN instead.
+# pull-requests: read is what dependabot/fetch-metadata needs to inspect the PR.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: sync-go-version-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Rewrite go.mod go directive to match Dockerfile
+    runs-on: ubuntu-latest
+    # Layer 1: unforgeable actor identity. (head_ref is intentionally not used.)
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      # Layer 2: confirm this is a real Dependabot update in the docker ecosystem.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Checkout PR head
+        if: steps.meta.outputs.package-ecosystem == 'docker'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Check out the PR branch tip (same repo -- Dependabot pushes here, not
+          # from a fork) so we can add a commit to it. Authenticate with the
+          # Dependabot-only PAT so the later push both succeeds AND re-triggers
+          # ci.yml; persist-credentials keeps it for that push. On a non-Dependabot
+          # run this secret is empty and the push step below fails closed.
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GO_SYNC_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Sync go.mod go directive
+        if: steps.meta.outputs.package-ecosystem == 'docker'
+        env:
+          GO_SYNC_TOKEN: ${{ secrets.GO_SYNC_TOKEN }}
+          # Passed via env, never interpolated into the script text: a branch
+          # name is attacker-influenceable and git permits shell metacharacters
+          # in it, so `${{ ... }}` inline would be a script-injection vector.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GO_SYNC_TOKEN}" ]; then
+            echo "::warning::GO_SYNC_TOKEN is not set as a Dependabot secret;" \
+              "cannot push the go.mod sync. pin-consistency.yml will keep this" \
+              "PR red until go.mod is updated. See sync-go-version.yml header."
+            exit 0
+          fi
+
+          # Go version in the builder base image, e.g. the "1.27.0" in
+          # `FROM docker.io/golang:1.27.0-trixie@sha256:...`. Same extraction as
+          # pin-consistency.yml so the fixer and the guard can never disagree:
+          # only FROM lines, so the stale `golang:X.Y.Z` in a comment is ignored.
+          dockerfile_go="$(grep -iE '^[[:space:]]*FROM[[:space:]]' Dockerfile \
+            | grep -oiE 'golang:[0-9]+\.[0-9]+\.[0-9]+' | head -n1 | cut -d: -f2 || true)"
+
+          # The `go` directive in go.mod, e.g. "1.26.6" from `go 1.26.6`.
+          gomod_go="$(grep -oE '^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?' go.mod \
+            | head -n1 | awk '{print $2}' || true)"
+
+          echo "Dockerfile base-image Go : ${dockerfile_go:-<none found>}"
+          echo "go.mod go directive      : ${gomod_go:-<none found>}"
+
+          if [ -z "${dockerfile_go}" ]; then
+            echo "::error file=Dockerfile::Could not find a 'golang:X.Y.Z' base image tag."
+            exit 1
+          fi
+          if [ -z "${gomod_go}" ]; then
+            echo "::error file=go.mod::Could not find a 'go X.Y.Z' directive."
+            exit 1
+          fi
+
+          if [ "${dockerfile_go}" = "${gomod_go}" ]; then
+            echo "✅ Already in sync (${dockerfile_go}); nothing to do." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # Rewrite only the `go` directive line. Scope stays on `go`; if a
+          # `toolchain` directive is ever added, extend this sed AND
+          # pin-consistency.yml together.
+          sed -i -E "s/^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?/go ${dockerfile_go}/" go.mod
+
+          new_gomod_go="$(grep -oE '^go[[:space:]]+[0-9]+\.[0-9]+(\.[0-9]+)?' go.mod \
+            | head -n1 | awk '{print $2}')"
+          if [ "${new_gomod_go}" != "${dockerfile_go}" ]; then
+            echo "::error::Rewrite failed: go.mod still says ${new_gomod_go}."
+            exit 1
+          fi
+
+          git config user.name  'dependabot[bot]'
+          git config user.email '49699333+dependabot[bot]@users.noreply.github.com'
+          git add go.mod
+          git commit -m "build(deps): sync go.mod go directive to Go ${dockerfile_go} (matches Dockerfile)"
+          git push origin "HEAD:${HEAD_REF}"
+
+          {
+            echo "## ✅ Synced go.mod to Go ${dockerfile_go}"
+            echo ""
+            echo "The \`go\` directive was updated \`${gomod_go}\` → \`${dockerfile_go}\`"
+            echo "to match the Dockerfile builder image, and pushed to this PR."
+            echo "pin-consistency.yml and the ci.yml matrix will re-run against it."
+          } >> "$GITHUB_STEP_SUMMARY"
