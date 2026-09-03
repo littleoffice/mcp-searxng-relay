@@ -66,8 +66,8 @@ documentation bug worth reporting.
 | `github.com/modelcontextprotocol/go-sdk` | The official Model Context Protocol SDK. Owns the JSON-RPC framing, the stdio and Streamable HTTP transports, session handling, and tool registration. This is the largest single dependency by surface area and the one most worth a reviewer's attention. Pinned at v1.7.0. The fixes for CVE-2026-27896 (case-sensitivity), GHSA-q382-vc8q-7jhj (null-byte JSON key collision), and CVE-2026-33252 (cross-site tool execution) landed by v1.4.1 and are carried forward in the current pin. |
 | `github.com/markusmobius/go-trafilatura` | HTML-to-Markdown extraction: identifies the main article subtree, strips boilerplate (navigation, sidebars, footers, cookie banners), and pulls structured metadata from `<meta>`, OpenGraph, and JSON-LD. Pinned at v1.12.2. See [The trafilatura trade-off](#the-trafilatura-trade-off) below — this dependency brings most of the transitive tree. |
 | `github.com/hashicorp/golang-lru/v2` | The bounded in-memory LRU cache used for fetched URL content and for the rate-limiter's per-caller token buckets. Small, single-purpose, widely used. Pinned at v2.0.7. |
-| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is one of the two dependencies with a non-standard installation path. Pinned at v0.3.77. |
-| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.8. |
+| `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core, **built from source** in the `Dockerfile`; see [The native cores are built from source](#the-native-cores-are-built-from-source) below. Pinned at v0.3.77. |
+| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`, **built from source** in the `Dockerfile`; see [The native cores are built from source](#the-native-cores-are-built-from-source) below. Pinned at v0.1.8. |
 | `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.4. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.58.0. |
 
@@ -124,13 +124,13 @@ specific reason:
 - `golang-lru` and `golang.org/x/net` because they are small,
   single-purpose, and Go-team-adjacent.
 - `pdf_oxide` because pure-Go PDF parsing of attacker-controlled input is
-  hard to make panic- and timeout-bounded; see [the build-step section
-  below](#the-pdf_oxide-build-step).
+  hard to make panic- and timeout-bounded; see [The native cores are built
+  from source](#the-native-cores-are-built-from-source).
 - `office_oxide` for the same reason as `pdf_oxide`, applied to the Office
   format family. Pure-Go DOCX / XLSX / PPTX parsers exist but generally
   lack panic-free, timeout-bounded guarantees against malformed input,
   and legacy DOC / XLS / PPT support in pure Go is essentially absent.
-  See [the build-step section below](#the-office_oxide-build-step).
+  See [The native cores are built from source](#the-native-cores-are-built-from-source).
 - `go-trafilatura` because the HTML-extraction problem (correctly
   identifying the article subtree across AMP wrappers, lazy-loaded
   sections, multi-page articles, and the hundred other shapes the modern
@@ -189,7 +189,9 @@ that the result is auditable and reproducible:
   is checked against the `go` directive in `go.mod` by the pin-consistency
   workflow, so CI cannot test one stdlib while the container ships another.
   1.26.3 (2026-05-07) fixed CVE-2026-33814; the current pin carries that fix
-  and the patch releases since.
+  and the patch releases since. The **Rust builder image** (`rust:…-trixie`)
+  that compiles the native cores is pinned by digest the same way — see
+  [The native cores are built from source](#the-native-cores-are-built-from-source).
 - **Pinned `ca-certificates`.** The CA bundle copied into the final image
   comes from a specific `apt`-package version, so the set of trust anchors is
   itself a pinned input rather than a moving target.
@@ -261,122 +263,83 @@ trusting this document:
   workflow. The cosign signature and the CycloneDX / SPDX SBOM attestations are
   attached to the same image digest in the registry.
 
-## The pdf_oxide build step
+## The native cores are built from source
 
-One dependency warrants explicit description because its installation does not
-follow the normal `go mod` path.
+`pdf_oxide` (PDF) and `office_oxide` (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) are
+Rust extraction cores with Go bindings. Earlier releases of this project linked
+against **precompiled `.a` blobs downloaded from each project's GitHub
+Releases** — the one place the supply chain deviated from "everything traces to
+pinned source." As of this change the `Dockerfile` **builds both libraries from
+Rust source**, so every byte in the image traces to either Go source pinned in
+`go.sum` or Rust source pinned by commit and `Cargo.lock`.
 
-`pdf_oxide` is a Rust PDF-extraction core with Go bindings. The `Dockerfile`
-installs it by first reading the pinned module version from `go.mod` and then
-running that exact version's installer:
+How it works (see the `Dockerfile` for the exact steps):
 
-```dockerfile
-RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
-    go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib
-```
+1. **Source stage.** Reads each core's version from `go.mod` (still the single
+   source of truth — `go list -m` on the pinned binding module), shallow-clones
+   that tag, and then **asserts the cloned commit matches a SHA pinned in the
+   `Dockerfile`** (`PDF_OXIDE_COMMIT` / `OFFICE_OXIDE_COMMIT`). The version
+   answers "which release"; the commit pin defends against the one thing a
+   version string cannot — a re-pointed tag. Both move together on a bump.
+2. **Rust builder stage.** A `rust:…-trixie` image **pinned by digest** (same
+   discipline as the Go image) builds each core with
+   `cargo build --release --locked --lib`. `--locked` builds strictly from the
+   committed upstream `Cargo.lock`, whose per-crate SHA-256 checksums are the
+   Rust equivalent of `go.sum`, so the crate graph cannot drift at build time.
+   - `office_oxide` builds with default features — pure Rust, ~85 crates, no
+     system C libraries.
+   - `pdf_oxide` builds with the exact feature set the Go binding's ABI needs
+     (`ocr,rendering,signatures,barcodes,tsa-client,system-fonts`); dropping any
+     removes exported FFI symbols and the cgo link fails. That feature set pulls
+     a heavier tree (~370 crates) and a few build-time system deps
+     (`cmake`/`nasm`/`perl` for `aws-lc-rs`, `libfontconfig1-dev` for
+     `system-fonts`, `clang`). The archive is then shrunk with upstream's own
+     `scripts/shrink-staticlib.sh` (strips the `.llvmbc`/DWARF sections cgo's
+     linker never uses).
+3. **Go builder stage.** Copies the two from-source `.a` files and their
+   committed C headers into the same paths the old download layout used, so the
+   CGO link step is unchanged, and builds the static binary as before.
 
-This downloads and executes an installer program at build time, which places a
-precompiled static library (`libpdf_oxide.a`) into the build environment; the Go
-build then links against it via CGO. Two things follow from this:
+The `pdf_oxide` Rust core still provides the panic-free, timeout-bounded parsing
+that motivated choosing it over a pure-Go PDF library; what changed is that this
+repository now produces the `.a` from auditable source rather than trusting an
+opaque upstream artifact. Building from source also makes a Rust-level SBOM and
+`cargo audit`/RUSTSEC scanning of the crate graph possible, which a precompiled
+blob can never support.
 
-- The installer version is **derived from `go.mod` at build time** (currently
-  v0.3.61) rather than hardcoded, so the installer and the linked Go module can
-  never silently drift to different versions — bumping the module in `go.mod` is
-  the single source of truth for both. The installer is fetched through the same
-  Go module proxy and checksum-database machinery as any other module, so it is
-  not unverified — but it *is* code that runs during the build, with
-  build-environment privileges.
-- The `libpdf_oxide.a` binary blob it installs is precompiled upstream. A
-  reviewer who wants full source-to-binary provenance for the PDF path would
-  need to build that library from its Rust source themselves rather than trust
-  the precompiled artifact.
-
-This is a deliberate trade-off: `pdf_oxide`'s Rust core provides panic-free,
-timeout-bounded PDF parsing that would be difficult to match with a pure-Go
-library, and PDF parsing of attacker-controlled input is exactly the kind of
-code where those guarantees matter. But it is one of the two points in the
-supply chain that deviates from "everything is Go source pinned in `go.sum`,"
-and a reviewer should know that.
-
-## The office_oxide build step
-
-`office_oxide` is the Office-format counterpart to `pdf_oxide`: a Rust core
-with Go bindings, supplying text extraction for DOCX / XLSX / PPTX and the
-legacy DOC / XLS / PPT formats. The dependency model is identical to
-`pdf_oxide` — Go bindings link against a precompiled static archive
-(`liboffice_oxide.a`) at build time — but the install mechanism currently
-differs in one respect worth flagging.
-
-The upstream `go run github.com/yfedoseev/office_oxide/go/cmd/install`
-installer is presently broken: it constructs an asset URL of the form
-`native-linux-x86_64-${VERSION}.tar.gz`, but the release pipeline publishes
-the archive at `native-linux-x86_64.tar.gz` (no version suffix). Until
-upstream ships a fixed installer, the `Dockerfile` (and the CI workflow)
-fetch the archive directly:
-
-```dockerfile
-RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)" && \
-    GOARCH="$(go env GOARCH)" && \
-    case "${GOARCH}" in \
-        amd64) OFFICE_ARCH=x86_64 ;; \
-        arm64) OFFICE_ARCH=aarch64 ;; \
-        *) echo "office_oxide: unsupported arch ${GOARCH}" >&2; exit 1 ;; \
-    esac && \
-    curl --proto =https --tlsv1.2 -fsSL \
-        "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
-        -o /tmp/office_oxide.tar.gz && \
-    ...
-```
-
-Same observations apply as for `pdf_oxide`:
-
-- The version is **derived from `go.mod` at build time** (currently v0.1.2)
-  rather than hardcoded. Bumping the module in `go.mod` is the single
-  source of truth for both the Go binding and the downloaded archive.
-- The `liboffice_oxide.a` binary blob in the archive is precompiled upstream.
-  A reviewer who wants full source-to-binary provenance would need to build
-  the library from its Rust source themselves.
-
-There are two differences from `pdf_oxide` to be aware of:
-
-- **No checksum-database verification of the installer.** With `pdf_oxide`
-  the installer module is fetched through the Go module proxy and verified
-  against the checksum database before it runs. With the direct-download
-  workaround there is no equivalent intermediate verification step — the
-  build trusts GitHub Releases as the source of truth for the archive
-  itself, the same way it does for the Go binding via `go.sum`. The
-  archive's content is still version-pinned (the URL embeds the tag), so
-  the bytes are stable for a given version; what we lose is the
-  belt-and-braces second verification path.
-- **The Go binding (`github.com/yfedoseev/office_oxide/go`) IS still
-  verified** through the Go module proxy and `go.sum`, the same as every
-  other Go dependency. The deviation is limited to how the precompiled
-  native library reaches the build environment.
-
-Once upstream ships a fixed installer the `Dockerfile` and CI steps can be
-replaced with a one-liner mirroring `pdf_oxide`. The Go source-level
-integration in this repository does not need to change.
+> **Provenance vs. containment.** Building from source addresses *what code you
+> are trusting* (an auditable source→binary chain). It does **not** by itself
+> reduce the risk that a bug in that parser is exploitable when it processes a
+> malicious document — a parser flaw is identical whether the code was compiled
+> here or downloaded. That in-process exploitation risk is addressed separately;
+> see the extraction-sandbox note in the fetch pipeline.
 
 ## Known gaps
 
 Stated plainly, because a supply-chain document that sounds airtight is not
 trustworthy:
 
-- **The `pdf_oxide` precompiled library** — see
-  [the section above](#the-pdf_oxide-build-step). Source-to-binary provenance
-  for that one artifact depends on trusting the upstream build. In practice the
-  installer version is pinned via `go.mod` and the downloaded archive has its
-  SHA-256 verified at install time, so the bytes are stable; but the chain from
-  Rust source to `.a` blob is upstream's, not this repository's, and a
-  reproducible build of *this* image still depends on the pinned version's
-  artifact (currently v0.3.61) remaining byte-stable on GitHub Releases.
-- **The `office_oxide` precompiled library** — same provenance gap as
-  `pdf_oxide`, plus the additional caveat that the install path is
-  currently a direct `curl` of the release archive rather than the
-  upstream installer, so the second verification step that `pdf_oxide`
-  gets via the Go module proxy is not present for `office_oxide` at this
-  time. See [the section above](#the-office_oxide-build-step). The Go
-  binding itself remains verified through `go.sum`.
+- **`ort` / ONNX Runtime sub-dependency (residual of the `ocr` feature).**
+  `pdf_oxide`'s `ocr` feature — part of the feature set the binding's ABI forces
+  — pulls the `ort` crate. Depending on `ort`'s build strategy it may fetch a
+  prebuilt ONNX Runtime at build time, which would reintroduce a precompiled
+  sub-artifact one level down from the `.a` we now build ourselves. This is the
+  first thing to verify against a real build, and if confirmed, the next
+  provenance item to close (a from-source `ort` strategy, or dropping `ocr` if
+  upstream offers an ABI that does not require it).
+- **Rust-builder apt packages are unpinned.** The Rust base image is pinned by
+  digest, but the `cmake`/`nasm`/`perl`/`libfontconfig1-dev`/`clang` build-time
+  packages installed into it are not version-pinned — the same posture the Go
+  builder's `curl`/tooling has had. The build-twice `reproducibility.yml` job
+  hits one apt snapshot per run, so it does not affect same-run determinism;
+  cross-time reproducibility would want these pinned too.
+- **Rust-artifact reproducibility is newly load-bearing.** Previously the image
+  was reproducible partly because the `.a` was a fixed downloaded input; now the
+  Rust compilation is inside the build, so `rustc` determinism is part of the
+  claim. The build uses `--locked`, a fixed `CARGO_HOME`, `--remap-path-prefix`,
+  and `SOURCE_DATE_EPOCH`, and `reproducibility.yml` (build-twice-compare) is the
+  gate that proves it. If an upstream Rust dependency embeds non-reproducible
+  state, that job is where it surfaces.
 
 If any of these gaps is a blocker for your environment, that is worth raising
 before adoption rather than after — some are straightforward to close and

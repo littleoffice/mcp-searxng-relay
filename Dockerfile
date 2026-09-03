@@ -2,10 +2,17 @@
 # Reproducible-build inputs.
 #
 # The build is reproducible relative to:
-#   * the base-image digest pinned below,
+#   * the base-image digests pinned below (Go builder AND Rust builder),
 #   * the committed go.mod / go.sum,
+#   * the pinned pdf_oxide / office_oxide source commits (see the source stage),
 #   * the SERVER_VERSION value passed in,
 #   * SOURCE_DATE_EPOCH passed in.
+#
+# The pdf_oxide / office_oxide native static libraries are BUILT FROM SOURCE in
+# the rust-builder stage below rather than downloaded as precompiled upstream
+# blobs. That closes the source-to-binary provenance gap for the two native
+# dependencies (see docs/supply-chain.md): every byte in the image now traces to
+# either Go source pinned in go.sum or Rust source pinned by commit + Cargo.lock.
 #
 # Canonical invocation (podman):
 #   SOURCE_DATE_EPOCH="$(git log -1 --pretty=%ct HEAD)"
@@ -23,14 +30,122 @@
 ARG SOURCE_DATE_EPOCH=0
 ARG SERVER_VERSION=dev
 
-# Pin the builder image by content digest, not by tag. Tags are mutable;
+# Pin the builder images by content digest, not by tag. Tags are mutable;
 # digests are immutable. Resolve a digest with, e.g.:
-#   podman manifest inspect docker.io/golang:1.26.3-bookworm | jq -r .digest
+#   podman manifest inspect docker.io/golang:1.27.0-trixie | jq -r .digest
 # and copy it below. Bump deliberately as Go patch releases land.
 #
 # 1.26.3 (2026-05-07) fixes CVE-2026-33814: an HTTP/2 client infinite-loop on
 # malicious SETTINGS_MAX_FRAME_SIZE=0, reachable via the searxng_read_url tool
 # when fetching an attacker-controlled HTTPS endpoint.
+
+# ---------------------------------------------------------------------------
+# Stage 1: resolve the pinned native-dependency versions from go.mod and fetch
+# their Rust source. Kept in the Go image because go.mod is the single source of
+# truth for the versions, and `go list -m` is how we read it; git ships in the
+# official golang image, so no extra tooling is needed here.
+# ---------------------------------------------------------------------------
+FROM docker.io/golang:1.27.0-trixie@sha256:df98008ecd2b0ecc9f0a94d1b07e3564a9c92b555369b33d9b5f60d0765b2db7 AS source
+
+WORKDIR /app
+
+# Integrity pin ON TOP OF the go.mod version: the source stage clones the tag
+# named by go.mod, then asserts the resulting commit matches the SHA below.
+# A re-pointed tag (the one thing a version string cannot defend against) fails
+# the build loudly. Bump these in lockstep with the module versions in go.mod —
+# resolve a tag's commit with:
+#   git ls-remote https://github.com/yfedoseev/pdf_oxide.git refs/tags/vX.Y.Z
+ARG PDF_OXIDE_COMMIT=802693c6fb80463d2b0f3486f220468a0dedb690
+ARG OFFICE_OXIDE_COMMIT=61bc6c6c47383b2ceccabb7af69eb7003b5aff14
+
+# go.sum is a frozen input: -mod=readonly forbids any step from rewriting it.
+COPY go.mod go.sum ./
+ENV GOFLAGS="-mod=readonly"
+RUN go mod download
+
+# Clone each core at the tag named by go.mod, shallow, then verify HEAD against
+# the pinned commit. `.git` is removed so the copied tree is source-only.
+RUN set -eux; \
+    PDF_VER="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)"; \
+    OFF_VER="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"; \
+    git clone --depth 1 --branch "${PDF_VER}" https://github.com/yfedoseev/pdf_oxide.git /src/pdf_oxide; \
+    git clone --depth 1 --branch "${OFF_VER}" https://github.com/yfedoseev/office_oxide.git /src/office_oxide; \
+    got_pdf="$(git -C /src/pdf_oxide rev-parse HEAD)"; \
+    got_off="$(git -C /src/office_oxide rev-parse HEAD)"; \
+    [ "${got_pdf}" = "${PDF_OXIDE_COMMIT}" ] || { echo "pdf_oxide ${PDF_VER} HEAD ${got_pdf} != pinned ${PDF_OXIDE_COMMIT}" >&2; exit 1; }; \
+    [ "${got_off}" = "${OFFICE_OXIDE_COMMIT}" ] || { echo "office_oxide ${OFF_VER} HEAD ${got_off} != pinned ${OFFICE_OXIDE_COMMIT}" >&2; exit 1; }; \
+    rm -rf /src/pdf_oxide/.git /src/office_oxide/.git
+
+# ---------------------------------------------------------------------------
+# Stage 2: build the native static libraries from Rust source.
+#
+# rust:1.90-trixie satisfies both crates' MSRV (1.88) and office_oxide's
+# edition 2024 (>= 1.85). Pinned by digest for the same reason the Go image is.
+#   podman manifest inspect docker.io/rust:1.90-trixie | jq -r .digest
+# ---------------------------------------------------------------------------
+FROM docker.io/rust:1.90-trixie@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS rust-builder
+
+ARG SOURCE_DATE_EPOCH
+
+# Build-time system deps for pdf_oxide's feature set only: aws-lc-rs (signatures)
+# needs cmake/nasm/perl, system-fonts needs fontconfig dev headers, and clang is
+# the C toolchain those crates' build scripts invoke. office_oxide is pure Rust
+# and needs none of these. Left unpinned like the original build's `curl` line;
+# the build-twice reproducibility job hits a single apt snapshot per run.
+#
+# NOTE (provenance caveat, tracked in docs/supply-chain.md): pdf_oxide's `ocr`
+# feature pulls the `ort` ONNX Runtime crate. Depending on ort's build strategy
+# it may fetch a prebuilt onnxruntime at build time — i.e. the feature set that
+# forces the widest FFI surface is also the one that can reintroduce a
+# precompiled sub-dependency. Verify in CI whether the produced .a is fully
+# from-source; if not, that residual is the next provenance item to close.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        cmake \
+        nasm \
+        perl \
+        pkg-config \
+        libfontconfig1-dev \
+        clang \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=source /src /src
+
+# Reproducibility for the Rust artifacts:
+#   - CARGO_HOME is a fixed path so dependency source paths are stable.
+#   - --remap-path-prefix strips the crate's own build path.
+#   - --locked builds strictly from the committed Cargo.lock (its per-crate
+#     checksums are the Rust equivalent of go.sum), so the crate graph cannot
+#     drift at build time.
+#   - codegen-units=1 + strip are already set in each crate's release profile.
+ENV CARGO_HOME=/cargo
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}
+ENV RUSTFLAGS="--remap-path-prefix=/src=/build"
+
+# office_oxide — pure Rust, default features. Emits liboffice_oxide.a; the C
+# header is committed in the source tree (no cbindgen run needed).
+RUN set -eux; cd /src/office_oxide; \
+    cargo build --release --locked --lib; \
+    mkdir -p /staging/office; \
+    cp target/release/liboffice_oxide.a /staging/office/; \
+    cp include/office_oxide_c/office_oxide.h /staging/office/
+
+# pdf_oxide — the exact feature set the Go binding's ABI requires. Dropping any
+# feature removes exported FFI symbols and the Go cgo link step then fails on the
+# missing symbols. After building, shrink the archive with upstream's own script
+# (strips the per-object .llvmbc / DWARF sections that CGo's linker never uses —
+# ~35 MB+). The header is committed in the source tree.
+RUN set -eux; cd /src/pdf_oxide; \
+    cargo build --release --locked --lib \
+        --features ocr,rendering,signatures,barcodes,tsa-client,system-fonts; \
+    bash scripts/shrink-staticlib.sh target/release/libpdf_oxide.a; \
+    mkdir -p /staging/pdf; \
+    cp target/release/libpdf_oxide.a /staging/pdf/; \
+    cp include/pdf_oxide_c/pdf_oxide.h /staging/pdf/
+
+# ---------------------------------------------------------------------------
+# Stage 3: build the fully static Go binary, linking the from-source archives.
+# ---------------------------------------------------------------------------
 FROM docker.io/golang:1.27.0-trixie@sha256:df98008ecd2b0ecc9f0a94d1b07e3564a9c92b555369b33d9b5f60d0765b2db7 AS builder
 
 # ARGs do not cross FROM boundaries — re-declare to bring them into scope.
@@ -45,72 +160,32 @@ WORKDIR /app
 #   apt-cache policy ca-certificates
 # and pin it here. Bump deliberately.
 #
-# curl is required for the office_oxide library install step further down:
-# upstream's `go run .../cmd/install` is broken at the time of writing (asset
-# URL mismatch — installer fetches `${name}-${ver}.tar.gz`, GitHub serves
-# `${name}.tar.gz`; tracking issue filed upstream), so this Dockerfile
-# downloads the release archive directly. Once upstream ships a fixed
-# installer this `curl` line and the manual download below can be replaced
-# with a `go run` similar to the pdf_oxide step. Resolve the version with:
-#   apt-cache policy curl
-# and pin here.
-#
-# git is intentionally NOT installed: SERVER_VERSION is now passed in as an
-# ARG, so the builder does not need .git in the context to stamp the binary.
+# git is intentionally NOT installed: SERVER_VERSION is passed in as an ARG, so
+# the builder does not need .git in the context to stamp the binary. The source
+# fetch that DID need git happens in the `source` stage above.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates=20250419 \
-        curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Fetch dependencies as a separate step from the source copy so this layer
 # caches cleanly. go.sum is treated as a frozen input: -mod=readonly forbids
-# `go mod download` from rewriting it, replacing the old `go mod tidy` step
-# which could in principle mutate go.sum at build time.
+# `go mod download` from rewriting it.
 COPY go.mod go.sum ./
 ENV GOFLAGS="-mod=readonly"
 RUN go mod download
 
-# Install the pdf_oxide static library. The installer module is pinned by
-# version and verified through the Go module proxy and checksum database;
-# the precompiled libpdf_oxide.a it deposits in /pdf_oxide_lib is an upstream
-# artifact whose source-to-binary provenance is documented in supply-chain.md.
-RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
-    go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib
-
-# Install the office_oxide static library.
-#
-# Unlike pdf_oxide we cannot use the upstream `go run .../cmd/install`
-# because that installer constructs `${name}-${ver}.tar.gz` while the
-# release artifact is published as `${name}.tar.gz` (no version suffix)
-# — issue filed upstream, this block reverts to a `go run` once a fixed
-# installer ships. Until then we fetch the same archive the installer
-# would and lay it out at the same prefix layout.
-#
-# Version is sourced from go.mod (single source of truth) and the archive
-# is staged under /office_oxide_lib with the conventional layout:
-#   /office_oxide_lib/lib/linux_<arch>/liboffice_oxide.a
-#   /office_oxide_lib/include/office_oxide_c/office_oxide.h
-#
-# Upstream's archive layout (./lib/lib*.{a,so} + ./include/office_oxide_c/)
-# bundles BOTH the shared library and the static archive. We only need
-# the static archive for this build — the final binary is statically
-# linked into a scratch image — and discard the .so during repack.
-RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)" && \
-    GOARCH="$(go env GOARCH)" && \
-    case "${GOARCH}" in \
-        amd64) OFFICE_ARCH=x86_64 ;; \
-        arm64) OFFICE_ARCH=aarch64 ;; \
-        *) echo "office_oxide: unsupported arch ${GOARCH}" >&2; exit 1 ;; \
-    esac && \
-    mkdir -p "/office_oxide_lib/lib/linux_${GOARCH}" /office_oxide_lib/include /tmp/office_oxide_unpack && \
-    curl --proto =https --tlsv1.2 -fsSL \
-        "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
-        -o /tmp/office_oxide.tar.gz && \
-    tar -xzf /tmp/office_oxide.tar.gz -C /tmp/office_oxide_unpack && \
-    cp /tmp/office_oxide_unpack/lib/liboffice_oxide.a "/office_oxide_lib/lib/linux_${GOARCH}/liboffice_oxide.a" && \
-    cp -r /tmp/office_oxide_unpack/include/office_oxide_c /office_oxide_lib/include/ && \
-    rm -rf /tmp/office_oxide.tar.gz /tmp/office_oxide_unpack
+# Place the from-source libraries and headers at the exact paths the CGO flags
+# below expect — the same layout the upstream installers used to produce, so the
+# link step is unchanged from the download-based build it replaces.
+COPY --from=rust-builder /staging /staging
+RUN set -eux; GOARCH="$(go env GOARCH)"; \
+    mkdir -p "/pdf_oxide_lib/lib/linux_${GOARCH}" /pdf_oxide_lib/include \
+             "/office_oxide_lib/lib/linux_${GOARCH}" /office_oxide_lib/include/office_oxide_c; \
+    cp /staging/pdf/libpdf_oxide.a "/pdf_oxide_lib/lib/linux_${GOARCH}/"; \
+    cp /staging/pdf/pdf_oxide.h /pdf_oxide_lib/include/; \
+    cp /staging/office/liboffice_oxide.a "/office_oxide_lib/lib/linux_${GOARCH}/"; \
+    cp /staging/office/office_oxide.h /office_oxide_lib/include/office_oxide_c/
 
 COPY . .
 
@@ -124,7 +199,7 @@ COPY . .
 #                            ld embeds a random per-link build id and the
 #                            output binary differs on every build
 #
-# Static-linking flags (unchanged from the previous build):
+# Static-linking flags:
 #   -tags netgo              Go's pure-Go DNS resolver (avoids glibc NSS)
 #   -linkmode=external       hand off final linking to gcc so extldflags apply
 #   -extldflags='-static'    final binary has no shared-library dependency
