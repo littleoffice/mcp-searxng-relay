@@ -475,12 +475,16 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	switch {
 	case isPDF(contentType, targetURL):
 		s.metrics.FetchPDF.Add(1)
-		var pageCount int
-		content, truncated, pageCount, err = extractPDF(body, s.config.MaxExtractedChars)
-		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", err)
+		// Extraction runs in a locked-down subprocess by default (see
+		// sandbox.go): a bug in the native PDF parser reached via a malicious
+		// document is contained to a child holding no secrets and no network,
+		// rather than running in-process against the token table and fence key.
+		res, xerr := s.runSandboxedExtractor(ctx, "pdf", "", body, s.config.MaxExtractedChars)
+		if xerr != nil {
+			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", xerr)
 		}
-		metadata.PageCount = pageCount
+		content, truncated = res.Text, res.Truncated
+		metadata.PageCount = res.PageCount
 	case officeFormat(contentType, targetURL) != "":
 		// Office documents (DOCX/XLSX/PPTX + legacy DOC/XLS/PPT) render to
 		// Markdown rather than flat text. The structural fidelity (headings,
@@ -499,10 +503,13 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		// slides and XLSX sheets surface as heading breaks.
 		format := officeFormat(contentType, targetURL)
 		s.metrics.FetchOffice.Add(1)
-		content, truncated, err = extractOffice(body, format, s.config.MaxExtractedChars)
-		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, err)
+		// Same sandboxing rationale as the PDF path above: the native Office
+		// parser processes attacker-controlled bytes in an isolated child.
+		res, xerr := s.runSandboxedExtractor(ctx, "office", format, body, s.config.MaxExtractedChars)
+		if xerr != nil {
+			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, xerr)
 		}
+		content, truncated = res.Text, res.Truncated
 	case isPlainText(contentType):
 		// Plain-text responses can declare a non-UTF-8 charset just like HTML
 		// (e.g. text/plain; charset=ISO-8859-1).  Decode before stringifying

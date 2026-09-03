@@ -90,6 +90,17 @@ type Config struct {
 	// converter regardless of this switch.
 	ExtractLinks bool // EXTRACT_LINKS: default true
 
+	// ExtractSandbox runs PDF/Office extraction (the native pdf_oxide /
+	// office_oxide cgo path) in a locked-down subprocess so a parser bug reached
+	// via a malicious document is contained away from the server's secrets and
+	// network. Default true; EXTRACT_SANDBOX=false falls back to in-process
+	// extraction (the historical behaviour) as an escape hatch. See sandbox.go.
+	ExtractSandbox bool // EXTRACT_SANDBOX: default true
+	// ExtractTimeout is the hard wall-clock deadline for a single sandboxed
+	// extraction, after which the child is SIGKILLed and the fetch returns a
+	// contained error. Ignored when ExtractSandbox is false.
+	ExtractTimeout time.Duration // EXTRACT_TIMEOUT: default 60s
+
 	// PruneSelector is a CSS selector whose matches are removed from the
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
@@ -190,6 +201,13 @@ func configFromEnv() Config {
 	// that turning this on also enables trafilatura's own relative →
 	// absolute href rewriting, which is gated behind the same option.
 	c.ExtractLinks = parseBoolDefault(os.Getenv("EXTRACT_LINKS"), true)
+	// Extraction sandbox — on by default. Setting EXTRACT_SANDBOX=false runs the
+	// native PDF/Office extractors in-process (the historical behaviour), which
+	// removes the per-fetch subprocess cost at the price of the containment the
+	// sandbox provides. The timeout bounds a single sandboxed extraction; a
+	// malformed value falls back to the default, matching the other knobs.
+	c.ExtractSandbox = parseBoolDefault(os.Getenv("EXTRACT_SANDBOX"), true)
+	c.ExtractTimeout = parseGoDuration(os.Getenv("EXTRACT_TIMEOUT"), defaultExtractTimeout)
 	// Pre-extraction pruning.  The default targets "related"-flavoured
 	// containers, which is where news templates habitually park
 	// most-popular / you-might-also-like blocks.  It was chosen by

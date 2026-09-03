@@ -38,6 +38,16 @@ func main() {
 		return // unreachable — runHealthCheck calls os.Exit
 	}
 
+	// Sandbox extraction child: a re-exec of this binary that runs one
+	// PDF/Office extraction in isolation (see sandbox.go). Like --healthcheck
+	// this is dispatched before any config is loaded, so the child inherits no
+	// configuration and — with its environment scrubbed by the parent — no
+	// secrets. runExtractChild reads stdin, writes a result, and exits.
+	if isExtractChildInvocation(os.Args) {
+		runExtractChild(os.Args[2:])
+		return // unreachable — runExtractChild calls os.Exit
+	}
+
 	cfg := configFromEnv()
 	setupLogger(cfg)
 
@@ -512,6 +522,10 @@ func logConfig(server *Server, mode, port string) {
 		// agent.  Shown unconditionally: it changes what the model sees,
 		// so it belongs in the same at-a-glance view as the fetch policy.
 		row("link extraction", enabledLabel(cfg.ExtractLinks)),
+		// Whether native PDF/Office extraction runs in an isolated subprocess.
+		// It changes the process model of every document fetch, so it belongs in
+		// the same at-a-glance view as the fetch policy.
+		row("extract sandbox", extractSandboxLabel(cfg.ExtractSandbox, cfg.ExtractTimeout)),
 		// Pre-extraction pruning changes which subtree is treated as the
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.
@@ -574,6 +588,17 @@ func enabledLabel(b bool) string {
 		return "enabled"
 	}
 	return "disabled"
+}
+
+// extractSandboxLabel renders the extraction-sandbox state for the banner. When
+// on it names the per-extraction deadline; when off it says plainly that native
+// parsing runs in-process, since that reverses a security default and an
+// operator should see it without inferring it.
+func extractSandboxLabel(enabled bool, timeout time.Duration) string {
+	if enabled {
+		return "enabled (subprocess, " + timeout.String() + " timeout)"
+	}
+	return "disabled (native extraction runs in-process)"
 }
 
 // healthAuthLabel renders the /health authentication state for the banner.

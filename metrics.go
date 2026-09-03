@@ -180,6 +180,17 @@ type Metrics struct {
 	// exists for dashboards and alerting where unbounded cardinality
 	// would be worse than aggregated visibility.
 	RateLimitRejections atomic.Int64
+
+	// ── extraction sandbox ───────────────────────────────────────────────────
+	// Containment events for the PDF/Office extraction subprocess (sandbox.go).
+	// A steady SandboxKills rate means documents are crashing the parser (worth
+	// investigating — it is the signal the sandbox exists to make visible and
+	// survivable); SandboxTimeouts means extractions are hitting the deadline;
+	// SandboxSpawnErrors means the child could not be launched at all (an
+	// environment problem, not a document problem).
+	SandboxTimeouts    atomic.Int64
+	SandboxKills       atomic.Int64
+	SandboxSpawnErrors atomic.Int64
 }
 
 // recordFetchByDomain bumps the per-domain success or failure counter for the
@@ -349,6 +360,14 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Rate limiting
 	writeCounter("mcp_rate_limit_rejections_total",
 		"Total number of HTTP requests rejected by the per-caller rate limiter.", &m.RateLimitRejections)
+
+	// Extraction sandbox
+	writeCounter("mcp_extract_sandbox_timeouts_total",
+		"Total number of sandboxed PDF/Office extractions killed for exceeding the deadline.", &m.SandboxTimeouts)
+	writeCounter("mcp_extract_sandbox_kills_total",
+		"Total number of sandboxed extractions that failed and were contained (child crashed, was killed, or returned unreadable output).", &m.SandboxKills)
+	writeCounter("mcp_extract_sandbox_spawn_errors_total",
+		"Total number of times the extraction sandbox child could not be launched.", &m.SandboxSpawnErrors)
 
 	// Latency histograms
 	m.SearchDuration.write(w, "mcp_search_duration_seconds",
