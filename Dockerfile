@@ -52,11 +52,14 @@ WORKDIR /app
 # Integrity pin ON TOP OF the go.mod version: the source stage clones the tag
 # named by go.mod, then asserts the resulting commit matches the SHA below.
 # A re-pointed tag (the one thing a version string cannot defend against) fails
-# the build loudly. Bump these in lockstep with the module versions in go.mod —
-# resolve a tag's commit with:
-#   git ls-remote https://github.com/yfedoseev/pdf_oxide.git refs/tags/vX.Y.Z
-ARG PDF_OXIDE_COMMIT=802693c6fb80463d2b0f3486f220468a0dedb690
-ARG OFFICE_OXIDE_COMMIT=61bc6c6c47383b2ceccabb7af69eb7003b5aff14
+# the build loudly. Bump these in lockstep with the module versions in go.mod.
+#
+# These are the COMMIT the tag points to, which is what `git rev-parse HEAD`
+# yields after `git clone --branch <tag>`. Both upstream tags are ANNOTATED, so
+# resolve the peeled commit — note the `^{}` — not the tag-object SHA:
+#   git ls-remote https://github.com/yfedoseev/pdf_oxide.git 'refs/tags/vX.Y.Z^{}'
+ARG PDF_OXIDE_COMMIT=10b87f153200cd5c4d4a4defee471757091e6559
+ARG OFFICE_OXIDE_COMMIT=744b25be7f79ad333ffe68a11b2a39856846cdf3
 
 # go.sum is a frozen input: -mod=readonly forbids any step from rewriting it.
 COPY go.mod go.sum ./
