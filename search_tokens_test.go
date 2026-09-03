@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -83,6 +84,44 @@ func TestSearch_TokensIndependentOfRequestedEngines(t *testing.T) {
 	if want := "token-a"; (*got).Get("tokens") != want {
 		t.Errorf("tokens parameter = %q, want %q — tokens come from config, never from the request",
 			(*got).Get("tokens"), want)
+	}
+}
+
+// redactedUpstreamURL must never let a configured SEARXNG_TOKENS value reach a
+// log line. The non-200 path logs the upstream URL, and the raw URL carries the
+// tokens in its query string; a regression here would leak operator credentials
+// into the general log stream at WARN.
+func TestRedactedUpstreamURL_StripsTokens(t *testing.T) {
+	u, err := url.Parse("http://searxng.invalid/search?q=hello&tokens=secret-a,secret-b&format=json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	got := redactedUpstreamURL(u)
+
+	if strings.Contains(got, "secret-a") || strings.Contains(got, "secret-b") {
+		t.Fatalf("redacted URL still contains token material: %q", got)
+	}
+	if !strings.Contains(got, "tokens=%5Bredacted%5D") {
+		t.Errorf("expected tokens to be replaced with a redaction marker, got %q", got)
+	}
+	// Non-secret diagnostic value must survive so the log line is still useful.
+	if !strings.Contains(got, "q=hello") || !strings.Contains(got, "format=json") {
+		t.Errorf("redaction dropped non-secret query parameters: %q", got)
+	}
+	// The original URL must not be mutated as a side effect of logging.
+	if u.Query().Get("tokens") != "secret-a,secret-b" {
+		t.Errorf("original URL was mutated by redaction: tokens = %q", u.Query().Get("tokens"))
+	}
+}
+
+func TestRedactedUpstreamURL_NoTokensUnchanged(t *testing.T) {
+	u, err := url.Parse("http://searxng.invalid/search?q=hello&format=json")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got, want := redactedUpstreamURL(u), u.String(); got != want {
+		t.Errorf("redactedUpstreamURL with no tokens = %q, want unchanged %q", got, want)
 	}
 }
 
