@@ -281,7 +281,7 @@ func (s *Server) search(
 	if resp.StatusCode != http.StatusOK {
 		callerLogger(ctx).Warn("searxng returned non-200",
 			"status", resp.StatusCode,
-			"url", u.String(),
+			"url", redactedUpstreamURL(u),
 			"hint", "ensure JSON format is enabled in settings.yml")
 		return nil, fmt.Errorf("search backend returned HTTP %d", resp.StatusCode)
 	}
@@ -315,4 +315,36 @@ func (s *Server) search(
 	}
 
 	return searxResp.Results, nil
+}
+
+// redactedUpstreamURL renders a SearXNG request URL for logging with the
+// private-engine tokens stripped.
+//
+// The `tokens` query parameter carries SEARXNG_TOKENS — operator credentials
+// that scope this relay to a subset of a shared instance's engines. Logging the
+// raw URL (as the non-200 path once did) writes them into the general log
+// stream, which is a broader audience than the credential is scoped for: it is
+// the same disclosure /metrics has its own dedicated token to avoid. Only the
+// secret is removed; the host, path, and every other parameter — including the
+// query, which is already logged by design on the success path and is what an
+// operator needs to debug a non-200 — are left intact.
+//
+// The value is replaced rather than deleted so a reader can tell "tokens were
+// sent, redacted here" apart from "no tokens were configured", which is a real
+// distinction when diagnosing why a private engine returned nothing.
+func redactedUpstreamURL(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	q := u.Query()
+	if q.Get("tokens") == "" {
+		return u.String()
+	}
+	// url.URL.Query() returns a fresh copy, and this shallow struct copy gets
+	// its own RawQuery below, so neither the original *url.URL nor the request
+	// already sent from it is mutated as a side effect of building a log line.
+	redacted := *u
+	q.Set("tokens", "[redacted]")
+	redacted.RawQuery = q.Encode()
+	return redacted.String()
 }
