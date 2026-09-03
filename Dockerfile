@@ -31,7 +31,7 @@ ARG SERVER_VERSION=dev
 # 1.26.3 (2026-05-07) fixes CVE-2026-33814: an HTTP/2 client infinite-loop on
 # malicious SETTINGS_MAX_FRAME_SIZE=0, reachable via the searxng_read_url tool
 # when fetching an attacker-controlled HTTPS endpoint.
-FROM docker.io/golang:1.27.0-trixie@sha256:df98008ecd2b0ecc9f0a94d1b07e3564a9c92b555369b33d9b5f60d0765b2db7 AS builder
+FROM docker.io/golang:1.27.1-trixie@sha256:9baa6b4187bbb98d240372a8a235ac0bb6b5ddd52bba1431dc2f7c0705862728 AS builder
 
 # ARGs do not cross FROM boundaries — re-declare to bring them into scope.
 ARG SOURCE_DATE_EPOCH
