@@ -82,11 +82,15 @@ RUN set -eux; \
 # ---------------------------------------------------------------------------
 # Stage 2: build the native static libraries from Rust source.
 #
-# rust:1.90-trixie satisfies both crates' MSRV (1.88) and office_oxide's
-# edition 2024 (>= 1.85). Pinned by digest for the same reason the Go image is.
-#   podman manifest inspect docker.io/rust:1.90-trixie | jq -r .digest
+# The Rust floor is set by TRANSITIVE deps, not the cores' own MSRVs: pdf_oxide
+# declares MSRV 1.88 and office_oxide edition 2024 (>= 1.85), but pdf_oxide's
+# rendering tree pulls e.g. hayro-jpeg2000, whose Cargo.toml requires rustc 1.92,
+# and `cargo build --locked` refuses an older toolchain. Upstream builds with
+# "latest stable"; we track a recent stable and pin it by digest for the same
+# reason the Go image is. Bump deliberately as newer transitive MSRVs land.
+#   podman manifest inspect docker.io/rust:1.94-trixie | jq -r .digest
 # ---------------------------------------------------------------------------
-FROM docker.io/rust:1.90-trixie@sha256:e227f20ec42af3ea9a3c9c1dd1b2012aa15f12279b5e9d5fb890ca1c2bb5726c AS rust-builder
+FROM docker.io/rust:1.94-trixie@sha256:652612f07bfbbdfa3af34761c1e435094c00dde4a98036132fca28c7bb2b165c AS rust-builder
 
 ARG SOURCE_DATE_EPOCH
 
