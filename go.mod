@@ -7,7 +7,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/markusmobius/go-trafilatura v1.12.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/yfedoseev/office_oxide/go v0.1.8
+	github.com/yfedoseev/office_oxide/go v0.1.9
 	github.com/yfedoseev/pdf_oxide/go v0.3.77
 	golang.org/x/net v0.58.0
 )
