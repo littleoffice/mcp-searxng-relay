@@ -115,6 +115,21 @@ type Config struct {
 	FenceSigningKeyFile string             // FENCE_SIGNING_KEY_FILE: path to a file holding the same
 	FenceKey            ed25519.PrivateKey // parsed form; nil until main() validates, and nil means ephemeral
 	FenceKeySource      string             // human-readable origin for the banner; empty means ephemeral
+
+	// OAuth 2.0 / OIDC bearer-token verification (opt-in). Raw values are read
+	// here; the compiled, validated verifier is populated in main() via
+	// newOAuthSettings, following the same "read raw, validate in main" split
+	// used for the fence key and the fetch ACL. All empty by default, which
+	// leaves the static MCP_AUTH_TOKEN* table as the only credential path.
+	// When enabled it runs ALONGSIDE the static table, not instead of it:
+	// requireAuth tries the static digest first, then OAuth. See oauth.go.
+	OAuthIssuer        string         // MCP_OAUTH_ISSUER: OIDC issuer URL; enables OAuth and (by default) JWKS discovery
+	OAuthAudience      string         // MCP_OAUTH_AUDIENCE: value every token's aud must carry (this relay's resource id)
+	OAuthJWKSFile      string         // MCP_OAUTH_JWKS_FILE: static JWKS path; offline alternative to issuer discovery
+	OAuthIdentityClaim string         // MCP_OAUTH_IDENTITY_CLAIM: claim used as the audit identity (default "sub")
+	OAuthRequiredScope string         // MCP_OAUTH_REQUIRED_SCOPE: scope every token must grant (empty = no requirement)
+	OAuthCARoots       string         // MCP_OAUTH_CA_ROOTS: PEM roots for a private issuer's TLS (scoped to JWKS fetch)
+	OAuth              *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
 }
 
 func configFromEnv() Config {
@@ -287,6 +302,17 @@ func configFromEnv() Config {
 	// Leaving both unset keeps the per-process ephemeral key.
 	c.FenceSigningKey = strings.TrimSpace(os.Getenv(fenceKeyEnvVar))
 	c.FenceSigningKeyFile = strings.TrimSpace(os.Getenv(fenceKeyFileEnvVar))
+	// OAuth — only the raw values are read here. Discovery, mutual-exclusion of
+	// the two key sources, and every other check happen in main() via
+	// newOAuthSettings, so a half-configured or unreachable setup fails startup
+	// with a clear message instead of silently accepting only static tokens.
+	// Leaving MCP_OAUTH_ISSUER unset keeps OAuth off.
+	c.OAuthIssuer = strings.TrimSpace(os.Getenv("MCP_OAUTH_ISSUER"))
+	c.OAuthAudience = strings.TrimSpace(os.Getenv("MCP_OAUTH_AUDIENCE"))
+	c.OAuthJWKSFile = strings.TrimSpace(os.Getenv("MCP_OAUTH_JWKS_FILE"))
+	c.OAuthIdentityClaim = strings.TrimSpace(os.Getenv("MCP_OAUTH_IDENTITY_CLAIM"))
+	c.OAuthRequiredScope = strings.TrimSpace(os.Getenv("MCP_OAUTH_REQUIRED_SCOPE"))
+	c.OAuthCARoots = strings.TrimSpace(os.Getenv("MCP_OAUTH_CA_ROOTS"))
 	return c
 }
 

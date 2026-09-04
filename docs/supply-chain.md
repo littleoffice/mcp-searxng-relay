@@ -49,7 +49,7 @@ that obligation, it just makes it explicit.
 
 ## Dependency inventory
 
-The project has **five direct dependencies** and approximately thirty
+The project has **nine direct dependencies** and approximately thirty
 transitive ones. The full, authoritative list is `go.mod` / `go.sum` in the
 repository root; this section explains what each direct dependency is for, and
 is honest about the transitive surface introduced by the largest of them.
@@ -70,6 +70,8 @@ documentation bug worth reporting.
 | `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.8. |
 | `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.4. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.58.0. |
+| `github.com/coreos/go-oidc/v3` | OpenID Connect Resource-Server verification for the optional OAuth path (`MCP_OAUTH_*`): OIDC discovery, the auto-rotating remote JWKS cache, and JWT signature/claims validation. Reachable only when `MCP_OAUTH_ISSUER` is set; unused in the default static-token configuration. Widely used, maintained under the CoreOS/Red Hat umbrella. Pinned at v3.21.0. |
+| `github.com/go-jose/go-jose/v4` | JOSE primitives (JWS parsing and signature verification, JWKS types) underneath `go-oidc`, and used directly by the relay to verify against a static `MCP_OAUTH_JWKS_FILE`. The actively maintained successor to `square/go-jose`. Pinned at v4.1.5. |
 
 ### Transitive dependencies
 
@@ -109,20 +111,29 @@ worth knowing about are:
 - **Miscellaneous** — `elliotchance/pie/v2` (generic slice helpers used
   by trafilatura), `ebitengine/purego` (used by `pdf_oxide` for CGo-free
   function calls into the Rust library), `yosida95/uritemplate/v3` (URI
-  templates used by the SDK), and the Go-team extension modules
-  `golang.org/x/{exp,oauth2,sys,text}` pulled in across the tree.
+  templates used by the SDK), `golang-jwt/jwt/v5` (pulled in by `go-oidc`
+  for its own JWT handling), and the Go-team extension modules
+  `golang.org/x/{exp,oauth2,sys,text}` pulled in across the tree —
+  `x/oauth2` is now also used first-hand by `go-oidc`.
 
 ### Why the dependency set looks the way it does
 
 The codebase itself uses **only the Go standard library** for HTTP serving,
 logging (`log/slog`), configuration (env vars parsed by hand), and JSON
 (`encoding/json`). There is no web framework, no ORM, no DI container, no
-configuration library. The six direct dependencies are each there for a
+configuration library. The nine direct dependencies are each there for a
 specific reason:
 
 - The protocol SDK because we implement that protocol.
 - `golang-lru` and `golang.org/x/net` because they are small,
   single-purpose, and Go-team-adjacent.
+- `go-oidc` and `go-jose` because verifying an OAuth JWT correctly (JWKS
+  rotation, signature verification, the claim checks, and refusing the
+  HMAC/`none` key-confusion class of forgery) is precisely the kind of
+  security-sensitive crypto plumbing that should be a maintained library
+  rather than hand-rolled. Both are inert unless `MCP_OAUTH_ISSUER` is set,
+  so a deployment using only static tokens loads them but exercises no
+  OAuth code path.
 - `pdf_oxide` because pure-Go PDF parsing of attacker-controlled input is
   hard to make panic- and timeout-bounded; see [the build-step section
   below](#the-pdf_oxide-build-step).

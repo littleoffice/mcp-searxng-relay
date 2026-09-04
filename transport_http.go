@@ -211,19 +211,56 @@ func callerLogger(ctx context.Context) *slog.Logger {
 // never the offered Authorization header — that would leak guesses).
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if len(s.config.AuthTokens) > 0 {
-			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
-			identity, ok := s.config.AuthTokens[got]
-			if !ok {
-				slog.Warn("unauthorized request",
-					"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
-				w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
+		staticOn := len(s.config.AuthTokens) > 0
+		oauthOn := s.config.OAuth.enabled()
+
+		// No credential configured at all: the endpoint is open, the historical
+		// behaviour when the token table is empty. (runHTTP refuses to start in
+		// this state, so it is reachable only from stdio and tests.)
+		if !staticOn && !oauthOn {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		authz := r.Header.Get("Authorization")
+
+		// Static digest table first: an O(1) fixed-length lookup, cheaper than
+		// a JWT verification and the path most deployments use.
+		if staticOn {
+			if identity, ok := s.config.AuthTokens[sha256.Sum256([]byte(authz))]; ok {
+				next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
 				return
 			}
-			r = r.WithContext(withIdentity(r.Context(), identity))
 		}
-		next.ServeHTTP(w, r)
+
+		// Then OAuth: verify a presented Bearer JWT against the configured
+		// issuer. A verification failure is logged at debug (its message can
+		// name the expected audience/issuer, useful for an operator debugging a
+		// client but not worth a warn line per probe) and falls through to 401.
+		if oauthOn {
+			if tok := bearerToken(authz); tok != "" {
+				identity, err := s.config.OAuth.Verify(r.Context(), tok)
+				if err == nil {
+					next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
+					return
+				}
+				slog.Debug("oauth token rejected",
+					"remote", r.RemoteAddr, "error", err.Error())
+			}
+		}
+
+		// Neither path matched. Point OAuth clients at the metadata document
+		// (RFC 9728 §5.1) so they can discover where to authenticate; the raw
+		// Authorization header is never logged, so a guess cannot leak.
+		if oauthOn {
+			w.Header().Set("WWW-Authenticate",
+				`Bearer realm="mcp", resource_metadata="`+resourceMetadataURL(r)+`"`)
+		} else {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
+		}
+		slog.Warn("unauthorized request",
+			"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
 }
 

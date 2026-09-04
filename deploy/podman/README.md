@@ -33,6 +33,8 @@ echo "MCP_AUTH_TOKEN=$(openssl rand -hex 32)" >> envs/.mcp-searxng-relay.env
 
 For multi-tenant deployments (one token per agent / per user), see [Configuration](../../README.md#configuration) for `MCP_AUTH_TOKENS` and `MCP_AUTH_TOKEN_FILE`.
 
+Alternatively, if you already run an identity provider, the relay can verify **OAuth 2.0 / OIDC** bearer JWTs instead of (or alongside) static tokens — set `MCP_OAUTH_ISSUER` and `MCP_OAUTH_AUDIENCE` and the HTTP-mode auth requirement is satisfied without any `MCP_AUTH_TOKEN`. See [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc).
+
 ## 4. Bring it up
 
 ```bash

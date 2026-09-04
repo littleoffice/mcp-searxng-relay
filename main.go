@@ -176,6 +176,23 @@ func main() {
 	cfg.FenceKey = fenceKey
 	cfg.FenceKeySource = fenceKeySource
 
+	// Compile the OAuth verifier (MCP_OAUTH_ISSUER and the MCP_OAUTH_* family).
+	// Same fail-loud stance as the controls above: a half-configured setup, a
+	// missing audience, an unreadable JWKS file, or an issuer whose discovery
+	// endpoint is unreachable stops the server rather than silently narrowing
+	// authentication to the static token table. Issuer mode performs OIDC
+	// discovery here, so the network call is bounded by a startup timeout. Nil
+	// (the default) leaves OAuth off. Runs even in stdio mode so a
+	// misconfiguration surfaces there too; the banner shows it as n/a.
+	oauthCtx, cancelOAuth := context.WithTimeout(context.Background(), 15*time.Second)
+	oauthSettings, err := newOAuthSettings(oauthCtx, cfg)
+	cancelOAuth()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.OAuth = oauthSettings
+
 	server := NewServer(cfg)
 
 	// Leave an audit line when the signing key outlives the process. This
@@ -263,18 +280,20 @@ func runHealthCheck() {
 // runHTTP runs the MCP server over the Streamable HTTP transport, plus
 // /health (unauthenticated) and /metrics (authenticated).
 func runHTTP(cfg Config, server *Server, port string) {
-	// At least one auth token is mandatory in HTTP mode: the server is
-	// network-accessible and there is no other authentication layer built
-	// in.  parseAuthTokens already validated the 32-character minimum on
-	// every token it accepted, so we only need to check the table isn't
-	// empty here.
-	if len(cfg.AuthTokens) == 0 {
-		_, _ = fmt.Fprintln(os.Stderr, "Error: at least one auth token is required when MCP_PORT is set")
-		_, _ = fmt.Fprintln(os.Stderr, "       Configure one of:")
+	// An authentication layer is mandatory in HTTP mode: the server is
+	// network-accessible and has no other gate built in. That means either the
+	// static token table (parseAuthTokens already validated the 32-character
+	// minimum on every token it accepted) or OAuth verification — at least one
+	// must be configured.
+	if len(cfg.AuthTokens) == 0 && !cfg.OAuth.enabled() {
+		_, _ = fmt.Fprintln(os.Stderr, "Error: authentication is required when MCP_PORT is set")
+		_, _ = fmt.Fprintln(os.Stderr, "       Configure static bearer tokens, one of:")
 		_, _ = fmt.Fprintln(os.Stderr, "         MCP_AUTH_TOKEN=<token>                     (single-tenant)")
 		_, _ = fmt.Fprintln(os.Stderr, "         MCP_AUTH_TOKENS=alice:tok1,bob:tok2        (small static fleet)")
 		_, _ = fmt.Fprintln(os.Stderr, "         MCP_AUTH_TOKEN_FILE=/etc/mcp/tokens         (larger / rotated set)")
 		_, _ = fmt.Fprintln(os.Stderr, "       Generate strong tokens with:  openssl rand -hex 32")
+		_, _ = fmt.Fprintln(os.Stderr, "       Or delegate to an OAuth 2.0 / OIDC provider:")
+		_, _ = fmt.Fprintln(os.Stderr, "         MCP_OAUTH_ISSUER=https://idp.example.com  (+ MCP_OAUTH_AUDIENCE)")
 		os.Exit(1)
 	}
 
@@ -342,6 +361,12 @@ func runHTTP(cfg Config, server *Server, port string) {
 	mux.Handle("/health", server.requireHealthAuth(http.HandlerFunc(server.handleHealth)))
 	// /fence/public-key is intentionally unauthenticated — public keys are public.
 	mux.HandleFunc("/fence/public-key", server.handleFencePublicKey)
+	// Protected-resource metadata (RFC 9728), registered only when OAuth is on.
+	// Unauthenticated by design: it names the issuer and audience a client needs
+	// before it can obtain a token, and requireAuth points 401s at it.
+	if cfg.OAuth.enabled() {
+		mux.HandleFunc(oauthMetadataPath, server.handleOAuthMetadata)
+	}
 	// /metrics is behind MCP_METRICS_TOKEN when one is set, and behind the
 	// MCP token table otherwise (see requireMetricsAuth for why a dedicated
 	// secret is worth setting).  We deliberately do NOT rate-limit it:
@@ -497,6 +522,10 @@ func logConfig(server *Server, mode, port string) {
 		// that, good."
 		row("auth tokens", fmt.Sprintf("%d configured (%d identities)",
 			len(cfg.AuthTokens), countIdentities(cfg.AuthTokens))),
+		// Whether OAuth 2.0 / OIDC verification is engaged, and in which mode.
+		// Shown next to the static token count because the two together are the
+		// complete picture of how a caller can authenticate.
+		row("oauth", oauthModeLabel(mode, cfg.OAuth)),
 		// Whether the /health probe requires MCP_HEALTH_TOKEN. Shown only in
 		// HTTP mode — stdio has no /health endpoint for it to apply to.
 		row("health auth", healthAuthLabel(mode, len(cfg.HealthToken) > 0)),
@@ -588,6 +617,18 @@ func healthAuthLabel(mode string, enabled bool) string {
 		return "enabled (MCP_HEALTH_TOKEN set)"
 	}
 	return "disabled (/health open — set MCP_HEALTH_TOKEN to require a token)"
+}
+
+// oauthModeLabel renders the OAuth verification state for the banner.
+// Mode-aware like healthAuthLabel/metricsAuthLabel: stdio serves no network
+// socket, so OAuth cannot apply there and "disabled" would be misleading. In
+// HTTP mode it defers to oauthSettings.describe (nil-safe → "disabled (static
+// tokens only)").
+func oauthModeLabel(mode string, o *oauthSettings) string {
+	if mode != "streamable-http" {
+		return "n/a (stdio serves no network socket)"
+	}
+	return o.describe()
 }
 
 // metricsAuthLabel renders the /metrics authentication state for the banner.
