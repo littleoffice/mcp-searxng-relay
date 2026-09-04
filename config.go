@@ -115,6 +115,22 @@ type Config struct {
 	FenceSigningKeyFile string             // FENCE_SIGNING_KEY_FILE: path to a file holding the same
 	FenceKey            ed25519.PrivateKey // parsed form; nil until main() validates, and nil means ephemeral
 	FenceKeySource      string             // human-readable origin for the banner; empty means ephemeral
+
+	// In-process TLS for the HTTP transport (opt-in). Raw values are read
+	// here; the compiled, validated form is populated in main() via
+	// newTLSSettings, following the same "read raw, validate in main" split
+	// used for FetchACL and the fence key. All empty/false by default, which
+	// keeps the historical plain-HTTP behaviour (TLS terminated by whatever
+	// fronts the relay). See tls.go for the two modes and the rationale.
+	TLSCertFile      string       // MCP_TLS_CERT: PEM certificate path (manual TLS)
+	TLSKeyFile       string       // MCP_TLS_KEY: PEM private-key path (manual TLS)
+	TLSACME          bool         // MCP_TLS_ACME: obtain certificates automatically via ACME
+	TLSACMEDomains   []string     // MCP_TLS_ACME_DOMAINS: hostnames the certificate may cover
+	TLSACMEEmail     string       // MCP_TLS_ACME_EMAIL: ACME account contact address
+	TLSACMEDirectory string       // MCP_TLS_ACME_DIRECTORY: ACME directory URL (default: Let's Encrypt)
+	TLSACMECacheDir  string       // MCP_TLS_ACME_CACHE_DIR: writable dir for issued-cert persistence
+	TLSACMECARoots   string       // MCP_TLS_ACME_CA_ROOTS: PEM roots the ACME client trusts (private CA)
+	TLS              *tlsSettings // compiled form; nil until main() validates, and nil means plain HTTP
 }
 
 func configFromEnv() Config {
@@ -287,6 +303,19 @@ func configFromEnv() Config {
 	// Leaving both unset keeps the per-process ephemeral key.
 	c.FenceSigningKey = strings.TrimSpace(os.Getenv(fenceKeyEnvVar))
 	c.FenceSigningKeyFile = strings.TrimSpace(os.Getenv(fenceKeyFileEnvVar))
+	// In-process TLS — only the raw values are read here. Validation and the
+	// mutually-exclusive manual-vs-ACME decision happen in main() via
+	// newTLSSettings, so a half-configured or conflicting setup fails startup
+	// with a clear message instead of silently serving plain HTTP. Leaving all
+	// of these unset keeps the plain-HTTP default.
+	c.TLSCertFile = strings.TrimSpace(os.Getenv("MCP_TLS_CERT"))
+	c.TLSKeyFile = strings.TrimSpace(os.Getenv("MCP_TLS_KEY"))
+	c.TLSACME = parseBool(os.Getenv("MCP_TLS_ACME"))
+	c.TLSACMEDomains = parseCSV(os.Getenv("MCP_TLS_ACME_DOMAINS"))
+	c.TLSACMEEmail = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_EMAIL"))
+	c.TLSACMEDirectory = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_DIRECTORY"))
+	c.TLSACMECacheDir = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_CACHE_DIR"))
+	c.TLSACMECARoots = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_CA_ROOTS"))
 	return c
 }
 

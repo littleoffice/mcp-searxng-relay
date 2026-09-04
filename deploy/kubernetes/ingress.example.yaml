@@ -1,0 +1,85 @@
+# Example Ingress that terminates TLS in front of the relay using cert-manager.
+#
+# This is the recommended way to expose the relay outside the cluster: the pod
+# keeps speaking plain HTTP (see the main README "Security notes"), and TLS is
+# terminated here with a certificate cert-manager obtains and renews for you.
+#
+# Like secret.example.yaml, this file is deliberately NOT listed in
+# kustomization.yaml — the host, the Ingress class, and the Issuer are
+# cluster-specific. Copy it to ingress.yaml, edit the marked fields, and apply
+# it (or fold it into your own kustomization). If you terminate TLS at a
+# gateway you already run (an external LB, a service mesh, Gateway API), you do
+# not need this file at all.
+#
+# Prerequisites:
+#   - cert-manager installed in the cluster
+#     (https://cert-manager.io/docs/installation/)
+#   - an Issuer or ClusterIssuer (a Let's Encrypt HTTP-01 ClusterIssuer example
+#     is at the bottom of this file, commented out)
+#   - an Ingress controller (nginx, Traefik, etc.) with a routable address
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mcp-searxng
+  labels:
+    app: mcp-searxng
+  annotations:
+    # Names the (Cluster)Issuer cert-manager should use to obtain the cert for
+    # the hosts in the tls block below. Use cert-manager.io/issuer instead if
+    # the Issuer is namespaced rather than cluster-wide.
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  # Set to your Ingress controller's class (e.g. "nginx", "traefik").
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        # CHANGE ME — the public hostname clients connect to.
+        - relay.example.com
+      # cert-manager writes the issued certificate into this Secret; the
+      # Ingress controller then serves it. The Secret is created for you — do
+      # not pre-create it.
+      secretName: mcp-searxng-tls
+  rules:
+    # CHANGE ME — must match the tls host above.
+    - host: relay.example.com
+      http:
+        paths:
+          # The relay serves the MCP endpoint at "/". The podman Caddy stack
+          # fronts it under a "/mcp" prefix instead; if you want the same
+          # layout here, set path: /mcp and pathType: Prefix, and make sure
+          # your controller strips the prefix (e.g. nginx
+          # rewrite-target) so the SDK still sees requests at "/".
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mcp-searxng
+                port:
+                  # Matches the Service port in service.yaml.
+                  number: 8080
+---
+# Example Let's Encrypt HTTP-01 ClusterIssuer referenced by the annotation
+# above. HTTP-01 solves the challenge through this same Ingress, so no extra
+# DNS wiring is needed. Uncomment, set a real contact email, and apply once.
+#
+# For a private ACME CA (e.g. the step-ca the podman Caddyfile uses), point
+# spec.acme.server at that CA's directory URL instead, and — if its TLS
+# certificate is not publicly trusted — give cert-manager its root via
+# spec.acme.caBundle. That is the cluster-side equivalent of the relay's own
+# MCP_TLS_ACME_DIRECTORY + MCP_TLS_ACME_CA_ROOTS.
+#
+# apiVersion: cert-manager.io/v1
+# kind: ClusterIssuer
+# metadata:
+#   name: letsencrypt-prod
+# spec:
+#   acme:
+#     server: https://acme-v02.api.letsencrypt.org/directory
+#     email: admin@example.com            # CHANGE ME
+#     privateKeySecretRef:
+#       name: letsencrypt-prod-account-key
+#     solvers:
+#       - http01:
+#           ingress:
+#             ingressClassName: nginx
