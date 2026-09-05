@@ -563,13 +563,469 @@
       ]
     },
     {
+      "id": 39,
+      "type": "row",
+      "title": "Security & guardrails",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 40,
+      "type": "timeseries",
+      "title": "SSRF-blocked dials by reason",
+      "description": "Fetch/redirect dials refused because the target resolved to a non-public address, by class. This is the egress boundary firing; a spike is an agent or attacker probing internal / cloud-metadata (IMDS) addresses. Per-IP detail stays in the debug log.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 10,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (reason) (rate(mcp_ssrf_blocked_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]))",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "timeseries",
+      "title": "Auth failures by endpoint",
+      "description": "401s at each gated surface (mcp / metrics / health). A spike is credential probing or a misconfigured scraper/prober \u2014 e.g. a scraper still getting 401 because MCP_METRICS_TOKEN is unset shows under endpoint=\"metrics\".",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 6,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "spanNulls": false,
+            "showPoints": "never",
+            "pointSize": 5,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisPlacement": "auto",
+            "axisLabel": "",
+            "scaleDistribution": {
+              "type": "linear"
+            }
+          },
+          "color": {
+            "mode": "palette-classic"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "text",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "mean",
+            "lastNotNull",
+            "max"
+          ],
+          "showLegend": true
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum by (endpoint) (rate(mcp_auth_failures_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval]))",
+          "instant": false,
+          "range": true,
+          "refId": "A",
+          "legendFormat": "{{endpoint}}"
+        }
+      ]
+    },
+    {
+      "id": 42,
+      "type": "stat",
+      "title": "SSRF blocks (range)",
+      "description": "Total non-public dials blocked over the selected range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 6,
+        "w": 3,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(mcp_ssrf_blocked_total{job=\"$job\", instance=\"$instance\"}[$__range]))",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 43,
+      "type": "stat",
+      "title": "Auth failures (range)",
+      "description": "Total 401s across all gated endpoints over the selected range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 6,
+        "w": 3,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(mcp_auth_failures_total{job=\"$job\", instance=\"$instance\"}[$__range]))",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 44,
+      "type": "stat",
+      "title": "Degraded searches (range)",
+      "description": "Searches that returned HTTP 200 but named unresponsive engines, over the selected range.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(mcp_search_degraded_total{job=\"$job\", instance=\"$instance\"}[$__range]))",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 45,
+      "type": "stat",
+      "title": "Degraded search ratio",
+      "description": "Degraded searches as a fraction of all searches. Not counted as errors \u2014 this is the answer-quality signal.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 10,
+        "w": 3,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.05
+              },
+              {
+                "color": "red",
+                "value": 0.2
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "decimals": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "orientation": "auto",
+        "textMode": "auto",
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${datasource}"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(mcp_search_degraded_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(mcp_searches_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])), 1)",
+          "instant": false,
+          "range": true,
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "id": 10,
       "type": "row",
       "title": "Throughput & sessions",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 14,
         "w": 24,
         "h": 1
       },
@@ -586,7 +1042,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 15,
         "w": 12,
         "h": 8
       },
@@ -707,7 +1163,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 6,
+        "y": 15,
         "w": 12,
         "h": 8
       },
@@ -788,7 +1244,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 23,
         "w": 24,
         "h": 1
       },
@@ -805,7 +1261,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -914,7 +1370,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 15,
+        "y": 24,
         "w": 12,
         "h": 8
       },
@@ -1019,7 +1475,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 32,
         "w": 24,
         "h": 1
       },
@@ -1036,7 +1492,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 24,
+        "y": 33,
         "w": 12,
         "h": 8
       },
@@ -1157,7 +1613,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 24,
+        "y": 33,
         "w": 12,
         "h": 8
       },
@@ -1278,7 +1734,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 41,
         "w": 12,
         "h": 8
       },
@@ -1359,7 +1815,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 32,
+        "y": 41,
         "w": 12,
         "h": 8
       },
@@ -1436,7 +1892,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 49,
         "w": 24,
         "h": 1
       },
@@ -1453,7 +1909,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 41,
+        "y": 50,
         "w": 6,
         "h": 8
       },
@@ -1524,7 +1980,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 41,
+        "y": 50,
         "w": 10,
         "h": 8
       },
@@ -1621,7 +2077,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 41,
+        "y": 50,
         "w": 8,
         "h": 8
       },
@@ -1702,7 +2158,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 49,
+        "y": 58,
         "w": 24,
         "h": 1
       },
@@ -1719,7 +2175,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 50,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -1792,7 +2248,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 50,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -1905,7 +2361,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 50,
+        "y": 59,
         "w": 8,
         "h": 8
       },
@@ -2018,7 +2474,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 58,
+        "y": 67,
         "w": 12,
         "h": 8
       },
@@ -2103,7 +2559,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 58,
+        "y": 67,
         "w": 6,
         "h": 8
       },
@@ -2182,7 +2638,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 58,
+        "y": 67,
         "w": 6,
         "h": 8
       },
@@ -2240,7 +2696,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 66,
+        "y": 75,
         "w": 24,
         "h": 1
       },
@@ -2257,7 +2713,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 67,
+        "y": 76,
         "w": 8,
         "h": 8
       },
@@ -2342,7 +2798,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 67,
+        "y": 76,
         "w": 8,
         "h": 8
       },
@@ -2439,7 +2895,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 67,
+        "y": 76,
         "w": 8,
         "h": 8
       },
@@ -2532,7 +2988,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 75,
+        "y": 84,
         "w": 24,
         "h": 1
       },
@@ -2549,7 +3005,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 76,
+        "y": 85,
         "w": 12,
         "h": 8
       },
@@ -2634,7 +3090,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 76,
+        "y": 85,
         "w": 12,
         "h": 8
       },

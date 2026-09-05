@@ -157,6 +157,12 @@ func NewServer(cfg Config) *Server {
 	s.history = newFetchHistoryCache(func() {
 		s.metrics.HistoryCallersEvicted.Add(1)
 	})
+	// Give the fetch ACL a handle on s.metrics so SSRF-blocked dials increment
+	// mcp_ssrf_blocked_total. Safe to set after the transport captured
+	// acl.safeDialContext / acl.safeCheckRedirect: those are method values on
+	// this same *fetchACL pointer, so they observe the field at dial time,
+	// which is always long after construction.
+	acl.metrics = &s.metrics
 	s.mcpServer = s.buildMCPServer()
 	return s
 }

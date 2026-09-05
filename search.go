@@ -305,6 +305,7 @@ func (s *Server) search(
 	// noisy but correct — the alternative is the silence that caused the
 	// misdiagnosis in the first place.
 	if failures := parseUnresponsiveEngines(searxResp.UnresponsiveEngines); len(failures) > 0 {
+		s.metrics.SearchDegraded.Add(1)
 		callerLogger(ctx).Warn("searxng search was degraded: some engines did not respond",
 			"unresponsive_engines", strings.Join(engineNames(failures), ","),
 			"unresponsive_count", len(failures),

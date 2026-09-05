@@ -25,6 +25,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/big"
@@ -111,6 +112,14 @@ type fetchACL struct {
 	// explicit port) to recognise a dial that is heading for the proxy.
 	proxyAuthority string
 	proxyAll       bool
+
+	// metrics, when non-nil, receives an mcp_ssrf_blocked_total increment
+	// each time a dial or redirect is refused for a non-public address. It is
+	// wired by NewServer after the Server (and its Metrics) exist; a fetchACL
+	// built directly in tests or via emptyFetchACL leaves it nil, and every
+	// counting call is nil-guarded, so the block still happens and only the
+	// metric is skipped.
+	metrics *Metrics
 }
 
 // allowedCIDR is one operator-allowed IP range together with the ports it is
@@ -585,6 +594,7 @@ func (a *fetchACL) safeDialContext(ctx context.Context, network, addr string) (n
 		a.warnHostPortNearMiss(host, port)
 		for _, ia := range addrs {
 			if err := a.assertReachable(ia.IP, port); err != nil {
+				a.countSSRFBlock(err)
 				return nil, err
 			}
 		}
@@ -631,6 +641,7 @@ func (a *fetchACL) safeCheckRedirect(req *http.Request, via []*http.Request) err
 	a.warnHostPortNearMiss(host, port)
 	for _, ia := range addrs {
 		if err := a.assertReachable(ia.IP, port); err != nil {
+			a.countSSRFBlock(err)
 			return fmt.Errorf("redirect blocked: %w", err)
 		}
 	}
@@ -723,7 +734,20 @@ func matchReservedCIDR(ip net.IP) *net.IPNet {
 	return nil
 }
 
-// assertPublicIP returns a generic error if ip is not a globally routable
+// blockedAddrError is the error assertPublicIP returns when an address is
+// refused. Its message is deliberately generic — the same "non-public address"
+// string callers have always seen, never the specific reason, which would let
+// an MCP caller probe internal network layout. The reason field is for internal
+// use only (the mcp_ssrf_blocked_total metric): it is one of the closed
+// ssrfBlockReasons label values, distinct from the richer kind written to the
+// debug log, and never travels back to the caller.
+type blockedAddrError struct {
+	reason string
+}
+
+func (e *blockedAddrError) Error() string { return "URL resolves to a non-public address" }
+
+// assertPublicIP returns a *blockedAddrError if ip is not a globally routable
 // address.  The check has two layers: stdlib predicates first (covering the
 // common cases concisely), then a hardcoded list of reserved CIDR blocks
 // that the predicates miss (CGNAT, TEST-NET, benchmark, NAT64, Teredo, 6to4,
@@ -731,31 +755,49 @@ func matchReservedCIDR(ip net.IP) *net.IPNet {
 // at debug level only — it must not appear in responses returned to MCP
 // callers, since that would let an attacker probe internal network layout.
 func assertPublicIP(ip net.IP) error {
-	var kind string
+	var kind, reason string
 	switch {
 	case ip.IsLoopback():
-		kind = "loopback"
+		kind, reason = "loopback", "loopback"
 	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
-		kind = "link-local"
+		kind, reason = "link-local", "link_local"
 	case ip.IsPrivate():
-		kind = "private"
+		kind, reason = "private", "private"
 	case ip.IsUnspecified():
-		kind = "unspecified"
+		kind, reason = "unspecified", "unspecified"
 	case ip.IsMulticast():
-		kind = "multicast"
+		kind, reason = "multicast", "multicast"
 	case !ip.IsGlobalUnicast():
 		// Catches IPv4 directed broadcast and any non-global-unicast that
 		// the stdlib distinguishes but does not expose under a named predicate.
-		kind = "non-global-unicast"
+		kind, reason = "non-global-unicast", "non_global_unicast"
 	default:
 		if n := matchReservedCIDR(ip); n != nil {
-			kind = "reserved (" + n.String() + ")"
+			// The matched CIDR goes to the log for the operator; the metric
+			// label collapses every reserved hit to "reserved" to keep the
+			// label set closed.
+			kind, reason = "reserved ("+n.String()+")", "reserved"
 			break
 		}
 		return nil
 	}
 	slog.Debug("SSRF: blocked non-public address", "ip", ip, "kind", kind)
-	return fmt.Errorf("URL resolves to a non-public address")
+	return &blockedAddrError{reason: reason}
+}
+
+// countSSRFBlock increments mcp_ssrf_blocked_total for a refusal returned by
+// assertReachable / assertPublicIP. It is a no-op when metrics are not wired
+// (tests, emptyFetchACL) or when err is not a *blockedAddrError — a resolve
+// failure or an invalid address is not an SSRF block and must not be counted
+// as one.
+func (a *fetchACL) countSSRFBlock(err error) {
+	if a.metrics == nil {
+		return
+	}
+	var be *blockedAddrError
+	if errors.As(err, &be) {
+		a.metrics.recordSSRFBlock(be.reason)
+	}
 }
 
 // ── Blast-radius reporting ───────────────────────────────────────────────────

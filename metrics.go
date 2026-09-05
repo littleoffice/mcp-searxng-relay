@@ -27,6 +27,51 @@ type domainStats struct {
 	failures  atomic.Int64
 }
 
+// ssrfBlockReasons is the fixed, closed set of label values for
+// mcp_ssrf_blocked_total{reason=...}. It is a hardcoded set — never derived
+// from caller-controlled input such as a hostname or IP — so the metric's
+// cardinality is bounded for the process lifetime. The values mirror the
+// address classes assertPublicIP distinguishes (ssrf.go); "reserved" collapses
+// every reserved-CIDR hit into one label rather than exposing the matched CIDR,
+// which would both leak internal layout and unbound the label set.
+var ssrfBlockReasons = [...]string{
+	"loopback",
+	"link_local",
+	"private",
+	"unspecified",
+	"multicast",
+	"non_global_unicast",
+	"reserved",
+}
+
+// ssrfReasonIndex maps a reason label to its slot in the SSRFBlocked array, or
+// -1 for an unknown value (which is then dropped rather than counted under a
+// bogus label).
+func ssrfReasonIndex(reason string) int {
+	for i, r := range ssrfBlockReasons {
+		if r == reason {
+			return i
+		}
+	}
+	return -1
+}
+
+// authFailureEndpoints is the fixed set of label values for
+// mcp_auth_failures_total{endpoint=...}: the three independently-gated HTTP
+// surfaces. Closed set, same cardinality rationale as ssrfBlockReasons.
+var authFailureEndpoints = [...]string{"mcp", "metrics", "health"}
+
+// authEndpointIndex maps an endpoint label to its slot in the AuthFailures
+// array, or -1 for an unknown value.
+func authEndpointIndex(endpoint string) int {
+	for i, e := range authFailureEndpoints {
+		if e == endpoint {
+			return i
+		}
+	}
+	return -1
+}
+
 // latencyBuckets are the upper bounds (seconds) for the duration histograms.
 // Coarse on purpose: these exist for alerting ("upstream is slow"), not for
 // profiling.  The top bucket sits at 30s to match the fetch client timeout —
@@ -180,6 +225,47 @@ type Metrics struct {
 	// exists for dashboards and alerting where unbounded cardinality
 	// would be worse than aggregated visibility.
 	RateLimitRejections atomic.Int64
+
+	// ── guardrails ─────────────────────────────────────────────────────────
+	// These three count events the relay already logs but never metered,
+	// each a signal about a boundary the server exists to hold rather than
+	// about ordinary tool traffic.
+	//
+	// SSRFBlocked counts fetch/redirect dials refused because the target
+	// resolved to a non-public address, sliced by reason class
+	// (ssrfBlockReasons). This is the egress boundary — the headline reason
+	// the relay dials destinations itself — made visible; the per-address
+	// detail stays in the debug log (see assertPublicIP).
+	SSRFBlocked [len(ssrfBlockReasons)]atomic.Int64
+
+	// AuthFailures counts HTTP requests rejected with 401 at each gated
+	// surface (authFailureEndpoints). A spike is credential probing or a
+	// misconfigured scraper/prober; the offending remote is in the WARN log,
+	// so no per-remote label here.
+	AuthFailures [len(authFailureEndpoints)]atomic.Int64
+
+	// SearchDegraded counts searxng_web_search calls that returned HTTP 200
+	// but named unresponsive engines. These are NOT errors — SearchErrors
+	// does not see them — yet the agent answered from a thinner result set,
+	// so the rate is the signal that answer quality is eroding upstream.
+	SearchDegraded atomic.Int64
+}
+
+// recordSSRFBlock bumps the SSRF-blocked counter for the given reason class.
+// An unrecognised reason is dropped rather than counted, so a future address
+// class added to assertPublicIP without a matching label here cannot mint a
+// bogus series.
+func (m *Metrics) recordSSRFBlock(reason string) {
+	if i := ssrfReasonIndex(reason); i >= 0 {
+		m.SSRFBlocked[i].Add(1)
+	}
+}
+
+// recordAuthFailure bumps the 401 counter for the given endpoint.
+func (m *Metrics) recordAuthFailure(endpoint string) {
+	if i := authEndpointIndex(endpoint); i >= 0 {
+		m.AuthFailures[i].Add(1)
+	}
 }
 
 // recordFetchByDomain bumps the per-domain success or failure counter for the
@@ -349,6 +435,26 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Rate limiting
 	writeCounter("mcp_rate_limit_rejections_total",
 		"Total number of HTTP requests rejected by the per-caller rate limiter.", &m.RateLimitRejections)
+
+	// Guardrails: SSRF-blocked dials by reason class.
+	_, _ = fmt.Fprintf(w, "# HELP mcp_ssrf_blocked_total Total fetch/redirect dials refused because the target resolved to a non-public address, by reason class.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_ssrf_blocked_total counter\n")
+	for i, reason := range ssrfBlockReasons {
+		_, _ = fmt.Fprintf(w, "mcp_ssrf_blocked_total{reason=\"%s\"} %d\n", reason, m.SSRFBlocked[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
+
+	// Guardrails: 401s by gated surface.
+	_, _ = fmt.Fprintf(w, "# HELP mcp_auth_failures_total Total HTTP requests rejected with 401 at each gated endpoint.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_auth_failures_total counter\n")
+	for i, endpoint := range authFailureEndpoints {
+		_, _ = fmt.Fprintf(w, "mcp_auth_failures_total{endpoint=\"%s\"} %d\n", endpoint, m.AuthFailures[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
+
+	// Guardrails: degraded searches (HTTP 200 with unresponsive engines).
+	writeCounter("mcp_search_degraded_total",
+		"Total number of searxng_web_search calls that returned results but named unresponsive engines.", &m.SearchDegraded)
 
 	// Latency histograms
 	m.SearchDuration.write(w, "mcp_search_duration_seconds",

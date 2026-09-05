@@ -49,6 +49,7 @@ that readable rather than smearing several relays together.
 | Row | What it answers |
 |---|---|
 | **Overview** | Rates, overall error ratio, cache hit ratio, fetch p99, active sessions, rate-limit rejections — the instance at a glance. |
+| **Security & guardrails** | SSRF-blocked dials by reason (the egress boundary firing — an IMDS/internal-address probe spikes here), auth failures (401s) by endpoint, and degraded-search rate/ratio. These meter events the relay only logged before; a spike is the first thing to look at. |
 | **Throughput & sessions** | Per-tool call rate; live session count over time. |
 | **Errors** | Absolute error rate and error-as-fraction-of-calls, per tool. |
 | **Latency** | p50/p90/p99 + mean for search and fetch, plus full-distribution heatmaps. The fetch top bucket matches the 30s client timeout, so `+Inf` is timeout-adjacent. |
