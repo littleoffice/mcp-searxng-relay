@@ -340,12 +340,33 @@ func logGetCertificate(inner func(*tls.ClientHelloInfo) (*tls.Certificate, error
 			"sni", hello.ServerName, "challenge", challenge, "remote", remote)
 		cert, err := inner(hello)
 		if err != nil {
-			slog.Warn("acme: no certificate served for handshake",
-				"sni", hello.ServerName, "challenge", challenge, "remote", remote, "error", err)
+			// A handshake for a hostname outside MCP_TLS_ACME_DOMAINS is
+			// routine, not a fault: scanners, health probes, or clients
+			// reaching a shared :443 for a name this relay does not serve. It
+			// can arrive many times a second, so it is logged at debug — only
+			// a failure to serve/obtain a certificate for an *allow-listed*
+			// host is worth a warning.
+			if isHostNotWhitelisted(err) {
+				slog.Debug("acme: handshake for non-allow-listed host rejected",
+					"sni", hello.ServerName, "remote", remote, "error", err)
+			} else {
+				slog.Warn("acme: no certificate served for handshake",
+					"sni", hello.ServerName, "challenge", challenge, "remote", remote, "error", err)
+			}
 			return nil, err
 		}
 		return cert, nil
 	}
+}
+
+// isHostNotWhitelisted reports whether err is autocert's rejection of a
+// handshake whose SNI is not in the HostWhitelist. autocert returns this as an
+// unexported, untyped error, so it is matched by message — kept in one place so
+// the brittleness is contained. Used only to pick a log level, never to change
+// behaviour, so a message change upstream degrades gracefully (the handshake is
+// still rejected; it would just log at warn again).
+func isHostNotWhitelisted(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not configured in HostWhitelist")
 }
 
 // logStartup records the effective TLS configuration once at boot. The banner

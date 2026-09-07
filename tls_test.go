@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -9,12 +10,15 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"io"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -215,6 +219,51 @@ func TestNewTLSSettings_ACMEWarmupState(t *testing.T) {
 	manual.logStartup()                                // no-op, must not panic
 	manual.warmACME(context.Background())              // no-op, must not panic
 	(*tlsSettings)(nil).warmACME(context.Background()) // nil-safe
+}
+
+// ── log-level classification (spam control) ───────────────────────────────────
+
+// A handshake for a hostname outside the allow-list is routine and must be
+// recognized so it can be logged at debug rather than warn — otherwise a client
+// hammering a shared :443 floods the log.
+func TestIsHostNotWhitelisted(t *testing.T) {
+	whitelistMiss := errors.New(`acme/autocert: host "searxng.domain.tld" not configured in HostWhitelist`)
+	if !isHostNotWhitelisted(whitelistMiss) {
+		t.Error("autocert HostWhitelist rejection should be recognized")
+	}
+	if isHostNotWhitelisted(errors.New("some other acme failure")) {
+		t.Error("an unrelated error must not be classified as a whitelist miss")
+	}
+	if isHostNotWhitelisted(nil) {
+		t.Error("nil must not be classified as a whitelist miss")
+	}
+}
+
+// http.Server error-log lines for failed TLS handshakes are client-driven noise
+// and go to debug; every other server error stays at warn.
+func TestServerErrorWriter_Levels(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	defer slog.SetDefault(prev)
+
+	w := serverErrorWriter{}
+	_, _ = w.Write([]byte("http: TLS handshake error from 10.89.5.2:40606: acme/autocert: host \"x\" not configured in HostWhitelist\n"))
+	_, _ = w.Write([]byte("http: Accept error: too many open files\n"))
+
+	out := buf.String()
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		switch {
+		case strings.Contains(line, "TLS handshake error"):
+			if !strings.Contains(line, `"level":"DEBUG"`) {
+				t.Errorf("TLS handshake error must log at debug, got: %s", line)
+			}
+		case strings.Contains(line, "Accept error"):
+			if !strings.Contains(line, `"level":"WARN"`) {
+				t.Errorf("non-handshake server error must log at warn, got: %s", line)
+			}
+		}
+	}
 }
 
 // ── certReloader: hot reload ──────────────────────────────────────────────────

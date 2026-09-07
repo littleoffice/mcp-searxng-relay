@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -336,6 +337,21 @@ func acmeConfiguredEnv() bool {
 	return false
 }
 
+// serverErrorWriter adapts http.Server.ErrorLog to slog. A failed TLS
+// handshake is client-driven and, on a shared :443, routine and often
+// high-frequency, so it is logged at debug; every other server error is a warn.
+type serverErrorWriter struct{}
+
+func (serverErrorWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n")
+	if strings.Contains(msg, "TLS handshake error") {
+		slog.Debug("http server", "msg", msg)
+	} else {
+		slog.Warn("http server", "msg", msg)
+	}
+	return len(p), nil
+}
+
 // healthProbeInsecure reports whether the --healthcheck TLS probe should skip
 // certificate verification. It defaults to false — verification stays on unless
 // an operator explicitly opts out — for deployments whose serving certificate
@@ -457,12 +473,14 @@ func runHTTP(cfg Config, server *Server, port string) {
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
-	// Route the http.Server's own error log through slog, so TLS handshake
-	// failures (which net/http otherwise writes to the standard logger, i.e.
-	// unstructured stderr that bypasses LOG_FORMAT/LOG_LEVEL) land in the
-	// structured log like everything else. This is where a rejected SNI or a
-	// failed ACME challenge from a real client shows up.
-	srv.ErrorLog = slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)
+	// Route the http.Server's own error log through slog, so its messages land
+	// in the structured log (with LOG_FORMAT/LOG_LEVEL) instead of net/http's
+	// default unstructured stderr. Failed TLS handshakes are client-driven and,
+	// on a shared :443, routine and high-frequency (scanners, probes, clients
+	// asking for a name this relay does not serve), so they go to debug; every
+	// other server error stays at warn. ACME certificate decisions are already
+	// logged with structure by logGetCertificate.
+	srv.ErrorLog = log.New(serverErrorWriter{}, "", 0)
 	// When in-process TLS is configured, its tls.Config carries the
 	// GetCertificate hook (manual cert reloader or the ACME manager), so the
 	// cert/key arguments to ListenAndServeTLS are left empty below.
