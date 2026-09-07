@@ -822,6 +822,8 @@ level=WARN msg="searxng search was degraded: some engines did not respond"
 
 Engines break — upstream markup changes, an API is deprecated, a captcha wall goes up — and SearXNG suspends them and carries on. Without this line the degradation is invisible all the way up the stack: fewer results reach the agent, its answers get worse, and nothing anywhere says why. Deployments with many engines configured will see intermittent entries as engines cycle through suspension; that is noise worth having, because the alternative is silence.
 
+The same event increments `mcp_searches_degraded_total` and `mcp_searxng_engine_errors_total{engine="…"}` (see [Metrics](#metrics)): the log line is how you diagnose one incident, the counters are how you find out there is one — a WARN nobody greps is not monitoring.
+
 The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
 
 ---
@@ -863,6 +865,10 @@ The exposed series are:
 | `mcp_cache_misses_total` | — | Requests that fell through to a network fetch |
 | `mcp_cache_force_refresh_total` | — | Requests with `force_refresh=true` |
 | `mcp_rate_limit_rejections_total` | — | HTTP requests rejected by the per-caller rate limiter (429 responses). Rejection details — identity, remote, retry — are in the structured WARN log; no per-identity label here by design |
+| `mcp_ssrf_blocked_total` | `reason=loopback\|link_local\|private\|unspecified\|multicast\|non_global_unicast\|reserved` | Fetch/redirect dials refused because the target resolved to a non-public address, by class. This is the egress boundary made visible; a spike is an agent (or attacker) probing internal/cloud-metadata addresses. The matched reserved CIDR and the offending IP stay in the debug log, never in this label or in any caller response |
+| `mcp_auth_failures_total` | `endpoint=mcp\|metrics\|health` | HTTP requests rejected with `401` at each gated surface. A spike is credential probing or a misconfigured scraper/prober (e.g. a scraper still getting `401` because `MCP_METRICS_TOKEN` is unset — the closed-endpoint case counts under `endpoint="metrics"`). The offending remote is in the WARN log; no per-remote label here |
+| `mcp_searches_degraded_total` | — | `searxng_web_search` calls that returned HTTP 200 but named unresponsive engines. **Read as a ratio against `mcp_searches_total`** — the single number that says whether backend flakiness is background noise or the thing making your agents' answers worse. **Not** an error, so `mcp_search_errors_total` deliberately does not see them |
+| `mcp_searxng_engine_errors_total` | `engine=<name>` | Failures per SearXNG backend, from the upstream `unresponsive_engines` field. Answers *which* engine once the ratio above says there is a problem. Bounded to 256 distinct names; the remainder aggregates under `engine="__overflow__"` |
 | `mcp_active_sessions` | — | Gauge: current live MCP sessions (stateful mode only) |
 | `mcp_search_duration_seconds` | `le` | Histogram: SearXNG search round-trip latency. Buckets from 50ms to 30s |
 | `mcp_fetch_duration_seconds` | `le` | Histogram: URL fetch pipeline latency (dial through extraction), observed for both `searxng_read_url` and `searxng_url_metadata`. Includes cache hits, which land in the lowest bucket — alert on upper quantiles (e.g. `histogram_quantile(0.99, ...)`) and read the p50 alongside `mcp_cache_hits_total`. The top bucket matches the 30s fetch client timeout, so `+Inf` observations are timeout-adjacent requests |

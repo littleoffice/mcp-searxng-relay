@@ -215,6 +215,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 			identity, ok := s.config.AuthTokens[got]
 			if !ok {
+				s.metrics.recordAuthFailure("mcp")
 				slog.Warn("unauthorized request",
 					"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 				w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
@@ -238,12 +239,19 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 // short-circuit on the first differing byte) and never logs the offered
 // header. On failure it returns 401 with a WWW-Authenticate challenge naming
 // realm, and a warn line carrying logMsg and the remote address.
+//
+// realm doubles as the mcp_auth_failures_total endpoint label — it is always
+// "health" or "metrics" here, both of which are authFailureEndpoints values —
+// so a rejection bumps that counter when m is non-nil.
 func requireSharedSecret(
-	tokens map[tokenDigest]struct{}, realm, logMsg string, next http.Handler,
+	tokens map[tokenDigest]struct{}, realm, logMsg string, m *Metrics, next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		if _, ok := tokens[got]; !ok {
+			if m != nil {
+				m.recordAuthFailure(realm)
+			}
 			slog.Warn(logMsg, "remote", r.RemoteAddr)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm+`"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -267,7 +275,7 @@ func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
 	if len(s.config.HealthToken) == 0 {
 		return next
 	}
-	return requireSharedSecret(s.config.HealthToken, "health", "unauthorized health request", next)
+	return requireSharedSecret(s.config.HealthToken, "health", "unauthorized health request", &s.metrics, next)
 }
 
 // requireMetricsAuth is the /metrics-dedicated auth check.  MCP_METRICS_TOKEN
@@ -303,6 +311,7 @@ func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
 func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
 	if len(s.config.MetricsToken) == 0 {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.metrics.recordAuthFailure("metrics")
 			slog.Warn("metrics request rejected: MCP_METRICS_TOKEN is not configured",
 				"remote", r.RemoteAddr,
 				"hint", "set MCP_METRICS_TOKEN to a value from `openssl rand -hex 32` and give it to your scraper")
@@ -310,7 +319,7 @@ func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 		})
 	}
-	return requireSharedSecret(s.config.MetricsToken, "metrics", "unauthorized metrics request", next)
+	return requireSharedSecret(s.config.MetricsToken, "metrics", "unauthorized metrics request", &s.metrics, next)
 }
 
 // limitSessions rejects new initialize requests when the session cap is
