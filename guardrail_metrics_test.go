@@ -1,21 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-// These cover the three guardrail counters added alongside the tool-usage
-// metrics: mcp_ssrf_blocked_total, mcp_auth_failures_total and
-// mcp_search_degraded_total. Each meters an event the relay already logged but
-// never counted, so the dashboard can show the security boundary and answer
-// quality — not just traffic.
+// These cover the guardrail counters added alongside the tool-usage metrics:
+// mcp_ssrf_blocked_total and mcp_auth_failures_total. Each meters an event the
+// relay already logged but never counted, so the dashboard can show the
+// security boundary — not just traffic. The degraded-search and per-engine
+// health counters are covered in engine_health_test.go.
 
 func ssrfCount(m *Metrics, reason string) int64 {
 	i := ssrfReasonIndex(reason)
@@ -172,57 +170,10 @@ func TestAuthFailures_MetricsClosedBranchCounted(t *testing.T) {
 	}
 }
 
-// A degraded search (HTTP 200 with unresponsive engines) increments
-// mcp_search_degraded_total once. It is not an error, so SearchErrors must stay
-// zero — the whole reason this counter exists.
-func TestSearchDegraded_IncrementsCounter(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://example.com","content":"C"}],
-		                        "unresponsive_engines":` + searxUnresponsiveWire + `}`))
-	}))
-	defer srv.Close()
-
-	s := &Server{config: Config{SearxngURL: srv.URL}, client: srv.Client()}
-
-	// Silence the WARN line this path emits so it doesn't clutter test output.
-	old := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
-	_, err := s.search(context.Background(), "q", 1, "", "all", "", 0, "")
-	slog.SetDefault(old)
-	if err != nil {
-		t.Fatalf("a degraded search is still successful: %v", err)
-	}
-
-	if got := s.metrics.SearchDegraded.Load(); got != 1 {
-		t.Errorf("mcp_search_degraded_total = %d, want 1", got)
-	}
-	if got := s.metrics.SearchErrors.Load(); got != 0 {
-		t.Errorf("a degraded search must not be counted as an error; SearchErrors = %d, want 0", got)
-	}
-}
-
-// A healthy search leaves the degraded counter at zero.
-func TestSearchDegraded_HealthyDoesNotIncrement(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"results":[{"title":"T","url":"https://example.com","content":"C"}],
-		                        "unresponsive_engines":[]}`))
-	}))
-	defer srv.Close()
-
-	s := &Server{config: Config{SearxngURL: srv.URL}, client: srv.Client()}
-	if _, err := s.search(context.Background(), "q", 1, "", "all", "", 0, ""); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if got := s.metrics.SearchDegraded.Load(); got != 0 {
-		t.Errorf("healthy search: mcp_search_degraded_total = %d, want 0", got)
-	}
-}
-
-// The exposition must carry all three series with the right TYPE line, every
-// fixed label value present (including the zero ones — a scraper needs the
-// series to exist before the first event), and the driven values.
+// The exposition must carry both guardrail series with the right TYPE line,
+// every fixed label value present (including the zero ones — a scraper needs
+// the series to exist before the first event), and the driven values. The
+// degraded-search and per-engine series are asserted in engine_health_test.go.
 func TestServeMetrics_ExposesGuardrailSeries(t *testing.T) {
 	s := NewServer(Config{CacheMaxEntries: 1})
 	s.metrics.recordSSRFBlock("loopback")
@@ -230,7 +181,6 @@ func TestServeMetrics_ExposesGuardrailSeries(t *testing.T) {
 	s.metrics.recordSSRFBlock("private")
 	s.metrics.recordAuthFailure("mcp")
 	s.metrics.recordAuthFailure("metrics")
-	s.metrics.SearchDegraded.Add(3)
 
 	rec := httptest.NewRecorder()
 	s.ServeMetrics(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -245,8 +195,6 @@ func TestServeMetrics_ExposesGuardrailSeries(t *testing.T) {
 		`mcp_auth_failures_total{endpoint="mcp"} 1` + "\n",
 		`mcp_auth_failures_total{endpoint="metrics"} 1` + "\n",
 		`mcp_auth_failures_total{endpoint="health"} 0` + "\n",
-		"# TYPE mcp_search_degraded_total counter\n",
-		"mcp_search_degraded_total 3\n",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("exposition missing %q in:\n%s", want, body)

@@ -940,7 +940,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(increase(mcp_search_degraded_total{job=\"$job\", instance=\"$instance\"}[$__range]))",
+          "expr": "sum(increase(mcp_searches_degraded_total{job=\"$job\", instance=\"$instance\"}[$__range]))",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -1011,7 +1011,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(mcp_search_degraded_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(mcp_searches_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])), 1)",
+          "expr": "sum(rate(mcp_searches_degraded_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(mcp_searches_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])), 1)",
           "instant": false,
           "range": true,
           "refId": "A"
