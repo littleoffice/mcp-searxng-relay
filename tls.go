@@ -390,9 +390,16 @@ func (t *tlsSettings) warmACME(ctx context.Context) {
 		slog.Info("acme: requesting certificate", "host", host, "directory", t.acmeDirectory)
 		start := time.Now()
 		if _, err := t.acmeManager.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err != nil {
+			// The most common failure is the CA being unable to reach back for
+			// the challenge. TLS-ALPN-01 is validated by the CA connecting to
+			// the host on tcp/443 (fixed by RFC 8737, regardless of the port
+			// the relay listens on), so surface that requirement here — an
+			// "acme:error:connection / could not connect to validation target"
+			// almost always means <host>:443 is not reachable from the CA.
 			slog.Warn("acme: certificate request failed",
 				"host", host, "directory", t.acmeDirectory,
-				"elapsed", time.Since(start).Round(time.Millisecond).String(), "error", err)
+				"elapsed", time.Since(start).Round(time.Millisecond).String(), "error", err,
+				"hint", "the CA must reach "+host+" on tcp/443 to validate the TLS-ALPN-01 challenge (check DNS, port-443 routing, and firewall)")
 			continue
 		}
 		slog.Info("acme: certificate ready",
