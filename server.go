@@ -157,6 +157,12 @@ func NewServer(cfg Config) *Server {
 	s.history = newFetchHistoryCache(func() {
 		s.metrics.HistoryCallersEvicted.Add(1)
 	})
+	// Give the fetch ACL a handle on s.metrics so SSRF-blocked dials increment
+	// mcp_ssrf_blocked_total. Safe to set after the transport captured
+	// acl.safeDialContext / acl.safeCheckRedirect: those are method values on
+	// this same *fetchACL pointer, so they observe the field at dial time,
+	// which is always long after construction.
+	acl.metrics = &s.metrics
 	s.mcpServer = s.buildMCPServer()
 	return s
 }
@@ -409,7 +415,17 @@ func (s *Server) newSearxRequest(method, url string, body io.Reader) (*http.Requ
 // The SDK does not expose a counter directly; we iterate the live session
 // set. This is O(n) but called rarely (on /metrics scrape and on each
 // initialize for the soft session cap), and n is bounded by maxSessions.
+//
+// Returns 0 when mcpServer is nil, which is the shape a Server constructed
+// directly in a test takes. Every other optional collaborator on Server is
+// already nil-safe for exactly that reason — history, rateLimiter and
+// FetchACL all say so in their own comments — and this one silently was not,
+// so calling ServeMetrics on such a Server panicked rather than reporting
+// zero sessions.
 func (s *Server) sessionCount() int {
+	if s.mcpServer == nil {
+		return 0
+	}
 	n := 0
 	for range s.mcpServer.Sessions() {
 		n++
