@@ -41,6 +41,7 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
 | `deployment.yaml` | Deployment with `securityContext`, split TCP/HTTP probes, resource requests/limits |
 | `service.yaml` | ClusterIP service on port 8080 |
 | `secret.example.yaml` | Template for the auth-token Secret. Not in `kustomization.yaml`; create your own |
+| `ingress.example.yaml` | Template Ingress that terminates TLS via cert-manager. Not in `kustomization.yaml`; copy and edit |
 | `kustomization.yaml` | Entry point for `kubectl apply -k .` |
 
 ## Deployment shapes
@@ -94,9 +95,16 @@ To rotate:
 
 If you can't tolerate the in-flight session loss of a rolling restart, switch to the multi-replica-stateless shape above; that combination handles secret rotation with no client-visible blip.
 
+## TLS
+
+Two supported shapes:
+
+- **Terminate at an Ingress (recommended).** The pod stays on plain HTTP and cert-manager obtains/renews the certificate. `ingress.example.yaml` is a ready-to-edit template with the `cert-manager.io/cluster-issuer` annotation, a `tls:` block, and a commented Let's Encrypt `ClusterIssuer` (point it at a private ACME CA — e.g. step-ca — by changing `spec.acme.server` and, if its cert is not publicly trusted, `spec.acme.caBundle`). It is not in `kustomization.yaml`; copy it to `ingress.yaml`, edit the host/class, and apply.
+
+- **In-pod TLS.** If you run the relay by itself with no Ingress, it can serve HTTPS directly via the `MCP_TLS_*` variables (see the main README "TLS" section). `deployment.yaml` carries commented entries for both the manual-cert and ACME modes, plus the `443` port, the cert Secret mount, and the writable `emptyDir` ACME cache (which keeps `readOnlyRootFilesystem: true`). For manual certs, a cert-manager `Certificate` resource writing to a Secret pairs well — the relay hot-reloads the pair on renewal without a restart.
+
 ## Things deliberately omitted
 
-- **Ingress.** Different clusters use different controllers; pick yours and add an Ingress pointing at `mcp-searxng:8080`. **Terminate TLS at the Ingress** — the MCP server itself speaks plain HTTP and the README's security notes are explicit about this.
 - **NetworkPolicy.** Strongly recommended in production: egress should be restricted to DNS + your SearXNG Service + the public internet (the URL-fetch tool needs that). The exact syntax depends on your CNI plugin, so providing a one-size policy would be wrong.
 - **HorizontalPodAutoscaler.** Only useful in stateless mode (HPA on a stateful service breaks session affinity). If you've adopted stateless multi-replica and have load to justify it, add one targeting CPU at ~70%.
 - **PodDisruptionBudget.** Worth adding (`minAvailable: 1`) once you have 2+ replicas and use voluntary disruption controls (cluster autoscaler, node drains).
