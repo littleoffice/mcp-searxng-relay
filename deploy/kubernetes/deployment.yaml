@@ -97,17 +97,16 @@ spec:
             # - name: MCP_TLS_KEY
             #   value: /etc/mcp-tls/tls.key
             #
-            # Or automatic certificates via ACME (needs the writable
-            # acme-cache volume below; for a private CA also set
-            # MCP_TLS_ACME_DIRECTORY and MCP_TLS_ACME_CA_ROOTS):
-            # - name: MCP_TLS_ACME
-            #   value: "true"
+            # Or automatic certificates via ACME. There is no on/off flag:
+            # setting MCP_TLS_ACME_DOMAINS turns ACME on. Needs the writable
+            # acme-cache volume below (MCP_TLS_ACME_CACHE_DIR defaults to
+            # /var/cache/mcp-acme). For a private CA, add its root to the
+            # container trust store (or set MCP_TLS_ACME_DIRECTORY +
+            # MCP_TLS_ACME_CA_ROOTS to confine that trust to the ACME client):
             # - name: MCP_TLS_ACME_DOMAINS
             #   value: relay.example.com
-            # - name: MCP_TLS_ACME_EMAIL
+            # - name: MCP_TLS_ACME_EMAIL   # optional; a valid bare address or unset
             #   value: admin@example.com
-            # - name: MCP_TLS_ACME_CACHE_DIR
-            #   value: /var/cache/mcp-acme
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -117,8 +116,9 @@ spec:
             - name: auth
               mountPath: /etc/mcp-auth
               readOnly: true
-            # Writable ACME cache for in-pod MCP_TLS_ACME (keeps
-            # readOnlyRootFilesystem: true). Not needed for manual-cert TLS.
+            # Writable ACME cache for in-pod ACME (keeps
+            # readOnlyRootFilesystem: true). Mounts at the default
+            # MCP_TLS_ACME_CACHE_DIR. Not needed for manual-cert TLS.
             # - name: acme-cache
             #   mountPath: /var/cache/mcp-acme
             # Manual-cert TLS mounts the cert Secret here (see MCP_TLS_CERT):
@@ -173,7 +173,7 @@ spec:
             # token file.
             defaultMode: 0400
         # Writable scratch volume for the ACME cert cache when using in-pod
-        # MCP_TLS_ACME (paired with the acme-cache volumeMount above). emptyDir
+        # ACME (paired with the acme-cache volumeMount above). emptyDir
         # is per-pod and does not survive rescheduling, so certs re-issue on a
         # fresh node — fine for low replica counts; use a PVC if you must avoid
         # re-issuing against a rate-limited CA.

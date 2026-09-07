@@ -122,14 +122,15 @@ type Config struct {
 	// used for FetchACL and the fence key. All empty/false by default, which
 	// keeps the historical plain-HTTP behaviour (TLS terminated by whatever
 	// fronts the relay). See tls.go for the two modes and the rationale.
+	// ACME has no on/off flag: setting any MCP_TLS_ACME_* value below turns it
+	// on, and MCP_TLS_ACME_DOMAINS is then required (see newTLSSettings).
 	TLSCertFile      string       // MCP_TLS_CERT: PEM certificate path (manual TLS)
 	TLSKeyFile       string       // MCP_TLS_KEY: PEM private-key path (manual TLS)
-	TLSACME          bool         // MCP_TLS_ACME: obtain certificates automatically via ACME
-	TLSACMEDomains   []string     // MCP_TLS_ACME_DOMAINS: hostnames the certificate may cover
-	TLSACMEEmail     string       // MCP_TLS_ACME_EMAIL: ACME account contact address
+	TLSACMEDomains   []string     // MCP_TLS_ACME_DOMAINS: hostnames the certificate may cover (required for ACME)
+	TLSACMEEmail     string       // MCP_TLS_ACME_EMAIL: ACME account contact address (optional; validated if set)
 	TLSACMEDirectory string       // MCP_TLS_ACME_DIRECTORY: ACME directory URL (default: Let's Encrypt)
-	TLSACMECacheDir  string       // MCP_TLS_ACME_CACHE_DIR: writable dir for issued-cert persistence
-	TLSACMECARoots   string       // MCP_TLS_ACME_CA_ROOTS: PEM roots the ACME client trusts (private CA)
+	TLSACMECacheDir  string       // MCP_TLS_ACME_CACHE_DIR: writable dir for issued-cert persistence (default: /var/cache/mcp-acme)
+	TLSACMECARoots   string       // MCP_TLS_ACME_CA_ROOTS: optional PEM roots confining private-CA trust to the ACME client
 	TLS              *tlsSettings // compiled form; nil until main() validates, and nil means plain HTTP
 }
 
@@ -307,10 +308,10 @@ func configFromEnv() Config {
 	// mutually-exclusive manual-vs-ACME decision happen in main() via
 	// newTLSSettings, so a half-configured or conflicting setup fails startup
 	// with a clear message instead of silently serving plain HTTP. Leaving all
-	// of these unset keeps the plain-HTTP default.
+	// of these unset keeps the plain-HTTP default; ACME turns on when any
+	// MCP_TLS_ACME_* value is set (there is no separate on/off flag).
 	c.TLSCertFile = strings.TrimSpace(os.Getenv("MCP_TLS_CERT"))
 	c.TLSKeyFile = strings.TrimSpace(os.Getenv("MCP_TLS_KEY"))
-	c.TLSACME = parseBool(os.Getenv("MCP_TLS_ACME"))
 	c.TLSACMEDomains = parseCSV(os.Getenv("MCP_TLS_ACME_DOMAINS"))
 	c.TLSACMEEmail = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_EMAIL"))
 	c.TLSACMEDirectory = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_DIRECTORY"))

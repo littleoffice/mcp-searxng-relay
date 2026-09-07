@@ -295,11 +295,30 @@ func runHealthCheck() {
 
 // healthProbeUsesTLS reports whether the --healthcheck probe should use HTTPS,
 // i.e. whether in-process TLS is configured. It reads the same env vars
-// newTLSSettings does (checking for a manual cert or ACME being enabled)
-// rather than the compiled config, because the probe runs as its own process
-// and never builds a full Config.
+// newTLSSettings does (a manual cert, or any MCP_TLS_ACME_* variable) rather
+// than the compiled config, because the probe runs as its own process and
+// never builds a full Config.
 func healthProbeUsesTLS() bool {
-	return strings.TrimSpace(os.Getenv("MCP_TLS_CERT")) != "" || parseBool(os.Getenv("MCP_TLS_ACME"))
+	return strings.TrimSpace(os.Getenv("MCP_TLS_CERT")) != "" || acmeConfiguredEnv()
+}
+
+// acmeConfiguredEnv mirrors acmeConfigured for the --healthcheck path, which
+// runs before configFromEnv and so reads the environment directly. Any
+// MCP_TLS_ACME_* variable being set means ACME is on. Keep this list in sync
+// with acmeConfigured / configFromEnv.
+func acmeConfiguredEnv() bool {
+	for _, v := range []string{
+		"MCP_TLS_ACME_DOMAINS",
+		"MCP_TLS_ACME_EMAIL",
+		"MCP_TLS_ACME_DIRECTORY",
+		"MCP_TLS_ACME_CACHE_DIR",
+		"MCP_TLS_ACME_CA_ROOTS",
+	} {
+		if strings.TrimSpace(os.Getenv(v)) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // healthProbeInsecure reports whether the --healthcheck TLS probe should skip
@@ -346,7 +365,7 @@ func runHTTP(cfg Config, server *Server, port string) {
 	// the SearXNG basic-auth-over-http warning above.
 	if !cfg.TLS.enabled() {
 		slog.Warn("MCP endpoint is serving plain HTTP; bearer tokens depend on an external TLS terminator",
-			"hint", "expected when a reverse proxy or Ingress terminates TLS (Caddy, nginx, cert-manager); otherwise set MCP_TLS_CERT+MCP_TLS_KEY or MCP_TLS_ACME to serve HTTPS directly")
+			"hint", "expected when a reverse proxy or Ingress terminates TLS (Caddy, nginx, cert-manager); otherwise set MCP_TLS_CERT+MCP_TLS_KEY or MCP_TLS_ACME_DOMAINS to serve HTTPS directly")
 	}
 
 	logConfig(server, "streamable-http", port)

@@ -9,18 +9,27 @@
 //     The pair is hot-reloaded on file change, so a cert-manager / certbot
 //     renewal is picked up without a restart.
 //
-//   - ACME: MCP_TLS_ACME turns on automatic certificates via
-//     golang.org/x/crypto/acme/autocert. MCP_TLS_ACME_DIRECTORY selects the
-//     CA (default: Let's Encrypt production); a private ACME CA — e.g. the
+//   - ACME: automatic certificates via golang.org/x/crypto/acme/autocert.
+//     There is no on/off flag — setting any MCP_TLS_ACME_* variable turns
+//     ACME on, and MCP_TLS_ACME_DOMAINS (the hostnames to certify) is then
+//     required, so a half-configured ACME setup fails loudly rather than
+//     silently serving plain HTTP. MCP_TLS_ACME_DIRECTORY selects the CA
+//     (default: Let's Encrypt production); a private ACME CA — e.g. the
 //     step-ca the podman Caddyfile already uses — is reachable by pointing it
-//     there and supplying that CA's roots via MCP_TLS_ACME_CA_ROOTS.
-//     Challenges are served over TLS-ALPN-01 on the same :443 listener, so no
-//     second port is needed.
+//     there. That CA's own directory-endpoint certificate is trusted through
+//     the process trust store by default (mount the CA there, or set
+//     SSL_CERT_FILE); MCP_TLS_ACME_CA_ROOTS is an optional override that
+//     confines that trust to the ACME client alone, keeping it out of the
+//     fetch tool and SearXNG paths. Issued certificates are cached under
+//     MCP_TLS_ACME_CACHE_DIR (default /var/cache/mcp-acme — mount a volume,
+//     bind mount or PVC there so they persist across restarts). Challenges are
+//     served over TLS-ALPN-01 on the same :443 listener, so no second port is
+//     needed.
 //
-// The two are mutually exclusive; configuring both is a startup error. Every
-// failure mode here aborts startup loudly, matching newFetchACL / setProxy:
-// a typo in a transport-security control must stop the server, not silently
-// leave it on plain HTTP.
+// Manual and ACME are mutually exclusive; configuring both is a startup error.
+// Every failure mode here aborts startup loudly, matching newFetchACL /
+// setProxy: a typo in a transport-security control must stop the server, not
+// silently leave it on plain HTTP.
 package main
 
 import (
@@ -28,6 +37,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"net/mail"
 	"net/url"
 	"os"
 	"sync"
@@ -41,6 +51,27 @@ import (
 // is unset. Production, not staging: an operator turning ACME on wants a
 // browser-trusted certificate, and the staging CA's roots are not trusted.
 const letsEncryptDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+
+// defaultACMECacheDir is where issued certificates are cached when
+// MCP_TLS_ACME_CACHE_DIR is unset. It must resolve to a writable, persistent
+// location — mount a volume, bind mount or PVC there — or restarts re-request
+// certificates and can hit CA rate limits. ensureWritableDir fails startup
+// when it is not writable (the usual read-only-rootfs case), so the operator
+// is told to mount something rather than silently getting an ephemeral cache.
+const defaultACMECacheDir = "/var/cache/mcp-acme"
+
+// acmeConfigured reports whether the operator is asking for ACME at all. ACME
+// has no on/off flag: naming the domain(s) — or setting any other
+// MCP_TLS_ACME_* parameter — turns it on. newTLSSettings then requires
+// MCP_TLS_ACME_DOMAINS within that mode, so a stray or half-configured ACME
+// variable fails startup loudly instead of silently serving plain HTTP.
+func acmeConfigured(cfg Config) bool {
+	return len(cfg.TLSACMEDomains) > 0 ||
+		cfg.TLSACMEEmail != "" ||
+		cfg.TLSACMEDirectory != "" ||
+		cfg.TLSACMECacheDir != "" ||
+		cfg.TLSACMECARoots != ""
+}
 
 // tlsSettings is the compiled TLS configuration. A nil *tlsSettings, or one
 // whose tlsConfig is nil, means plain HTTP — the enabled() guard is nil-safe
@@ -69,14 +100,14 @@ func (t *tlsSettings) describe() string {
 // before the server starts; a returned error aborts startup.
 func newTLSSettings(cfg Config) (*tlsSettings, error) {
 	hasManual := cfg.TLSCertFile != "" || cfg.TLSKeyFile != ""
-	hasACME := cfg.TLSACME
+	hasACME := acmeConfigured(cfg)
 
 	switch {
 	case !hasManual && !hasACME:
 		return nil, nil
 	case hasManual && hasACME:
 		return nil, fmt.Errorf("TLS is over-configured: set EITHER MCP_TLS_CERT+MCP_TLS_KEY " +
-			"(manual certificate) OR MCP_TLS_ACME (automatic certificates), not both")
+			"(manual certificate) OR the MCP_TLS_ACME_* variables (automatic certificates), not both")
 	case hasManual:
 		return newManualTLS(cfg)
 	default:
@@ -196,16 +227,36 @@ func (r *certReloader) load() (*tls.Certificate, error) {
 // only :443 needs to be reachable.
 func newACMETLS(cfg Config) (*tlsSettings, error) {
 	if len(cfg.TLSACMEDomains) == 0 {
-		return nil, fmt.Errorf("MCP_TLS_ACME is set but MCP_TLS_ACME_DOMAINS is empty: " +
+		return nil, fmt.Errorf("ACME is configured but MCP_TLS_ACME_DOMAINS is empty: " +
 			"name the hostname(s) the certificate should cover, e.g. \"relay.example.com\"")
 	}
-	if cfg.TLSACMECacheDir == "" {
-		return nil, fmt.Errorf("MCP_TLS_ACME is set but MCP_TLS_ACME_CACHE_DIR is empty: " +
-			"ACME needs a writable directory to persist issued certificates across restarts " +
-			"(without it every restart re-requests certificates and can hit CA rate limits)")
+
+	// MCP_TLS_ACME_EMAIL is optional — ACME registers without a contact when it
+	// is unset. But a value that is set must be a bare, well-formed address: a
+	// public CA (Let's Encrypt) rejects a malformed contact at account
+	// registration, which would otherwise surface only at first issuance, not
+	// startup. This is a shape check; the CA remains the final authority.
+	if cfg.TLSACMEEmail != "" {
+		if addr, err := mail.ParseAddress(cfg.TLSACMEEmail); err != nil || addr.Address != cfg.TLSACMEEmail {
+			return nil, fmt.Errorf("MCP_TLS_ACME_EMAIL %q is not a valid email address: "+
+				"give a bare address like \"admin@example.com\", or leave it unset to "+
+				"register without a contact", cfg.TLSACMEEmail)
+		}
 	}
-	if err := ensureWritableDir(cfg.TLSACMECacheDir); err != nil {
-		return nil, fmt.Errorf("MCP_TLS_ACME_CACHE_DIR %q: %w", cfg.TLSACMECacheDir, err)
+
+	// MCP_TLS_ACME_CACHE_DIR is optional and defaults to a well-known path; the
+	// operator's job is to make that path persistent (a volume/bind mount/PVC),
+	// not to name it. ensureWritableDir turns an unwritable cache — the common
+	// read-only-rootfs case when nothing is mounted there — into a loud startup
+	// error rather than a silently ephemeral cache that re-requests every boot.
+	cacheDir := cfg.TLSACMECacheDir
+	if cacheDir == "" {
+		cacheDir = defaultACMECacheDir
+	}
+	if err := ensureWritableDir(cacheDir); err != nil {
+		return nil, fmt.Errorf("MCP_TLS_ACME_CACHE_DIR %q: %w "+
+			"(mount a volume, bind mount or PVC there so issued certificates persist across restarts)",
+			cacheDir, err)
 	}
 
 	directory := cfg.TLSACMEDirectory
@@ -231,7 +282,7 @@ func newACMETLS(cfg Config) (*tlsSettings, error) {
 	m := &autocert.Manager{
 		Prompt:     autocert.AcceptTOS,
 		HostPolicy: autocert.HostWhitelist(cfg.TLSACMEDomains...),
-		Cache:      autocert.DirCache(cfg.TLSACMECacheDir),
+		Cache:      autocert.DirCache(cacheDir),
 		Email:      cfg.TLSACMEEmail,
 		Client:     client,
 	}

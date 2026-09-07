@@ -179,14 +179,13 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
 | `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
 | `MCP_METRICS_TOKEN` | to scrape | — | Bearer token that gates `GET /metrics`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset, `/metrics` returns `401` to everyone, including callers holding a valid MCP token. Same 32-character minimum. Required if you scrape metrics (see [Metrics](#metrics)) |
-| `MCP_TLS_CERT` | no | — | Path to a PEM certificate. With `MCP_TLS_KEY`, the relay serves HTTPS directly instead of plain HTTP. The pair is hot-reloaded on file change, so a renewal is picked up without a restart. Mutually exclusive with `MCP_TLS_ACME`. See [TLS](#tls) |
+| `MCP_TLS_CERT` | no | — | Path to a PEM certificate. With `MCP_TLS_KEY`, the relay serves HTTPS directly instead of plain HTTP. The pair is hot-reloaded on file change, so a renewal is picked up without a restart. Mutually exclusive with the `MCP_TLS_ACME_*` variables. See [TLS](#tls) |
 | `MCP_TLS_KEY` | no | — | Path to the PEM private key for `MCP_TLS_CERT`. Both are required together; one alone fails startup |
-| `MCP_TLS_ACME` | no | `false` | If `true`, obtain certificates automatically via ACME (challenges served over TLS-ALPN-01 on the same port, so no second port is needed). Requires `MCP_TLS_ACME_DOMAINS` and `MCP_TLS_ACME_CACHE_DIR`. Mutually exclusive with `MCP_TLS_CERT`. See [TLS](#tls) |
-| `MCP_TLS_ACME_DOMAINS` | with ACME | — | Comma-separated hostnames the certificate may cover (the ACME host allow-list) |
-| `MCP_TLS_ACME_CACHE_DIR` | with ACME | — | Writable directory where issued certificates are cached so they survive restarts (without it, every restart re-requests and can hit CA rate limits) |
-| `MCP_TLS_ACME_EMAIL` | no | — | ACME account contact address |
+| `MCP_TLS_ACME_DOMAINS` | for ACME | — | Comma-separated hostnames the certificate may cover (the ACME host allow-list). **Setting this (or any `MCP_TLS_ACME_*` variable) turns ACME on** — there is no separate on/off flag — and this one is then required. Certificates are obtained automatically, with challenges served over TLS-ALPN-01 on the same port (no second port needed). Mutually exclusive with `MCP_TLS_CERT`. See [TLS](#tls) |
+| `MCP_TLS_ACME_EMAIL` | no | — | ACME account contact address. Optional; if set it must be a valid bare address (e.g. `admin@example.com`), or startup fails — a public CA rejects a malformed contact at registration. Leave unset to register without a contact |
 | `MCP_TLS_ACME_DIRECTORY` | no | Let's Encrypt | ACME directory URL. Point it at a private CA (e.g. step-ca) to use one instead of Let's Encrypt |
-| `MCP_TLS_ACME_CA_ROOTS` | no | — | Path to a PEM bundle the ACME client should trust, for a private ACME directory whose own TLS certificate is not in the system trust store. Scoped to the ACME client only |
+| `MCP_TLS_ACME_CACHE_DIR` | no | `/var/cache/mcp-acme` | Directory where issued certificates are cached so they survive restarts. Defaults to the path shown; **mount a volume, bind mount or PVC there** to make it persistent (without persistence, restarts re-request and can hit CA rate limits). Startup fails if the path is not writable |
+| `MCP_TLS_ACME_CA_ROOTS` | no | — | Optional PEM bundle the ACME client should trust for a private ACME directory. By default the private CA is trusted through the **process trust store** (mount its root there, or set `SSL_CERT_FILE`); this override instead **confines** that trust to the ACME client, keeping it out of the fetch tool and SearXNG paths |
 | `MCP_TLS_HEALTHCHECK_INSECURE` | no | `false` | When the `--healthcheck` probe speaks HTTPS, skip certificate verification. Defaults to `false` (verify). Set to `true` only when the serving certificate cannot be verified against the loopback probe address — e.g. a public-hostname-only ACME certificate probed over `127.0.0.1`. Affects the self-probe only, not the served endpoint. See [TLS](#tls) |
 | `MCP_STATELESS` | no | `false` | If `true`, the SDK issues no session IDs and treats each request as a fresh temporary session; the relay reads `Mcp-Session-Id` itself for correlation. See "Session modes" below |
 | `MCP_SESSION_MAX_AGE` | no | `168h` | Stateful mode only. How long a session may live before the janitor closes it. Go duration syntax (`30m`, `12h`, `168h` — no `d` or `w`) |
@@ -470,7 +469,7 @@ If you prefer to run the server as a persistent background process rather than s
 }
 ```
 
-> **Note:** In any non-local deployment the MCP endpoint must be reached over TLS — its bearer tokens travel in whatever wraps it. Either front it with a TLS-terminating reverse proxy (nginx, Caddy, Traefik) or an Ingress, or have the relay serve HTTPS itself with `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME` (see [TLS](#tls)). With none of these, the relay serves plain HTTP and logs a warning at startup.
+> **Note:** In any non-local deployment the MCP endpoint must be reached over TLS — its bearer tokens travel in whatever wraps it. Either front it with a TLS-terminating reverse proxy (nginx, Caddy, Traefik) or an Ingress, or have the relay serve HTTPS itself with `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME_DOMAINS` (see [TLS](#tls)). With none of these, the relay serves plain HTTP and logs a warning at startup.
 
 ---
 
@@ -772,21 +771,21 @@ docker run -e MCP_PORT=8443 -e MCP_TLS_CERT=/tls/tls.crt -e MCP_TLS_KEY=/tls/tls
 
 The pair is loaded once at startup (a bad path or a mismatched cert/key fails startup, not the first handshake) and re-read on the next handshake whenever the files change — so an in-place renewal (cert-manager rewriting a mounted Secret, a certbot deploy hook) is picked up **without a restart**.
 
-**Automatic certificates (ACME).** Set `MCP_TLS_ACME=true` with the hostname(s) to certify and a writable cache directory:
+**Automatic certificates (ACME).** There is no on/off flag — naming the hostname(s) to certify with `MCP_TLS_ACME_DOMAINS` turns ACME on:
 
 ```bash
 docker run -e MCP_PORT=443 \
-  -e MCP_TLS_ACME=true \
   -e MCP_TLS_ACME_DOMAINS=relay.example.com \
   -e MCP_TLS_ACME_EMAIL=admin@example.com \
-  -e MCP_TLS_ACME_CACHE_DIR=/var/cache/mcp-acme \
   -e MCP_TLS_HEALTHCHECK_INSECURE=true \
   -v mcp-acme:/var/cache/mcp-acme ...
 ```
 
-Certificates are obtained on demand for the allow-listed hostnames and cached on disk so they survive restarts (mount the cache on a volume; without persistence, restarts re-request and can hit CA rate limits). Challenges are answered over **TLS-ALPN-01 on the same listener**, so only the one TLS port needs to be reachable — no `:80` responder.
+Setting any `MCP_TLS_ACME_*` variable selects ACME mode, and `MCP_TLS_ACME_DOMAINS` is then required — so a half-configured ACME setup (a stray or misspelled variable) fails startup loudly instead of silently falling back to plain HTTP. Certificates are obtained on demand for the allow-listed hostnames and cached under `MCP_TLS_ACME_CACHE_DIR` (default `/var/cache/mcp-acme`); **mount a volume, bind mount or PVC there** so they survive restarts — without persistence, restarts re-request and can hit CA rate limits, and startup fails if the path is not writable. Challenges are answered over **TLS-ALPN-01 on the same listener**, so only the one TLS port needs to be reachable — no `:80` responder.
 
-- **Private CA (e.g. step-ca).** `MCP_TLS_ACME_DIRECTORY` selects the ACME directory (default: Let's Encrypt production). If that CA's own TLS certificate is not publicly trusted, give its roots to the ACME client with `MCP_TLS_ACME_CA_ROOTS=/path/to/ca-roots.pem`. This is the in-process equivalent of the ACME setup the bundled [`Caddyfile`](deploy/podman/Caddyfile) already uses.
+- **Contact email.** `MCP_TLS_ACME_EMAIL` is optional. Leave it unset to register the ACME account without a contact; if you do set it, give a valid bare address — a public CA (Let's Encrypt) rejects a malformed contact at registration, and the relay checks the address shape at startup so that failure surfaces immediately rather than at first issuance.
+
+- **Private CA (e.g. step-ca).** `MCP_TLS_ACME_DIRECTORY` selects the ACME directory (default: Let's Encrypt production). If that CA's own directory-endpoint certificate is not publicly trusted, the simplest path is to add its root to the container's trust store (bake it into the image, or set `SSL_CERT_FILE`) — then leave `MCP_TLS_ACME_CA_ROOTS` unset and ACME uses the system trust store. Set `MCP_TLS_ACME_CA_ROOTS=/path/to/ca-roots.pem` only when you want that trust **confined to the ACME client** so the private CA is not also trusted by the fetch tool and the SearXNG client. This is the in-process equivalent of the ACME setup the bundled [`Caddyfile`](deploy/podman/Caddyfile) already uses.
 
 - **Health check.** The `--healthcheck` self-probe (used by the Docker `HEALTHCHECK`) follows the server to HTTPS when TLS is on, and **verifies the certificate by default**. Because it dials `127.0.0.1`, the serving certificate must be valid for the loopback address (add `127.0.0.1`/`localhost` as SANs) for the probe to pass. When the certificate covers only a public hostname — the usual ACME case — set `MCP_TLS_HEALTHCHECK_INSECURE=true` so the self-probe skips verification. This affects only the loopback probe, never the served endpoint.
 

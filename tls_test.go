@@ -81,7 +81,7 @@ func TestNewTLSSettings_Validation(t *testing.T) {
 		{name: "nothing configured", cfg: Config{}},
 		{
 			name:    "manual and acme together",
-			cfg:     Config{TLSCertFile: certPath, TLSKeyFile: keyPath, TLSACME: true, TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir},
+			cfg:     Config{TLSCertFile: certPath, TLSKeyFile: keyPath, TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir},
 			wantErr: true,
 		},
 		{name: "cert without key", cfg: Config{TLSCertFile: certPath}, wantErr: true},
@@ -93,28 +93,46 @@ func TestNewTLSSettings_Validation(t *testing.T) {
 			wantMode:   "manual",
 			wantDetail: "cert+key (hot-reload)",
 		},
-		{name: "acme without domains", cfg: Config{TLSACME: true, TLSACMECacheDir: cacheDir}, wantErr: true},
-		{name: "acme without cache dir", cfg: Config{TLSACME: true, TLSACMEDomains: []string{"x"}}, wantErr: true},
+		// ACME turns on when any MCP_TLS_ACME_* value is set (no on/off flag);
+		// MCP_TLS_ACME_DOMAINS is then required.
+		{name: "acme intent via cache dir but no domains", cfg: Config{TLSACMECacheDir: cacheDir}, wantErr: true},
+		{name: "acme intent via email but no domains", cfg: Config{TLSACMEEmail: "admin@example.com"}, wantErr: true},
 		{
 			name:       "valid acme defaults to lets encrypt",
-			cfg:        Config{TLSACME: true, TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir},
+			cfg:        Config{TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir},
 			wantMode:   "acme",
 			wantDetail: "letsencrypt",
 		},
 		{
+			name:       "valid acme with contact email",
+			cfg:        Config{TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir, TLSACMEEmail: "admin@example.com"},
+			wantMode:   "acme",
+			wantDetail: "letsencrypt",
+		},
+		{
+			name:    "acme with malformed email",
+			cfg:     Config{TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir, TLSACMEEmail: "not-an-email"},
+			wantErr: true,
+		},
+		{
+			name:    "acme email must be bare address",
+			cfg:     Config{TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir, TLSACMEEmail: "Admin <admin@example.com>"},
+			wantErr: true,
+		},
+		{
 			name:       "acme with custom directory reports it",
-			cfg:        Config{TLSACME: true, TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir, TLSACMEDirectory: "https://ca.internal/acme/directory"},
+			cfg:        Config{TLSACMEDomains: []string{"relay.example.com"}, TLSACMECacheDir: cacheDir, TLSACMEDirectory: "https://ca.internal/acme/directory"},
 			wantMode:   "acme",
 			wantDetail: "https://ca.internal/acme/directory",
 		},
 		{
 			name:    "acme with invalid directory url",
-			cfg:     Config{TLSACME: true, TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir, TLSACMEDirectory: "://missing-scheme"},
+			cfg:     Config{TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir, TLSACMEDirectory: "://missing-scheme"},
 			wantErr: true,
 		},
 		{
 			name:    "acme with unreadable ca roots",
-			cfg:     Config{TLSACME: true, TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir, TLSACMECARoots: filepath.Join(dir, "no-such-roots.pem")},
+			cfg:     Config{TLSACMEDomains: []string{"x"}, TLSACMECacheDir: cacheDir, TLSACMECARoots: filepath.Join(dir, "no-such-roots.pem")},
 			wantErr: true,
 		},
 	}
@@ -244,7 +262,6 @@ func TestManualTLS_ServesHTTPS(t *testing.T) {
 // reach the fake CA, which is fine — we only assert the policy boundary).
 func TestACME_HostPolicyEnforced(t *testing.T) {
 	settings, err := newTLSSettings(Config{
-		TLSACME:          true,
 		TLSACMEDomains:   []string{"allowed.example.com"},
 		TLSACMECacheDir:  filepath.Join(t.TempDir(), "cache"),
 		TLSACMEDirectory: "https://127.0.0.1:1/acme/directory", // unreachable on purpose

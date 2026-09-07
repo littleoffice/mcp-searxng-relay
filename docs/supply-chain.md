@@ -70,7 +70,7 @@ documentation bug worth reporting.
 | `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.8. |
 | `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.4. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.58.0. |
-| `golang.org/x/crypto` | `golang.org/x/crypto/acme` and `.../acme/autocert` for the optional in-process ACME TLS mode (`MCP_TLS_ACME`). Only reached when that mode is enabled; the default plain-HTTP and manual-cert paths use the standard library alone. Maintained by the Go team. Pinned at v0.56.0. |
+| `golang.org/x/crypto` | `golang.org/x/crypto/acme` and `.../acme/autocert` for the optional in-process ACME TLS mode (`MCP_TLS_ACME_DOMAINS`). Only reached when that mode is enabled; the default plain-HTTP and manual-cert paths use the standard library alone. Maintained by the Go team. Pinned at v0.56.0. |
 
 ### Transitive dependencies
 
