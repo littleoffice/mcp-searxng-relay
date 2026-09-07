@@ -33,13 +33,17 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/mail"
 	"net/url"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -80,6 +84,18 @@ type tlsSettings struct {
 	tlsConfig *tls.Config
 	mode      string // "manual" | "acme", for the startup banner
 	detail    string // banner detail: "cert+key (hot-reload)" or the ACME CA
+
+	// ACME-only observability/warmup state (nil/zero in manual and plain
+	// modes). autocert obtains certificates lazily on the first matching
+	// handshake and logs nothing, so an operator watching a freshly started
+	// relay sees no ACME traffic and no log lines. These let main() warm the
+	// certificates at startup and log exactly what ACME is doing.
+	acmeManager   *autocert.Manager
+	acmeDomains   []string
+	acmeDirectory string // resolved directory URL (default filled in)
+	acmeCacheDir  string // resolved cache dir (default filled in)
+	acmeEmailSet  bool   // whether a contact email was configured
+	acmeCAScoped  bool   // whether MCP_TLS_ACME_CA_ROOTS confined CA trust
 }
 
 // enabled reports whether HTTPS serving is configured.
@@ -271,12 +287,14 @@ func newACMETLS(cfg Config) (*tlsSettings, error) {
 	}
 
 	client := &acme.Client{DirectoryURL: directory}
+	caScoped := false
 	if cfg.TLSACMECARoots != "" {
 		httpClient, err := acmeHTTPClientWithRoots(cfg.TLSACMECARoots)
 		if err != nil {
 			return nil, fmt.Errorf("MCP_TLS_ACME_CA_ROOTS %q: %w", cfg.TLSACMECARoots, err)
 		}
 		client.HTTPClient = httpClient
+		caScoped = true
 	}
 
 	m := &autocert.Manager{
@@ -288,11 +306,98 @@ func newACMETLS(cfg Config) (*tlsSettings, error) {
 	}
 	tc := m.TLSConfig() // wires GetCertificate + the acme-tls/1 ALPN protocol
 	tc.MinVersion = tls.VersionTLS12
+	// autocert emits no logs of its own, so wrap the certificate hook to make
+	// every handshake and every issuance failure visible (see logGetCertificate).
+	tc.GetCertificate = logGetCertificate(tc.GetCertificate)
 	return &tlsSettings{
-		tlsConfig: tc,
-		mode:      "acme",
-		detail:    caLabel,
+		tlsConfig:     tc,
+		mode:          "acme",
+		detail:        caLabel,
+		acmeManager:   m,
+		acmeDomains:   cfg.TLSACMEDomains,
+		acmeDirectory: directory,
+		acmeCacheDir:  cacheDir,
+		acmeEmailSet:  cfg.TLSACMEEmail != "",
+		acmeCAScoped:  caScoped,
 	}, nil
+}
+
+// logGetCertificate wraps an ACME GetCertificate hook so the otherwise-silent
+// ACME path is observable. Every handshake — ordinary ones and the acme-tls/1
+// challenge handshakes the CA makes — is logged at debug, and any failure to
+// serve or obtain a certificate (an unreachable directory, a hostname outside
+// the allow-list, a failed challenge) is surfaced at warn. Without this an
+// operator has no way to see what autocert is doing or why a certificate is
+// not appearing.
+func logGetCertificate(inner func(*tls.ClientHelloInfo) (*tls.Certificate, error)) func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	return func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		challenge := slices.Contains(hello.SupportedProtos, acme.ALPNProto)
+		var remote string
+		if hello.Conn != nil {
+			remote = hello.Conn.RemoteAddr().String()
+		}
+		slog.Debug("acme: tls handshake",
+			"sni", hello.ServerName, "challenge", challenge, "remote", remote)
+		cert, err := inner(hello)
+		if err != nil {
+			slog.Warn("acme: no certificate served for handshake",
+				"sni", hello.ServerName, "challenge", challenge, "remote", remote, "error", err)
+			return nil, err
+		}
+		return cert, nil
+	}
+}
+
+// logStartup records the effective TLS configuration once at boot. The banner
+// carries a one-line summary; this adds the ACME specifics an operator needs
+// when a certificate is not appearing — which directory is being hit, for
+// which hosts, where issued certs are cached, whether a contact email was
+// accepted, and how the directory's own CA is trusted — at info level so it
+// shows without enabling debug.
+func (t *tlsSettings) logStartup() {
+	if t == nil || t.acmeManager == nil {
+		return
+	}
+	trust := "process trust store"
+	if t.acmeCAScoped {
+		trust = "scoped to acme client (MCP_TLS_ACME_CA_ROOTS)"
+	}
+	slog.Info("acme: enabled",
+		"directory", t.acmeDirectory,
+		"domains", strings.Join(t.acmeDomains, ","),
+		"cache_dir", t.acmeCacheDir,
+		"email_set", t.acmeEmailSet,
+		"ca_trust", trust)
+}
+
+// warmACME proactively obtains a certificate for each configured host at
+// startup, instead of waiting for the first client handshake. autocert is
+// lazy: with nothing warming it, the CA is never contacted until a real
+// request with a matching SNI arrives, which is what leaves an operator
+// staring at a silent ACME server and an empty relay log. Each obtain drives a
+// TLS-ALPN-01 challenge against the running listener, so this must be called
+// only after the server is serving. Failures are logged, never fatal — a
+// transient DNS or reachability problem should not take the process down, and
+// the next real handshake (or restart) retries.
+func (t *tlsSettings) warmACME(ctx context.Context) {
+	if t == nil || t.acmeManager == nil {
+		return
+	}
+	for _, host := range t.acmeDomains {
+		if ctx.Err() != nil {
+			return
+		}
+		slog.Info("acme: requesting certificate", "host", host, "directory", t.acmeDirectory)
+		start := time.Now()
+		if _, err := t.acmeManager.GetCertificate(&tls.ClientHelloInfo{ServerName: host}); err != nil {
+			slog.Warn("acme: certificate request failed",
+				"host", host, "directory", t.acmeDirectory,
+				"elapsed", time.Since(start).Round(time.Millisecond).String(), "error", err)
+			continue
+		}
+		slog.Info("acme: certificate ready",
+			"host", host, "elapsed", time.Since(start).Round(time.Millisecond).String())
+	}
 }
 
 // ensureWritableDir creates dir (0700) if absent and verifies it is writable

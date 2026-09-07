@@ -168,6 +168,55 @@ func TestNewTLSSettings_Validation(t *testing.T) {
 	}
 }
 
+// ── acme: warmup/observability wiring ─────────────────────────────────────────
+
+// ACME mode must expose the manager and resolved settings so main() can warm
+// certificates at startup and log the effective config; manual mode must not,
+// so warmACME/logStartup stay no-ops there.
+func TestNewTLSSettings_ACMEWarmupState(t *testing.T) {
+	cacheDir := filepath.Join(t.TempDir(), "cache")
+	s, err := newTLSSettings(Config{
+		TLSACMEDomains:  []string{"a.example.com", "b.example.com"},
+		TLSACMECacheDir: cacheDir,
+		TLSACMEEmail:    "admin@example.com",
+	})
+	if err != nil {
+		t.Fatalf("newTLSSettings: %v", err)
+	}
+	if s.acmeManager == nil {
+		t.Fatal("acme settings must retain the autocert manager for warmup")
+	}
+	if len(s.acmeDomains) != 2 {
+		t.Errorf("acmeDomains = %v, want 2 hosts", s.acmeDomains)
+	}
+	if s.acmeDirectory != letsEncryptDirectory {
+		t.Errorf("acmeDirectory = %q, want default %q", s.acmeDirectory, letsEncryptDirectory)
+	}
+	if s.acmeCacheDir != cacheDir {
+		t.Errorf("acmeCacheDir = %q, want %q", s.acmeCacheDir, cacheDir)
+	}
+	if !s.acmeEmailSet {
+		t.Error("acmeEmailSet = false, want true when a contact email is configured")
+	}
+	if s.acmeCAScoped {
+		t.Error("acmeCAScoped = true, want false without MCP_TLS_ACME_CA_ROOTS")
+	}
+
+	// Manual mode carries no ACME manager, so the startup helpers are no-ops
+	// (and must not panic when called).
+	certPath, keyPath, _ := writeSelfSigned(t, t.TempDir(), 3001)
+	manual, err := newTLSSettings(Config{TLSCertFile: certPath, TLSKeyFile: keyPath})
+	if err != nil {
+		t.Fatalf("newTLSSettings manual: %v", err)
+	}
+	if manual.acmeManager != nil {
+		t.Error("manual mode must not carry an autocert manager")
+	}
+	manual.logStartup()                                // no-op, must not panic
+	manual.warmACME(context.Background())              // no-op, must not panic
+	(*tlsSettings)(nil).warmACME(context.Background()) // nil-safe
+}
+
 // ── certReloader: hot reload ──────────────────────────────────────────────────
 
 // Rewriting the cert/key files must change the served certificate without a

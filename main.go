@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -189,6 +190,10 @@ func main() {
 		os.Exit(1)
 	}
 	cfg.TLS = tlsSettings
+	// Emit the effective ACME configuration now that the logger is set up, so
+	// an operator can confirm what ACME is about to do (directory, hosts, cache
+	// dir, CA trust) without waiting for a handshake. No-op unless ACME is on.
+	cfg.TLS.logStartup()
 
 	server := NewServer(cfg)
 
@@ -262,12 +267,22 @@ func runHealthCheck() {
 	client := &http.Client{Timeout: 5 * time.Second}
 	if healthProbeUsesTLS() {
 		scheme = "https"
-		client.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{
-				MinVersion:         tls.VersionTLS12,
-				InsecureSkipVerify: healthProbeInsecure(), //nolint:gosec // opt-in, defaults false; loopback self-probe only
-			},
+		tlsConf := &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: healthProbeInsecure(), //nolint:gosec // opt-in, defaults false; loopback self-probe only
 		}
+		// In ACME mode the server can only produce a certificate for an
+		// allow-listed hostname — a handshake carrying the loopback IP as SNI
+		// (or none) is refused by the host policy, so the probe would fail
+		// regardless of MCP_TLS_HEALTHCHECK_INSECURE. Present the first ACME
+		// domain as SNI while still dialing 127.0.0.1, so the server serves its
+		// real certificate. (Go verifies the certificate against ServerName,
+		// not the dial address, so a domain-only cert also verifies here when
+		// MCP_TLS_HEALTHCHECK_INSECURE is left off.)
+		if domains := parseCSV(os.Getenv("MCP_TLS_ACME_DOMAINS")); len(domains) > 0 {
+			tlsConf.ServerName = domains[0]
+		}
+		client.Transport = &http.Transport{TLSClientConfig: tlsConf}
 	}
 	req, err := http.NewRequest(http.MethodGet, scheme+"://127.0.0.1:"+port+"/health", nil)
 	if err != nil {
@@ -442,6 +457,12 @@ func runHTTP(cfg Config, server *Server, port string) {
 		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
+	// Route the http.Server's own error log through slog, so TLS handshake
+	// failures (which net/http otherwise writes to the standard logger, i.e.
+	// unstructured stderr that bypasses LOG_FORMAT/LOG_LEVEL) land in the
+	// structured log like everything else. This is where a rejected SNI or a
+	// failed ACME challenge from a real client shows up.
+	srv.ErrorLog = slog.NewLogLogger(slog.Default().Handler(), slog.LevelWarn)
 	// When in-process TLS is configured, its tls.Config carries the
 	// GetCertificate hook (manual cert reloader or the ACME manager), so the
 	// cert/key arguments to ListenAndServeTLS are left empty below.
@@ -466,9 +487,21 @@ func runHTTP(cfg Config, server *Server, port string) {
 	go func() {
 		var serveErr error
 		if cfg.TLS.enabled() {
+			// Bind the listener explicitly (rather than ListenAndServeTLS) so
+			// ACME warmup can start the moment the socket is up: the CA needs a
+			// reachable listener to answer the TLS-ALPN-01 challenge against.
 			// Certs come from srv.TLSConfig.GetCertificate, so the file
-			// arguments are empty in both the manual and ACME cases.
-			serveErr = srv.ListenAndServeTLS("", "")
+			// arguments to ServeTLS are empty in both the manual and ACME cases.
+			ln, lnErr := net.Listen("tcp", srv.Addr)
+			if lnErr != nil {
+				slog.Error("server error", "error", lnErr)
+				os.Exit(1)
+			}
+			// Warm ACME certificates now instead of on the first client
+			// handshake, so the CA is contacted (and logged) at startup. No-op
+			// for manual TLS.
+			go cfg.TLS.warmACME(ctx)
+			serveErr = srv.ServeTLS(ln, "", "")
 		} else {
 			serveErr = srv.ListenAndServe()
 		}
