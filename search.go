@@ -31,7 +31,7 @@ type searchInput struct {
 	Categories string `json:"categories,omitempty"  jsonschema:"comma-separated SearXNG categories e.g. 'news', 'science', 'files', 'images' (default: general web)"`
 	Language   string `json:"language,omitempty"    jsonschema:"language code e.g. 'en', 'de', or 'all' (default: all)"`
 	TimeRange  string `json:"time_range,omitempty"  jsonschema:"filter by time: 'day', 'month', or 'year'"`
-	Engines    string `json:"engines,omitempty"     jsonschema:"comma-separated SearXNG engine names to query, e.g. 'wikipedia,github' — engine names appear in the engine field of prior results; unknown names are silently ignored by SearXNG (default: instance's configured engines)"`
+	Engines    string `json:"engines,omitempty"     jsonschema:"comma-separated SearXNG engine names to query, e.g. 'wikipedia,github'. This (or a !bang in the query) is how you target a specific backend — prefer it over a site: filter, which does not scope a specialized engine. Engine names appear in the engine field of prior results and, when the operator has configured a roster, in this tool's description; unknown names are silently ignored by SearXNG (default: instance's configured engines)"`
 	Safesearch int    `json:"safesearch,omitempty"  jsonschema:"safe search level: 0 = off, 1 = moderate, 2 = strict (default: 0)"`
 }
 

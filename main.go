@@ -89,6 +89,18 @@ func main() {
 	}
 	cfg.MetricsToken = metricsToken
 
+	// Parse the operator-curated engine roster (SEARXNG_ENGINES /
+	// SEARXNG_ENGINES_FILE) before NewServer copies cfg, since the search tool
+	// description is composed from it at build time. A named-but-unreadable
+	// SEARXNG_ENGINES_FILE fails startup with the same fail-loud stance as the
+	// auth-token file; a malformed inline entry is skipped, not fatal.
+	roster, err := parseEngineRoster()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.EngineRoster = roster
+
 	// Compile the fetch allow-list (FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS).
 	// A malformed CIDR fails startup with a clear message — the same
 	// fail-loud stance as the auth-token parser, since this is a security

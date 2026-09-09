@@ -21,15 +21,39 @@ import (
 // can't leak token bytes via timing (the input has already been hashed).
 type tokenDigest [32]byte
 
+// engineDescriptor is one entry in the operator-curated engine roster
+// advertised to the model in the search tool's description. Name is a
+// SearXNG engine identifier (lowercased, matching the normalization the
+// search handler applies to the `engines` parameter); Purpose is a free-text,
+// operator-written line describing what the engine is good for, so the model
+// can route a query to it ("code-related → gitea"). Purpose may be empty for
+// a name-only entry.
+type engineDescriptor struct {
+	Name    string
+	Purpose string
+}
+
 type Config struct {
 	SearxngURL    string
 	AuthUsername  string
 	AuthPassword  string
 	SearxngTokens []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
-	UserAgent     string
-	LogLevel      string
-	LogFormat     string
-	AuthTokens    map[tokenDigest]string // digest → identity, populated by parseAuthTokens
+	// EngineRoster is the operator-curated list of engines advertised to the
+	// model in the search tool description (SEARXNG_ENGINES /
+	// SEARXNG_ENGINES_FILE). Deliberately operator-supplied rather than
+	// discovered from SearXNG's /config: that endpoint enumerates every
+	// enabled engine unconditionally — SearXNG's `tokens:` gates querying, not
+	// listing — so it would leak a private engine's existence, and it is
+	// commonly blocked on hardened instances. The relay is already the trust
+	// boundary (see SearxngTokens), so the operator is the right party to
+	// state, per relay, which engines its model audience should know about.
+	// Populated by parseEngineRoster; nil/empty omits the roster block from the
+	// description but leaves the generic query-dialect guidance intact.
+	EngineRoster []engineDescriptor
+	UserAgent    string
+	LogLevel     string
+	LogFormat    string
+	AuthTokens   map[tokenDigest]string // digest → identity, populated by parseAuthTokens
 	// HealthToken gates the /health probe. It is a SEPARATE secret from the
 	// MCP bearer tokens in AuthTokens — the health probe and the MCP endpoint
 	// are different trust domains and must not share a credential. Populated
@@ -511,6 +535,81 @@ func parseHealthToken() (map[tokenDigest]struct{}, error) {
 // See Config.MetricsToken and requireMetricsAuth.
 func parseMetricsToken() (map[tokenDigest]struct{}, error) {
 	return parseSharedSecretToken("MCP_METRICS_TOKEN")
+}
+
+// parseEngineRoster reads the operator-curated engine roster from two sources
+// and merges them into an ordered list. Later sources override earlier ones by
+// engine name (updating the purpose in place, so display order is preserved).
+//
+// Sources, lowest to highest priority:
+//
+//  1. SEARXNG_ENGINES       inline, ';'-separated "name: purpose" entries
+//  2. SEARXNG_ENGINES_FILE  path; one "name: purpose" per line, '#' comments
+//     and blank lines ignored
+//
+// The two-source split mirrors the auth-token parser: the inline var suits a
+// handful of engines in a compose file, the file suits a longer curated list
+// mounted from config management (and keeps a private engine's existence out
+// of an env dump). The name is split off on the first ':' so a purpose may
+// itself contain colons; the name is lowercased to match the `engines`
+// parameter normalization in the search handler. A nameless entry is skipped
+// rather than erroring — a stray separator should not block startup — and an
+// empty purpose is allowed (a name-only entry still tells the model the engine
+// exists). A missing SEARXNG_ENGINES_FILE path IS a hard error, matching
+// MCP_AUTH_TOKEN_FILE: an operator who named a file meant to ship a roster.
+func parseEngineRoster() ([]engineDescriptor, error) {
+	var roster []engineDescriptor
+	index := make(map[string]int)
+
+	add := func(name, purpose string) {
+		if i, ok := index[name]; ok {
+			roster[i].Purpose = purpose
+			return
+		}
+		index[name] = len(roster)
+		roster = append(roster, engineDescriptor{Name: name, Purpose: purpose})
+	}
+
+	for _, entry := range strings.Split(os.Getenv("SEARXNG_ENGINES"), ";") {
+		if name, purpose, ok := parseEngineEntry(entry); ok {
+			add(name, purpose)
+		}
+	}
+
+	if path := strings.TrimSpace(os.Getenv("SEARXNG_ENGINES_FILE")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("SEARXNG_ENGINES_FILE %q: %w", path, err)
+		}
+		for _, raw := range strings.Split(string(b), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if name, purpose, ok := parseEngineEntry(line); ok {
+				add(name, purpose)
+			}
+		}
+	}
+
+	return roster, nil
+}
+
+// parseEngineEntry parses one "name: purpose" roster entry. It returns ok=false
+// for a blank entry or one whose name is empty after trimming, so callers can
+// skip stray separators without a special case. The name is lowercased; the
+// purpose is returned trimmed and may be empty.
+func parseEngineEntry(entry string) (name, purpose string, ok bool) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", "", false
+	}
+	n, p, _ := strings.Cut(entry, ":")
+	name = strings.ToLower(strings.TrimSpace(n))
+	if name == "" {
+		return "", "", false
+	}
+	return name, strings.TrimSpace(p), true
 }
 
 // countIdentities returns the number of distinct identities in m.

@@ -196,6 +196,8 @@ All configuration is via environment variables. The server will refuse to start 
 | `AUTH_USERNAME` | no | — | HTTP Basic Auth username for SearXNG (if your instance requires it) |
 | `AUTH_PASSWORD` | no | — | HTTP Basic Auth password for SearXNG |
 | `SEARXNG_TOKENS` | no | — | Comma-separated [private-engine tokens](https://docs.searxng.org/admin/settings/settings_engines.html#private-engines-tokens) sent as the `tokens` search parameter on every query. Engines carrying a `tokens:` list in SearXNG's `settings.yml` are invisible and unusable without one. Scopes this relay to a subset of the engines on a shared SearXNG instance. See [Scoping a relay to specific engines](#scoping-a-relay-to-specific-engines) |
+| `SEARXNG_ENGINES` | no | — | Semicolon-separated `name: purpose` entries describing the engines this relay should advertise to the model in the `searxng_web_search` tool description, e.g. `gitea: our self-hosted forge (repos, issues, code); wikipedia: encyclopedia`. The name is a SearXNG engine identifier (lowercased); the purpose is free text (the first `:` separates them, so a purpose may contain colons). A name-only entry is allowed. See [Advertising engines to the model](#advertising-engines-to-the-model) |
+| `SEARXNG_ENGINES_FILE` | no | — | Path to a file with one `name: purpose` entry per line; `#` comments and blank lines ignored. Merges with `SEARXNG_ENGINES` (file entries override inline ones by name, in place). A named-but-unreadable path fails startup, matching `MCP_AUTH_TOKEN_FILE` |
 | `USER_AGENT` | no | `mcp-searxng-relay/<version>` | User-Agent header sent with all outbound requests |
 | `CACHE_TTL_SECONDS` | no | `300` | How long fetched URL content is cached (seconds) |
 | `CACHE_MAX_ENTRIES` | no | `1000` | Maximum number of URLs held in the in-memory cache. Oldest entries are evicted automatically when the cap is reached |
@@ -509,6 +511,30 @@ Notes:
 - **Tokens are per-process, not per-caller.** Every identity in the token table shares them. Where two groups of callers must be separated, run one relay per group. The identities in `MCP_AUTH_TOKEN_FILE` are audit labels, not an authorization boundary.
 - **`tokens` as a query parameter is undocumented upstream.** SearXNG's Search API docs describe engine tokens only as a Preferences-page setting. That they are also accepted as a request parameter follows from `webapp.pre_request` merging `request.args` into the preferences it parses. It is long-standing behaviour, but pin your SearXNG image by digest and keep a test asserting the negative case — a search naming another team's engine without its token returns no results.
 - **Search only.** `searxng_read_url` does not use these tokens. If the relay must be kept away from another team's internal hosts, that is `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`, set per relay.
+
+## Advertising engines to the model
+
+Models trained on public search habits reach for Google/Bing dialect — most visibly a `site:` filter — because nothing in a bare search tool tells them the backend is different. Against SearXNG that misfires in a way that is easy to miss: `site:` is forwarded to general-web engines (so it *appears* to work), but a specialized backend like a self-hosted forge has no such operator, so `site:code.corp` becomes a literal search term and matches nothing. The correct move is to select the backend **by engine** — the `engines` parameter (`engines=gitea`) or a `!bang` in the query (`!gitea …`), both of which this relay already supports — not to scope by domain.
+
+The fix lives at the tool boundary, not in the model. `SEARXNG_ENGINES` / `SEARXNG_ENGINES_FILE` let you advertise a curated roster in the `searxng_web_search` description, so the model both learns the dialect and knows which engines exist and what each is for:
+
+```bash
+docker run -d \
+  -e SEARXNG_URL=https://searxng.corp \
+  -e SEARXNG_ENGINES='gitea: our self-hosted forge — repositories, issues, code; wikipedia: encyclopedia articles; arxiv: preprints, papers' \
+  -e MCP_AUTH_TOKEN=$(openssl rand -hex 32) \
+  -e MCP_PORT=8080 -p 8080:8080 \
+  ghcr.io/littleoffice/mcp-searxng-relay:latest
+```
+
+The purpose text is what turns "this is code-related" into "use the `gitea` engine" — write it for the model, describing what each engine is good for.
+
+Notes:
+
+- **Curated, not discovered — on purpose.** The roster is operator-supplied rather than pulled from SearXNG's `/config` endpoint. `/config` enumerates *every* enabled engine unconditionally — SearXNG's `tokens:` gates whether an engine answers a query, not whether it is listed — so auto-discovery would leak a private engine's existence, exactly the boundary [engine scoping](#scoping-a-relay-to-specific-engines) exists to draw. It is also commonly blocked on hardened instances. Since the relay is already the trust boundary (one relay per `SEARXNG_TOKENS` scope), the operator is the right party to state, per relay, which engines its model audience should know about.
+- **The roster is advisory.** It only changes the tool *description*; it does not restrict which engines can be queried (that is `SEARXNG_TOKENS` upstream) and the query is never rewritten. A model can still name an engine you did not list, and a `site:` filter is still forwarded verbatim — the roster steers, it does not enforce.
+- **Cheap and stable.** The description is built once at startup and stays constant for the process, so it sits in the tool-definitions prefix that clients and inference caches reuse across turns — a handful of engines costs a few hundred input tokens once, not per call.
+- **Leave it unset** to ship only the generic dialect guidance (select by engine/`!bang`, not `site:`) with no engine names — still useful, but the model then has to discover engine names from result `engine` fields.
 
 ## Security notes
 

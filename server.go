@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -167,6 +168,56 @@ func NewServer(cfg Config) *Server {
 	return s
 }
 
+// buildSearchToolDescription composes the searxng_web_search description from
+// the operator-curated engine roster. It is built once at startup (from
+// s.config.EngineRoster) and never regenerated per request, so it stays part
+// of the stable tool-definitions prefix that clients and inference caches can
+// reuse across turns.
+//
+// The description does two jobs the model cannot infer on its own. First, it
+// corrects the default "this search box is Google" assumption that makes models
+// emit site: filters: against SearXNG a specific backend is selected BY ENGINE
+// (the engines parameter or a !bang), not scoped by a site: domain filter, and
+// site: only reaches general-web engines that happen to forward it upstream —
+// on a specialized engine it becomes a literal search term that matches
+// nothing. Second, when a roster is configured it names the engines available
+// on this instance and what each is for, so the model can route a query to the
+// right backend ("code-related → gitea") instead of guessing an engine name.
+// An empty roster omits that block but keeps the dialect guidance, which is
+// useful with zero configuration.
+func buildSearchToolDescription(roster []engineDescriptor) string {
+	var sb strings.Builder
+	sb.WriteString(
+		"Execute web searches using a SearXNG instance — a metasearch relay, " +
+			"NOT Google or Bing. Returns titles, URLs, and snippets, with the " +
+			"backend engine(s) attributed per result.\n\n" +
+			"Targeting a specific backend: select it by ENGINE, not by a site: " +
+			"filter. Pass the engine name via the engines parameter (e.g. " +
+			"engines='wikipedia,github') or prefix the query with a !bang (e.g. " +
+			"'!github <query>'). Engine names also appear in each result's engine " +
+			"field. Do NOT use a site:host operator to reach a particular " +
+			"backend: SearXNG has no cross-engine site: operator, so on a " +
+			"specialized engine (a code forge, a wiki) it is sent as a literal " +
+			"search term and matches nothing. site: only has an effect on " +
+			"general-web engines that forward it to an upstream like Google.")
+
+	if len(roster) > 0 {
+		sb.WriteString(
+			"\n\nEngines available on this instance (use these names in the " +
+				"engines parameter or as a !bang):")
+		for _, e := range roster {
+			sb.WriteString("\n- ")
+			sb.WriteString(e.Name)
+			if e.Purpose != "" {
+				sb.WriteString(" — ")
+				sb.WriteString(e.Purpose)
+			}
+		}
+	}
+
+	return sb.String()
+}
+
 // buildMCPServer creates the SDK server and registers our two tools.
 //
 // We use the generic mcp.AddTool helper so the SDK can infer JSON Schemas
@@ -192,11 +243,8 @@ func (s *Server) buildMCPServer() *mcp.Server {
 	)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "searxng_web_search",
-		Description: "Execute web searches using a SearXNG instance. Returns titles, " +
-			"URLs, and snippets, with engine attribution per result. To re-query " +
-			"a specific backend, pass its name (as seen in a result's engine " +
-			"field) via the engines parameter, e.g. engines='wikipedia,github'.",
+		Name:        "searxng_web_search",
+		Description: buildSearchToolDescription(s.config.EngineRoster),
 	}, s.toolSearch)
 
 	mcp.AddTool(server, &mcp.Tool{
