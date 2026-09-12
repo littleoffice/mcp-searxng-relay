@@ -8,7 +8,7 @@ require (
 	github.com/markusmobius/go-trafilatura v1.12.2
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/yfedoseev/office_oxide/go v0.1.10
-	github.com/yfedoseev/pdf_oxide/go v0.3.77
+	github.com/yfedoseev/pdf_oxide/go v0.3.78
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
 )
