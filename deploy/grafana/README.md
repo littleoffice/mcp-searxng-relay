@@ -14,6 +14,11 @@ first — traffic, errors, latency, cache — are at the top.
   scraper. With the token unset, `/metrics` returns `401` to everyone and the
   dashboard stays blank — the startup banner's `metrics auth` row reports
   `CLOSED` when that is the case.
+- For the **Activity (logs)** row only: a Loki datasource fed by the relay's
+  JSON logs. See [`../podman/monitoring/`](../podman/monitoring/) for a ready
+  Loki + Promtail overlay. The Prometheus panels work without it; the logs
+  panels stay empty until a Loki datasource is selected in the dashboard's
+  `Loki (logs)` variable.
 
 Example scrape config:
 
@@ -57,6 +62,7 @@ that readable rather than smearing several relays together.
 | **Fetch breakdown** | Content-type mix (`html/pdf/office/plain/image`), top domains by fetch and by error rate, distinct-domain count, and the `__overflow__` bucket. |
 | **Session sources & history** | Source-verification ratio, elided calls (raise `MCP_HISTORY_ENTRIES` if persistently non-zero), source/caller evictions. |
 | **Rate limiting** | 429 rejection rate and range total. Per-identity detail lives in the structured WARN log, not the metric. |
+| **Activity (logs)** | The actual searches and URLs, per session — recent search queries, recent fetched URLs, and failures. Backed by **Loki**, not Prometheus (metrics carry only hostnames, never full URLs or query text). Requires a Loki datasource; empty without one. |
 
 Counter panels use `rate()` over `$__rate_interval`; ratio panels clamp the
 denominator to ≥1 so low-traffic windows don't produce divide-by-zero spikes.
