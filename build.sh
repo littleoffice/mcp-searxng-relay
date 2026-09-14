@@ -4,6 +4,7 @@
 # The build is reproducible relative to:
 #   - the base-image digest pinned in the Dockerfile,
 #   - the committed go.mod / go.sum,
+#   - the native-library digests in native-deps.sha256,
 #   - SERVER_VERSION (passed in as --build-arg),
 #   - SOURCE_DATE_EPOCH (passed in as --build-arg AND --timestamp).
 #
