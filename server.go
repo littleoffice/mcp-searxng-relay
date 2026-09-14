@@ -210,7 +210,7 @@ func buildSearchToolDescription(roster []engineDescriptor) string {
 	return sb.String()
 }
 
-// buildMCPServer creates the SDK server and registers our two tools.
+// buildMCPServer creates the SDK server and registers our four tools.
 //
 // We use the generic mcp.AddTool helper so the SDK can infer JSON Schemas
 // from the input struct's fields and `jsonschema:"..."` struct tags. Output
@@ -242,51 +242,37 @@ func (s *Server) buildMCPServer() *mcp.Server {
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "searxng_read_url",
 		Description: "Fetch a URL and return its content as structured markdown. " +
-			"If you have multiple URL candidates and need to pick a subset to read, " +
-			"call searxng_url_metadata first for each — it returns title/author/date " +
-			"for ~10x less tokens. Use this tool when you've committed to reading " +
-			"specific URLs in full. Handles HTML and PDF including large multi-" +
-			"hundred-page documents. Non-UTF-8 encodings are detected and converted " +
-			"automatically. Image URLs (jpeg/png/gif/webp) are returned as image " +
-			"content blocks for vision models. PDF text is delimited by " +
-			"'--- [PDF page N of M] ---' marker lines, so you can locate and " +
-			"cite specific pages. Long documents are paginated: a " +
-			"response ending in a truncation notice tells you the total size and " +
-			"the exact start_index to pass on the next call to continue reading. " +
-			"Follow-up pages are served from cache, so paging through a document " +
-			"costs one upstream fetch. Results are cached; use force_refresh " +
-			"to bypass the cache.",
+			"Use when you've decided to read specific URLs in full; to triage " +
+			"several candidates first, use searxng_url_metadata (far cheaper). " +
+			"Handles HTML and PDF including very large documents; image URLs " +
+			"(jpeg/png/gif/webp) return as image blocks for vision models. PDF " +
+			"text carries '--- [PDF page N of M] ---' markers so you can cite " +
+			"pages. Long content is paginated via start_index (see that field); " +
+			"follow-up pages are served from cache, so paging costs one upstream " +
+			"fetch. Cached; use force_refresh to bypass.",
 	}, s.toolReadURL)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "searxng_url_metadata",
-		Description: "When deciding which of several URLs to read in full, call " +
-			"this tool first for each candidate to get title, author, publish date, " +
-			"language, site name, description, image, categories, and tags as JSON. " +
-			"For PDFs it also returns page_count, so you can gauge document size " +
-			"before committing to a full read. " +
-			"It is ~10x cheaper in tokens than searxng_read_url. After reviewing " +
-			"metadata, call searxng_read_url only on the URLs you've decided are " +
-			"worth full content. Also use this tool standalone for citation building " +
-			"or when you need to verify a publish date without reading the article. " +
-			"Results are cached and shared with searxng_read_url — a metadata fetch " +
-			"followed by a content fetch needs only one upstream HTTP request.",
+		Description: "Cheaply fetch a URL's metadata (title, author, publish date, " +
+			"description, language, image, tags) as JSON — about 10x fewer tokens " +
+			"than searxng_read_url. Use it to triage several candidates before " +
+			"committing to full reads, or standalone to build a citation or verify " +
+			"a date without reading the page. PDFs also return page_count. Results " +
+			"are cached and shared with searxng_read_url, so a metadata fetch then " +
+			"a content fetch is one upstream request.",
 	}, s.toolURLMetadata)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name: "searxng_session_sources",
 		Description: "List the URLs this relay has actually fetched for you, " +
-			"byte-exact, newest first. Call this before writing any answer that " +
-			"contains URLs, and copy the URLs from its output rather than from " +
-			"memory — a URL recalled from earlier in a long conversation is " +
-			"frequently wrong in ways that are not visible until someone clicks " +
-			"it. Each entry records how much was read (full / partial / metadata " +
-			"only) and whether the fetch succeeded, so you can tell which sources " +
-			"you are entitled to cite as read. A URL that does not appear here " +
-			"was not fetched by this relay. Pass since_seq to see only what has " +
-			"been fetched since a previous call. History is per caller and " +
-			"in-memory: it covers the current session and does not survive a " +
-			"server restart.",
+			"byte-exact, newest first. Call it before writing any answer " +
+			"containing URLs and copy them from here, not from memory (recalled " +
+			"URLs are often subtly wrong). Each entry shows how much was read " +
+			"(full / partial / metadata-only) and whether it succeeded, so you " +
+			"know what you may cite as read; a URL not listed was not fetched. " +
+			"Pass since_seq for only what's new since a previous call. Per-caller " +
+			"and in-memory: current session only, not across a restart.",
 	}, s.toolSessionSources)
 
 	return server
