@@ -89,6 +89,37 @@ func main() {
 	}
 	cfg.MetricsToken = metricsToken
 
+	// Parse the operator-curated engine roster (SEARXNG_ENGINES /
+	// SEARXNG_ENGINES_FILE) before NewServer copies cfg, since the search tool
+	// description is composed from it at build time. A named-but-unreadable
+	// SEARXNG_ENGINES_FILE fails startup with the same fail-loud stance as the
+	// auth-token file; a malformed inline entry is skipped, not fatal.
+	manualRoster, err := parseEngineRoster()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	// Optionally auto-discover engines from SearXNG's /config and layer the
+	// manual roster on top (a manual entry overrides a discovered one). Discovery
+	// is opt-in (SEARXNG_ENGINES_DISCOVER) and soft-fail: a blocked or
+	// unreachable /config — expected on hardened instances — logs a warning and
+	// leaves the manual roster intact rather than failing startup. Unlike
+	// SEARXNG_ENGINES_FILE, a discovery failure is never fatal, because a
+	// hardened instance blocking /config is a supported configuration, not a
+	// misconfiguration.
+	var discovered []engineDescriptor
+	if cfg.DiscoverEngines {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		d, derr := discoverEngines(ctx, cfg, &http.Client{Timeout: 10 * time.Second}, slog.Default())
+		cancel()
+		if derr != nil {
+			slog.Warn("engine discovery failed; advertising the manual roster only", "error", derr)
+		} else {
+			discovered = d
+		}
+	}
+	cfg.EngineRoster = mergeRosters(discovered, manualRoster)
+
 	// Compile the fetch allow-list (FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS).
 	// A malformed CIDR fails startup with a clear message — the same
 	// fail-loud stance as the auth-token parser, since this is a security
