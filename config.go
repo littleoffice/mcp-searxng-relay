@@ -38,22 +38,37 @@ type Config struct {
 	AuthUsername  string
 	AuthPassword  string
 	SearxngTokens []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
-	// EngineRoster is the operator-curated list of engines advertised to the
-	// model in the search tool description (SEARXNG_ENGINES /
-	// SEARXNG_ENGINES_FILE). Deliberately operator-supplied rather than
-	// discovered from SearXNG's /config: that endpoint enumerates every
-	// enabled engine unconditionally — SearXNG's `tokens:` gates querying, not
-	// listing — so it would leak a private engine's existence, and it is
-	// commonly blocked on hardened instances. The relay is already the trust
-	// boundary (see SearxngTokens), so the operator is the right party to
-	// state, per relay, which engines its model audience should know about.
-	// Populated by parseEngineRoster; nil/empty omits the roster block from the
-	// description but leaves the generic query-dialect guidance intact.
+	// EngineRoster is the list of engines advertised to the model in the search
+	// tool description. It comes from up to three layered sources (lowest to
+	// highest priority): auto-discovery from SearXNG's /config (opt-in, see
+	// DiscoverEngines), then SEARXNG_ENGINES, then SEARXNG_ENGINES_FILE. A
+	// manual entry overrides a discovered one for the same engine name.
+	// Populated in main() (parseEngineRoster + discoverEngines, merged by
+	// mergeRosters); nil/empty omits the roster block from the description but
+	// leaves the generic query-dialect guidance intact.
+	//
+	// Discovery is OFF by default and curation remains the recommended path: the
+	// operator is the relay's trust boundary (see SearxngTokens) and is best
+	// placed to say which engines its model audience should know about, with
+	// human-written purposes /config cannot supply.
 	EngineRoster []engineDescriptor
-	UserAgent    string
-	LogLevel     string
-	LogFormat    string
-	AuthTokens   map[tokenDigest]string // digest → identity, populated by parseAuthTokens
+	// Engine-discovery controls (all default off/empty; discovery is opt-in).
+	// DiscoverEngines enables a one-shot GET {SEARXNG_URL}/config at startup to
+	// auto-populate the roster with the instance's enabled engines. It is
+	// soft-fail: an unreachable or blocked /config (common on hardened
+	// instances) logs a warning and leaves the manual roster intact, never
+	// failing startup. DiscoverCategories, when non-empty, restricts discovery
+	// to engines in those SearXNG categories (keeps the always-on description
+	// lean). ExcludeEngines names engines that discovery must never advertise —
+	// the control for keeping a private/token-gated engine's existence out of
+	// the description even when /config lists it. Both are lowercased.
+	DiscoverEngines    bool     // SEARXNG_ENGINES_DISCOVER
+	DiscoverCategories []string // SEARXNG_ENGINES_DISCOVER_CATEGORIES: category allowlist
+	ExcludeEngines     []string // SEARXNG_ENGINES_EXCLUDE: names never auto-advertised
+	UserAgent          string
+	LogLevel           string
+	LogFormat          string
+	AuthTokens         map[tokenDigest]string // digest → identity, populated by parseAuthTokens
 	// HealthToken gates the /health probe. It is a SEPARATE secret from the
 	// MCP bearer tokens in AuthTokens — the health probe and the MCP endpoint
 	// are different trust domains and must not share a credential. Populated
@@ -304,6 +319,13 @@ func configFromEnv() Config {
 	// another), and a filter that misses one of them fails open.  One relay
 	// per trust boundary keeps the enforcement where it cannot be bypassed.
 	c.SearxngTokens = parseCSV(os.Getenv("SEARXNG_TOKENS"))
+	// Engine discovery (opt-in). SEARXNG_ENGINES_DISCOVER turns on a startup
+	// /config fetch to auto-populate the roster; the category allowlist and
+	// exclude-list scope it. Category and engine names are lowercased to match
+	// SearXNG's own identifiers and the manual roster's normalization.
+	c.DiscoverEngines = parseBool(os.Getenv("SEARXNG_ENGINES_DISCOVER"))
+	c.DiscoverCategories = lowerAll(parseCSV(os.Getenv("SEARXNG_ENGINES_DISCOVER_CATEGORIES")))
+	c.ExcludeEngines = lowerAll(parseCSV(os.Getenv("SEARXNG_ENGINES_EXCLUDE")))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
 	// hosts and CIDRs are compiled and validated in main() via newFetchACL so
 	// a bad entry fails startup with a clear message instead of being silently
@@ -610,6 +632,52 @@ func parseEngineEntry(entry string) (name, purpose string, ok bool) {
 		return "", "", false
 	}
 	return name, strings.TrimSpace(p), true
+}
+
+// lowerAll returns a copy of ss with each element trimmed and lowercased,
+// dropping empties. Used to normalize the discovery category allowlist and
+// engine exclude-list so they match SearXNG's own lowercase identifiers (and
+// the lowercase names parseEngineEntry produces).
+func lowerAll(ss []string) []string {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s = strings.ToLower(strings.TrimSpace(s)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// mergeRosters combines roster layers in priority order, lowest first, into one
+// ordered list keyed by engine name. A later layer that names an engine already
+// present updates its purpose in place — so display order follows first
+// appearance — but only when the later purpose is non-empty, so a name-only
+// mention in a higher layer does not wipe a purpose a lower layer supplied.
+// This is how a discovered roster (lowest) and the operator's SEARXNG_ENGINES /
+// SEARXNG_ENGINES_FILE curation (higher) compose: discovery fills in names,
+// manual entries add engines or override purposes.
+func mergeRosters(layers ...[]engineDescriptor) []engineDescriptor {
+	var roster []engineDescriptor
+	index := make(map[string]int)
+	for _, layer := range layers {
+		for _, e := range layer {
+			if e.Name == "" {
+				continue
+			}
+			if i, ok := index[e.Name]; ok {
+				if e.Purpose != "" {
+					roster[i].Purpose = e.Purpose
+				}
+				continue
+			}
+			index[e.Name] = len(roster)
+			roster = append(roster, e)
+		}
+	}
+	return roster
 }
 
 // countIdentities returns the number of distinct identities in m.
