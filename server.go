@@ -188,18 +188,10 @@ func NewServer(cfg Config) *Server {
 func buildSearchToolDescription(roster []engineDescriptor) string {
 	var sb strings.Builder
 	sb.WriteString(
-		"Execute web searches using a SearXNG instance — a metasearch relay, " +
-			"NOT Google or Bing. Returns titles, URLs, and snippets, with the " +
-			"backend engine(s) attributed per result.\n\n" +
-			"Targeting a specific backend: select it by ENGINE, not by a site: " +
-			"filter. Pass the engine name via the engines parameter (e.g. " +
-			"engines='wikipedia,github') or prefix the query with a !bang (e.g. " +
-			"'!github <query>'). Engine names also appear in each result's engine " +
-			"field. Do NOT use a site:host operator to reach a particular " +
-			"backend: SearXNG has no cross-engine site: operator, so on a " +
-			"specialized engine (a code forge, a wiki) it is sent as a literal " +
-			"search term and matches nothing. site: only has an effect on " +
-			"general-web engines that forward it to an upstream like Google.")
+		"SearXNG metasearch relay (not Google/Bing). Returns titles, URLs, " +
+			"snippets with per-result engine attribution. Target a backend with " +
+			"the engines param (e.g. engines='wikipedia,github') or a !bang — not " +
+			"a site: filter, which only affects general-web engines.")
 
 	if len(roster) > 0 {
 		sb.WriteString(

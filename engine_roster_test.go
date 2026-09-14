@@ -179,6 +179,13 @@ func TestBuildSearchToolDescription_NoRoster(t *testing.T) {
 	if strings.Contains(desc, "available on this instance") {
 		t.Errorf("expected no engines block for an empty roster:\n%s", desc)
 	}
+	// The base description ships in the tool definitions on every request, so it
+	// must stay terse. Guard against it regrowing toward the verbose original
+	// (~750 bytes); the current text is ~260. The cap is deliberately loose —
+	// it catches a paragraph creeping back in, not a few added words.
+	if got, max := len(desc), 400; got > max {
+		t.Errorf("empty-roster description is %d bytes, want <= %d (keep the always-on tool prefix terse):\n%s", got, max, desc)
+	}
 }
 
 func TestBuildSearchToolDescription_WithRoster(t *testing.T) {
