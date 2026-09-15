@@ -67,6 +67,12 @@ jobs:
         # library because it actually builds and links. This keeps the
         # lint job fast and avoids dragging the upstream-installer
         # workaround into a job that doesn't need it.
+        #
+        # Verified against the digest pinned in native-deps.sha256. A git tag
+        # is not an immutable ref — it can be moved — so the URL below pins a
+        # name, not bytes. The header only reaches a cgo typecheck rather than
+        # the shipped binary, but it is fetched the same way the libraries are
+        # and there is no reason to treat it as the one exception.
         run: |
           OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"
           HEADER_DIR="${HOME}/.cache/office_oxide_header"
@@ -74,6 +80,9 @@ jobs:
           curl --proto =https --tlsv1.2 -fsSL \
             "https://raw.githubusercontent.com/yfedoseev/office_oxide/${OFFICE_OXIDE_VERSION}/include/office_oxide_c/office_oxide.h" \
             -o "${HEADER_DIR}/office_oxide.h"
+          ./verify-native-dep.sh \
+            "office_oxide/${OFFICE_OXIDE_VERSION}/office_oxide.h" \
+            "${HEADER_DIR}/office_oxide.h"
           echo "CGO_CFLAGS=-I${HEADER_DIR}" >> "$GITHUB_ENV"
 
       - name: golangci-lint
@@ -103,19 +112,31 @@ jobs:
         # Linting the workflow files themselves catches a class of bug that
         # only surfaces when GitHub tries to schedule the run.
         #
-        # Both the installer script and the actionlint version are pinned. The
-        # previous form curled the script from the `main` branch and installed
-        # whatever version was newest at run time -- a mutable ref executed via
-        # bash, which is exactly the supply-chain shape SHA-pinning elsewhere in
-        # this repo is meant to avoid. The URL now points at an immutable
-        # release tag and the version is passed explicitly, so this step is
-        # reproducible. (Stronger still: install actionlint via a go.mod `tool`
-        # directive so Dependabot tracks it; left as a follow-up because it
-        # needs a go.sum update.)
+        # The installer script is downloaded, verified, and only then executed.
+        # It used to be piped straight into bash from a tag URL -- and the
+        # comment here claimed that URL was "an immutable release tag", which is
+        # not true: a git tag is a movable ref, so the fetch was mutable and the
+        # bytes went to an interpreter before anything had looked at them. Two
+        # locks now: ACTIONLINT_COMMIT makes the fetch itself immutable (a
+        # commit SHA is content-addressed, a tag is not), and the digest in
+        # native-deps.sha256 pins the exact bytes. Keep ACTIONLINT_COMMIT and
+        # ACTIONLINT_VERSION in step -- the commit is what the vVERSION tag
+        # pointed at.
+        #
+        # (Stronger still: install actionlint via a go.mod `tool` directive so
+        # Dependabot tracks it; left as a follow-up because it needs a go.sum
+        # update.)
         env:
           ACTIONLINT_VERSION: 1.7.12
+          ACTIONLINT_COMMIT: 914e7df21a07ef503a81201c76d2b11c789d3fca
         run: |
-          bash <(curl -sL "https://raw.githubusercontent.com/rhysd/actionlint/v${ACTIONLINT_VERSION}/scripts/download-actionlint.bash") "${ACTIONLINT_VERSION}"
+          curl --proto =https --tlsv1.2 -fsSL \
+            "https://raw.githubusercontent.com/rhysd/actionlint/${ACTIONLINT_COMMIT}/scripts/download-actionlint.bash" \
+            -o /tmp/download-actionlint.bash
+          ./verify-native-dep.sh \
+            "actionlint/v${ACTIONLINT_VERSION}/download-actionlint.bash" \
+            /tmp/download-actionlint.bash
+          bash /tmp/download-actionlint.bash "${ACTIONLINT_VERSION}"
           ./actionlint -color
 
   test:
@@ -133,6 +154,11 @@ jobs:
           cache: true
 
       - name: Install pdf_oxide native library
+        # The installer's own SHA-256 check reads the expected digest from the
+        # same release as the archive, so it proves the download was not
+        # corrupted in transit and nothing beyond that. The check below is the
+        # independent one: a digest pinned in this repository, compared against
+        # the static archive the linker will actually consume.
         run: |
           PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)"
           echo "Installing pdf_oxide ${PDF_OXIDE_VERSION}"
@@ -143,6 +169,9 @@ jobs:
           # `KEY=VALUE` as a single value and does not re-tokenize on spaces,
           # so the multi-flag CGO_LDFLAGS value arrives at gcc as one blob.
           INSTALL_DIR="${HOME}/.cache/pdf_oxide/${PDF_OXIDE_VERSION}"
+          ./verify-native-dep.sh \
+            "pdf_oxide/${PDF_OXIDE_VERSION}/linux_amd64/libpdf_oxide.a" \
+            "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
           echo "PDF_OXIDE_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
 
       - name: Install office_oxide native library
@@ -152,6 +181,10 @@ jobs:
         # directly. The archive layout (`./lib/lib*.{a,so}`, `./include/...`)
         # is documented in office_oxide's release.yml. Revert to a `go run`
         # once a fixed installer ships upstream.
+        #
+        # The archive is verified against its pinned digest before tar reads
+        # it, not after: extracting first and checking second would already
+        # have let a hostile archive write wherever its member paths pointed.
         run: |
           OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)"
           echo "Installing office_oxide ${OFFICE_OXIDE_VERSION}"
@@ -160,6 +193,9 @@ jobs:
           curl --proto =https --tlsv1.2 -fsSL \
             "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-x86_64.tar.gz" \
             -o /tmp/office_oxide.tar.gz
+          ./verify-native-dep.sh \
+            "office_oxide/${OFFICE_OXIDE_VERSION}/native-linux-x86_64.tar.gz" \
+            /tmp/office_oxide.tar.gz
           tar -xzf /tmp/office_oxide.tar.gz -C /tmp/office_oxide_unpack
           cp /tmp/office_oxide_unpack/lib/liboffice_oxide.a "${INSTALL_DIR}/lib/liboffice_oxide.a"
           cp -r /tmp/office_oxide_unpack/include/office_oxide_c "${INSTALL_DIR}/include/"

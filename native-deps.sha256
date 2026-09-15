@@ -1,0 +1,97 @@
+# native-deps.sha256 — pinned SHA-256 digests for the prebuilt native
+# artifacts that are linked into the shipped binary, plus the one third-party
+# script CI executes.
+#
+# WHY THIS FILE EXISTS
+#
+# Every Go dependency is pinned by content through go.sum and cross-checked
+# against the Go checksum database. The native static libraries are not: they
+# arrive as GitHub release assets, and a GitHub release asset is MUTABLE — the
+# publisher can delete and re-upload an asset under the same tag, and a git tag
+# can be moved to a different commit. A URL that embeds a version tag therefore
+# pins a *name*, not bytes.
+#
+# That matters more here than it would elsewhere, because these bytes are
+# statically linked into the relay: whatever is in liboffice_oxide.a or
+# libpdf_oxide.a runs in-process with the same privileges as the relay itself.
+# The release pipeline produces cosign signatures, SLSA provenance and SBOM
+# attestations over the resulting image, all of which faithfully certify a build
+# whose native inputs nothing had verified.
+#
+# Upstream's own published `.sha256` files do not close this. pdf_oxide's
+# installer fetches the expected digest from the same release as the archive, so
+# it detects corruption in transit and nothing else: whoever can replace the
+# tarball can replace the digest beside it. A pin is only a pin if it lives
+# somewhere the artifact's publisher does not control — here, in this
+# repository, under review, in git history.
+#
+# FORMAT
+#
+#   <key>=<64 hex chars>
+#
+# Keys are read as exact strings (no globbing, no regex) by
+# verify-native-dep.sh. Blank lines and lines whose first non-space character
+# is '#' are ignored. Each key must appear at most once.
+#
+# The key names mirror the artifact's URL path so a reviewer can trace an entry
+# back to what it pins without consulting anything else.
+#
+# THE VERSION IS PART OF THE KEY — DELIBERATELY
+#
+# Bumping github.com/yfedoseev/office_oxide/go or .../pdf_oxide/go in go.mod
+# without updating this file makes the lookup miss, and a missing key is a hard
+# failure, not a skipped check. That is the same stance the rest of the project
+# takes toward its security controls: a typo stops the build rather than quietly
+# degrading it. Dependabot bumps the Go module and cannot know to come here, so
+# the loud failure is what keeps the two in step — the same invariant
+# .github/workflows/pin-consistency.yml exists to guard for the Go toolchain.
+#
+# HOW TO UPDATE (after a version bump, or when adding an architecture)
+#
+#   ./verify-native-dep.sh --print office_oxide v0.1.11
+#
+# prints ready-to-paste lines for that version by downloading each artifact and
+# hashing it. Read the upstream release notes before pasting: this records what
+# upstream is publishing right now, so running it blind on a compromised release
+# pins the compromise. The digests below were recorded against the versions in
+# go.mod at the time of the commit that introduced them.
+#
+# WHAT IS PINNED, AND WHY THE TWO LIBRARIES DIFFER
+#
+# office_oxide is fetched as a release archive and unpacked by us, so the
+# ARCHIVE is pinned and verified before `tar` is allowed to touch it — a hostile
+# archive should never be extracted, only rejected.
+#
+# pdf_oxide is installed by upstream's own `cmd/install`, which owns the
+# download and the unpack. Rather than reimplement it, we verify the artifact it
+# leaves behind: the STATIC LIBRARY itself, which is the exact byte sequence the
+# linker consumes. Checking the linked object is a stronger anchor than checking
+# an archive that something else unpacked.
+
+# ── office_oxide v0.1.11 ──────────────────────────────────────────────────────
+# https://github.com/yfedoseev/office_oxide/releases/download/v0.1.11/
+office_oxide/v0.1.11/native-linux-x86_64.tar.gz=d4da34ed292117f370fe5a6e3037c28d4e1044e9760f8bc45e3d0594326b0260
+office_oxide/v0.1.11/native-linux-aarch64.tar.gz=d1d6f91c2aab83400da65f195ce014a86d45b5b88198505891e27d8cd2655e99
+
+# The cgo typecheck in the lint job needs only the header, so it fetches that
+# one file from the repository rather than the ~13 MB release archive. Byte
+# identical to the copy inside both release archives above, verified at the time
+# these digests were recorded.
+# https://raw.githubusercontent.com/yfedoseev/office_oxide/v0.1.11/include/office_oxide_c/office_oxide.h
+office_oxide/v0.1.11/office_oxide.h=fba0880459144792ccb2232bfe8e989875b3dece78c0b32d1832d8fae5e5a7b3
+
+# ── pdf_oxide v0.3.78 ─────────────────────────────────────────────────────────
+# Digests of libpdf_oxide.a as extracted by
+# `go run github.com/yfedoseev/pdf_oxide/go/cmd/install@v0.3.78`
+# from pdf_oxide-go-ffi-linux-{amd64,arm64}.tar.gz.
+pdf_oxide/v0.3.78/linux_amd64/libpdf_oxide.a=38e8018bf202c1e5f9ee02bfcdcc63642dbc438ef6f16b268fdf2aaa1f0939db
+pdf_oxide/v0.3.78/linux_arm64/libpdf_oxide.a=8249a982c2a46d86ee6e04f16af8a77359dfd172c2bfd5a54b2230947ae602d0
+
+# ── actionlint v1.7.12 ────────────────────────────────────────────────────────
+# The workflow-lint installer script. CI used to pipe this straight into bash
+# from a tag URL; it is now downloaded, verified against this digest, and only
+# then executed. The URL is additionally pinned to the commit the v1.7.12 tag
+# pointed at when this was recorded (914e7df21a07ef503a81201c76d2b11c789d3fca),
+# so the fetch itself is immutable and this digest is the second of two locks.
+# https://raw.githubusercontent.com/rhysd/actionlint/914e7df21a07ef503a81201c76d2b11c789d3fca/scripts/download-actionlint.bash
+actionlint/v1.7.12/download-actionlint.bash=72fa3e45ac20f3c3a512d6747b4fcf719e21f890e8c43e78d48a41fdfb900c4e
