@@ -210,6 +210,27 @@ func main() {
 	cfg.FenceKey = fenceKey
 	cfg.FenceKeySource = fenceKeySource
 
+	// Normalise the fence preamble layout (FENCE_PREAMBLE). Same fail-loud
+	// stance: an operator who set this did so because a downstream verifier
+	// expects format 1.1 two-fence output, and starting in prose mode would
+	// leave every response carrying an unsigned span that verifier was
+	// configured to reject.
+	fencePreamble, err := parseFencePreambleMode(cfg.FencePreamble)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.FencePreamble = fencePreamble
+	// Fencing the preamble is worth exactly the key that signs it: against an
+	// ephemeral, per-process key a verified trusted-instruction fence proves
+	// "whoever answered on this address produced it", not "the relay we
+	// provisioned produced it" — the verifier has no stable fingerprint to pin.
+	if fencePreamble == fencePreambleFenced && fenceKey == nil {
+		slog.Warn("fenced awareness preamble is signed by a per-process key",
+			"hint", "set FENCE_SIGNING_KEY or FENCE_SIGNING_KEY_FILE and pin the fingerprint downstream, "+
+				"or the trusted-instruction fence proves only that something answered on this address")
+	}
+
 	// Compile the in-process TLS configuration (MCP_TLS_CERT/MCP_TLS_KEY or the
 	// MCP_TLS_ACME_* family). Same fail-loud stance as the controls above: a
 	// half-configured pair, a manual+ACME conflict, an unwritable ACME cache,
@@ -704,6 +725,12 @@ func logConfig(server *Server, mode, port string) {
 		// fingerprint they pin is stable or has to be re-read after every
 		// deploy. Full key material is never logged.
 		row("fence key", fenceKeyLabel(server.fencePublicKey, cfg.FenceKeySource)),
+		// Which preamble layout — and therefore which format version every
+		// fence and /fence/public-key report. A verifier negotiates its
+		// fail-closed policy off that version, so a mismatch between what the
+		// operator configured here and what the gateway expects shows up as
+		// every response being rejected. Better read off the banner.
+		row("fence preamble", fencePreambleLabel(cfg.FencePreamble)),
 	)
 
 	maxLen := len(title)
