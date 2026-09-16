@@ -46,6 +46,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - [Rate limiting](#rate-limiting)
 - [Session limits](#session-limits)
 - [Operations](#operations)
+  - [Caches](#caches)
   - [Health endpoint](#health-endpoint)
   - [`--healthcheck` CLI flag](#--healthcheck-cli-flag)
   - [Graceful shutdown](#graceful-shutdown)
@@ -854,6 +855,14 @@ In HTTP mode the server caps concurrent sessions at 1,000. Requests to initialis
 ## Operations
 
 Notes for running the server in production. Most of this lives in the code and the comments, but it is the kind of detail an operator needs *before* the first incident, not after.
+
+### Caches
+
+The relay holds seven pieces of cached or bounded state. The two that matter for tuning are the **URL content cache** (keyed by URL alone, so it is shared across callers; it is what makes `searxng_url_metadata` and `searxng_read_url` cost one upstream request between them, and what makes pagination free after the first page) and the **per-caller source ledger** behind `searxng_session_sources` (keyed by identity + session, written on cache hits as well as misses, and carrying the original fetch timestamp through the cache so it reports when the bytes were retrieved rather than when the hit occurred).
+
+Search results are deliberately **not** cached, and neither is DNS — the latter is load-bearing for the SSRF policy, since a resolver cache between the dial-time address check and the connect would reopen the rebinding window that design closes.
+
+Full inventory, interactions, per-component impact and sizing guidance: [`docs/caching.md`](docs/caching.md).
 
 ### Health endpoint
 
