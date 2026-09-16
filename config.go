@@ -155,6 +155,18 @@ type Config struct {
 	FenceKey            ed25519.PrivateKey // parsed form; nil until main() validates, and nil means ephemeral
 	FenceKeySource      string             // human-readable origin for the banner; empty means ephemeral
 
+	// FencePreamble selects where the awareness preamble travels: as unsigned
+	// prose ahead of the content fence ("prose", format 1.0, the default) or
+	// inside its own signed trusted-instruction fence ("fenced", format 1.1).
+	//
+	// Raw value read here, normalised in main() via parseFencePreambleMode so
+	// a typo fails startup rather than silently leaving the preamble unsigned
+	// at a deployment whose gateway was configured to require otherwise. Only
+	// meaningful alongside a persistent signing key the verifier pins: fencing
+	// the preamble under an ephemeral, same-origin key buys integrity against
+	// in-transit tampering, not against relay impersonation.
+	FencePreamble string // FENCE_PREAMBLE: "prose" (default) | "fenced"
+
 	// In-process TLS for the HTTP transport (opt-in). Raw values are read
 	// here; the compiled, validated form is populated in main() via
 	// newTLSSettings, following the same "read raw, validate in main" split
@@ -350,6 +362,9 @@ func configFromEnv() Config {
 	// Leaving both unset keeps the per-process ephemeral key.
 	c.FenceSigningKey = strings.TrimSpace(os.Getenv(fenceKeyEnvVar))
 	c.FenceSigningKeyFile = strings.TrimSpace(os.Getenv(fenceKeyFileEnvVar))
+	// Fence preamble layout — raw here, normalised in main() via
+	// parseFencePreambleMode. Unset keeps the 1.0 prose preamble.
+	c.FencePreamble = strings.TrimSpace(os.Getenv(fencePreambleEnvVar))
 	// In-process TLS — only the raw values are read here. Validation and the
 	// mutually-exclusive manual-vs-ACME decision happen in main() via
 	// newTLSSettings, so a half-configured or conflicting setup fails startup
