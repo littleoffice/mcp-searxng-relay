@@ -10,7 +10,9 @@ A Model Context Protocol (MCP) server giving AI agents web search and URL fetchi
 
 A hosted search API structurally cannot offer this: it sees one query at a time and keeps no per-caller ledger. The same reasoning runs through the rest of the project — every search and fetch is [attributed to an identity and a session](#logging), the [SSRF policy](#security-notes) is documented and its reach is stated in config rather than inferred, and nothing that would widen a security boundary is allowed to happen silently. If you need to be able to say what your agents searched, what they read, and how much of it, that is what this is for.
 
-**Companion project.** This relay is designed to be deployed alongside [searxng-helm](https://github.com/littleoffice/searxng-helm), a hardened Helm chart for SearXNG on Kubernetes (rootless, read-only rootfs, deny-by-default NetworkPolicies, cosign-signed). The chart deploys both SearXNG and this relay as a pair; see its README for the full infrastructure security story. The relay also ships minimal standalone K8s manifests for quick testing — see [Kubernetes](#kubernetes) below.
+**Companion projects.** This relay is designed to be deployed alongside [searxng-helm](https://github.com/littleoffice/searxng-helm), a hardened Helm chart for SearXNG on Kubernetes (rootless, read-only rootfs, deny-by-default NetworkPolicies, cosign-signed). The chart deploys both SearXNG and this relay as a pair; see its README for the full infrastructure security story. The relay also ships minimal standalone K8s manifests for quick testing — see [Kubernetes](#kubernetes) below.
+
+The second companion is [promptfence-gateway](https://github.com/littleoffice/promptfence-gateway), a verifying security gateway — the paper's §4.5 component, and the counterpart this relay's signatures were built for. It sits in the transport between client and relay, checks every `<sec:fence>` signature deterministically, and applies a policy (`reject`, `annotate`, `audit`) before the content can become model context. Verification is what turns the signatures from forward-compatibility into an enforced control; the wire contract a verifier must implement is specified in [`docs/fence-verification.md`](docs/fence-verification.md).
 
 This MCP server supports both the **stdio** transport (for local use with Claude Desktop and similar clients) and the **Streamable HTTP** transport (for networked or containerised deployments).
 
@@ -19,6 +21,8 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 ## Contents
 
 - [Features](#features)
+- [Architecture](#architecture)
+  - [Communication](#communication)
 - [Requirements](#requirements)
   - [Enabling JSON format in SearXNG](#enabling-json-format-in-searxng)
 - [Quick start](#quick-start)
@@ -42,6 +46,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - [Rate limiting](#rate-limiting)
 - [Session limits](#session-limits)
 - [Operations](#operations)
+  - [Caches](#caches)
   - [Health endpoint](#health-endpoint)
   - [`--healthcheck` CLI flag](#--healthcheck-cli-flag)
   - [Graceful shutdown](#graceful-shutdown)
@@ -74,6 +79,139 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients. The signing key is per-process by default, or operator-supplied via `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE` when a verifier needs a stable fingerprint to pin. `FENCE_PREAMBLE=fenced` additionally moves the awareness preamble inside its own signed trusted-instruction fence (format 1.1), leaving no unsigned bytes in a response.
 - **Reproducible container builds** — bit-for-bit. Given the same source commit and `SOURCE_DATE_EPOCH`, the build produces a byte-identical image, verifiable via `docker save <image> | sha256sum`. Toolchain pinned by digest, `go.sum` frozen, no embedded paths, VCS state, or build IDs. Details in [`supply-chain.md`](docs/supply-chain.md).
 - **Structured startup banner** with all configuration values printed to stderr on start (secrets redacted)
+
+---
+
+## Architecture
+
+Three moving parts, three trust zones. The relay is the only component that
+talks to all of them, which is why the security controls live here.
+
+```mermaid
+flowchart LR
+    subgraph client_zone["① Client zone — trusted"]
+        agent["MCP client<br/>Claude Desktop · Claude Code · Zed"]
+    end
+
+    subgraph service_zone["② Service zone — operator-controlled"]
+        gw["fence-gateway<br/><i>optional verifier</i>"]
+        relay["mcp-searxng-relay<br/>:8080"]
+        searxng["SearXNG<br/>:8080"]
+    end
+
+    subgraph internal_zone["③ Internal network — opt-in reach"]
+        wiki["Confluence · Jira · wiki<br/><i>FETCH_ALLOWED_HOSTS</i>"]
+    end
+
+    subgraph hostile["④ Open web — untrusted"]
+        engines["Search engines"]
+        pages["Fetched pages, PDFs,<br/>Office documents"]
+    end
+
+    agent -- "stdio<br/>or HTTPS + bearer" --> gw
+    gw -- "HTTP/HTTPS + bearer<br/>Streamable HTTP" --> relay
+    agent -. "direct, when no gateway<br/>is deployed" .-> relay
+
+    relay -- "HTTP + engine tokens<br/>/search?format=json" --> searxng
+    relay -- "GET, SSRF-checked<br/>every hop" --> pages
+    relay -- "GET, allow-listed<br/>host:port only" --> wiki
+    searxng --> engines
+
+    gw -. "GET /fence/public-key" .-> relay
+
+    subgraph ops["⑤ Operations"]
+        scrape["Prometheus"]
+        lb["Load balancer<br/>· probes"]
+    end
+
+    scrape -- "GET /metrics<br/>MCP_METRICS_TOKEN" --> relay
+    lb -- "GET /health" --> relay
+```
+
+**What each boundary enforces.**
+
+| Boundary | Control | Failure mode it prevents |
+|---|---|---|
+| ① → ② | Bearer token (`MCP_AUTH_TOKEN*`), per-caller rate limit, cross-origin check | Unauthenticated use; a leaked token driving unbounded traffic |
+| ② → ④ | SSRF policy at TCP-dial time, revalidated on every redirect hop | An attacker-supplied URL reaching loopback, RFC 1918, or cloud metadata |
+| ② → ③ | `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`, both port-mandatory | Allow-listing a wiki and getting its Redis listener for free |
+| ④ → ① | Prompt fence: signed `<sec:fence>`, per-response nonce, awareness preamble | Fetched content impersonating the relay or escaping its boundary |
+
+The fence is the only control on the last row, and it is the only one whose
+enforcement point is outside this process — either the consuming model honours
+the preamble, or a verifying gateway checks the signature deterministically.
+
+### Communication
+
+One search-then-read turn, with the optional verifying gateway in place. Without
+a gateway, the client's arrows go straight to the relay and the verify step
+simply does not happen.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as MCP client
+    participant G as fence-gateway
+    participant R as mcp-searxng-relay
+    participant S as SearXNG
+    participant W as Web
+
+    Note over G,R: once, at gateway start
+    G->>R: GET /fence/public-key
+    R-->>G: {publicKey, fingerprint, version}
+    Note right of G: pin fingerprint, or TOFU
+
+    M->>G: initialize
+    G->>R: initialize (Authorization: Bearer …)
+    R-->>G: Mcp-Session-Id
+    G-->>M: capabilities
+
+    M->>G: tools/call searxng_web_search
+    G->>R: forward
+    R->>S: GET /search?format=json&tokens=…
+    S->>W: query enabled engines
+    W-->>S: results
+    S-->>R: JSON + unresponsive_engines
+    Note right of R: WARN if degraded<br/>mcp_searches_degraded_total++
+    R->>R: wrapFence(rating=untrusted, type=content)
+    R-->>G: preamble + signed fence element
+    G->>G: verify Ed25519 over<br/>domain ‖ len(C) ‖ C ‖ M
+    alt signature valid
+        G-->>M: result forwarded
+    else invalid, -policy reject
+        G-->>M: isError, content withheld
+        Note right of G: fence.rejected → audit log
+    end
+
+    M->>G: tools/call searxng_read_url
+    G->>R: forward
+    R->>R: SSRF check at dial time,<br/>re-checked per redirect
+    R->>W: GET url
+    W-->>R: HTML / PDF / Office / image
+    R->>R: extract → Markdown, cache,<br/>record in session history
+    R-->>G: signed fence (escaped)
+    G-->>M: verified content
+
+    M->>G: tools/call searxng_session_sources
+    G->>R: forward
+    R-->>G: signed fence (encoding="cdata")
+    Note over G: CDATA body is byte-exact —<br/>recover by concatenating sections,<br/>never by entity-unescaping
+    G-->>M: verified source ledger
+```
+
+The last exchange is the one a verifier is most likely to get wrong, and the
+reason [`docs/fence-verification.md`](docs/fence-verification.md) exists: that
+response carries `encoding="cdata"`, and a verifier that assumes the
+entity-escaped form recovers different bytes than were signed and rejects a
+perfectly good fence.
+
+The diagram shows the default format 1.0 layout, where the awareness preamble
+travels as unsigned prose ahead of the fence. Under `FENCE_PREAMBLE=fenced`
+(format 1.1) each of those responses carries two fences instead — the preamble
+in its own signed `rating="trusted"` fence, then the content fence — and the
+gateway can then enforce that no unsigned bytes reached the model at all. See
+[Fenced awareness preamble](#security-notes) for the rollout, and the wire
+contract for what a verifier must check across the pair.
 
 ---
 
@@ -564,7 +702,7 @@ What this provides today:
 
 - **Key identification and format versioning.** Every fence carries `kid` — the same fingerprint reported by `/fence/public-key` — and `version`. `kid` lets a verifier holding several keys select one instead of trial-verifying against all of them, which is what makes key rotation workable: fences signed by an outgoing key stay in the context window and keep arriving while the new key rolls out, and without `kid` "signed by a key I have since retired" and "forged" both present as "nothing in my set verifies this". Both attributes are inside the canonical signed form, so an attacker cannot rewrite `kid` to name a key they control, or downgrade `version` to reach an older verification path, without invalidating the signature.
 - **Boundary-escape protection.** Each fence carries a 128-bit random `nonce` (from `crypto/rand`). An attacker who controls fetched content cannot guess the nonce, so they cannot forge a closing tag that prematurely ends the fence or open a new "trusted" fence inside it. The awareness preamble tells the consuming model to honour only the boundary identified by the per-response nonce.
-- **Forward-compatible signatures.** Every fence carries an Ed25519 signature so a future fence-verifying client (or an external verifying gateway) can authenticate that fenced content was emitted by this specific server process. The signed bytes are a domain-separated, length-prefixed serialisation — `"PromptFence/v1.0" || 0x00 || uint64_be(len(content)) || content || canonical_metadata` — fed to PureEd25519 per RFC 8032 §5.1 (the signing operation hashes the message internally with SHA-512; we do not pre-hash). This is a deliberate deviation from paper §4.3's literal `Ed25519(SHA-256(C || M))` construction, which silently changes the security argument by feeding a 32-byte digest into a signature scheme that already hashes its input. The domain tag prevents cross-protocol signature confusion; the length prefix removes the boundary ambiguity a bare `content || canonical_metadata` concatenation would leave. Content is signed in its pre-XML-escape form, so a verifier xml-unescapes the parsed element body before verifying. The exact wire format is documented in the `fence.go` `computeFenceSignature` and `buildFenceSigningInput` comment blocks. **No MCP client currently verifies these signatures**; they are present for forward compatibility.
+- **Forward-compatible signatures.** Every fence carries an Ed25519 signature so a future fence-verifying client (or an external verifying gateway) can authenticate that fenced content was emitted by this specific server process. The signed bytes are a domain-separated, length-prefixed serialisation — `"PromptFence/v1.0" || 0x00 || uint64_be(len(content)) || content || canonical_metadata` — fed to PureEd25519 per RFC 8032 §5.1 (the signing operation hashes the message internally with SHA-512; we do not pre-hash). This is a deliberate deviation from paper §4.3's literal `Ed25519(SHA-256(C || M))` construction, which silently changes the security argument by feeding a 32-byte digest into a signature scheme that already hashes its input. The domain tag prevents cross-protocol signature confusion; the length prefix removes the boundary ambiguity a bare `content || canonical_metadata` concatenation would leave. Content is signed in its pre-XML-escape form, so a verifier xml-unescapes the parsed element body before verifying. The exact wire format is normatively specified in [`docs/fence-verification.md`](docs/fence-verification.md), and documented alongside the code in the `fence.go` `computeFenceSignature` and `buildFenceSigningInput` comment blocks. **No MCP client verifies these signatures today**, so in a client-only deployment they remain forward compatibility rather than an enforced control. A verifier does exist — [promptfence-gateway](https://github.com/littleoffice/promptfence-gateway) — but it runs as a separate hop in the transport, not in the client, so the guarantee is only present where an operator has deployed one.
 
 Limitations, stated honestly:
 
@@ -774,6 +912,14 @@ In HTTP mode the server caps concurrent sessions at 1,000. Requests to initialis
 ## Operations
 
 Notes for running the server in production. Most of this lives in the code and the comments, but it is the kind of detail an operator needs *before* the first incident, not after.
+
+### Caches
+
+The relay holds seven pieces of cached or bounded state. The two that matter for tuning are the **URL content cache** (keyed by URL alone, so it is shared across callers; it is what makes `searxng_url_metadata` and `searxng_read_url` cost one upstream request between them, and what makes pagination free after the first page) and the **per-caller source ledger** behind `searxng_session_sources` (keyed by identity + session, written on cache hits as well as misses, and carrying the original fetch timestamp through the cache so it reports when the bytes were retrieved rather than when the hit occurred).
+
+Search results are deliberately **not** cached, and neither is DNS — the latter is load-bearing for the SSRF policy, since a resolver cache between the dial-time address check and the connect would reopen the rebinding window that design closes.
+
+Full inventory, interactions, per-component impact and sizing guidance: [`docs/caching.md`](docs/caching.md).
 
 ### Health endpoint
 

@@ -40,10 +40,17 @@ import (
 //     usage; the domain tag and length prefix are added to remove
 //     cross-protocol and boundary-ambiguity risks (see computeFenceSignature
 //     for the exact wire format and the rationale).
-//   - At the time of writing, NO MCP CLIENT VERIFIES THESE SIGNATURES.  The
-//     signature provides authentication semantics ONLY when paired with a
-//     downstream verifier (the paper's "security gateway").  We expose the
-//     public key at /fence/public-key so a future verifier can be built.
+//   - NO MCP CLIENT VERIFIES THESE SIGNATURES.  The signature provides
+//     authentication semantics ONLY when paired with a downstream verifier
+//     (the paper's "security gateway").  One exists — promptfence-gateway,
+//     which proxies MCP and checks fences in transit — but it is a separate
+//     hop an operator has to deploy, so a client talking straight to this
+//     relay still gets no verification.  The public key is exposed at
+//     /fence/public-key for any verifier to fetch, and the wire contract a
+//     verifier must implement is specified in docs/fence-verification.md.
+//     Changing the wire format without updating that document breaks every
+//     deployed verifier silently, which is the failure mode it exists to
+//     prevent.
 //   - For the unverified pipeline that exists today, defence against
 //     boundary-escape attacks (an attacker embedding a fake </sec:fence>
 //     followed by a fake <sec:fence rating="trusted"> in fetched page content)
