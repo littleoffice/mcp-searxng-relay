@@ -112,7 +112,13 @@ starting points:
   are rejected at TCP-dial time, and redirect chains are re-validated at every
   hop. See the "Security notes" section of the main `README.md`.
 - **Bearer-token authentication** with a multi-token table and per-identity
-  audit logging.
+  audit logging, or **OAuth 2.0 / OIDC** JWT verification against an external
+  identity provider (`MCP_OAUTH_ISSUER`) — the relay acts only as a Resource
+  Server (it verifies tokens, never issues them), accepts only asymmetric
+  signing algorithms (closing the RS256→HS256 key-confusion class), and derives
+  the audit identity from a token claim. The two mechanisms can run side by
+  side. See the "Security notes" and "OAuth 2.0 / OIDC" sections of the main
+  `README.md`.
 - **Cross-origin / CSRF protection** on the HTTP transport, applied by the
   go-sdk wrapper introduced as the fix for CVE-2026-33252. Browser-originated
   POSTs with cross-origin `Sec-Fetch-Site` / `Origin` headers, and POSTs
