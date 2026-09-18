@@ -453,11 +453,17 @@ func (s *Server) writeHealthResponse(w http.ResponseWriter, ok bool) {
 // via FENCE_SIGNING_KEY / FENCE_SIGNING_KEY_FILE, in which case it is stable
 // for as long as that key is (see fence_key.go).  The startup banner says
 // which of the two applies.
+//
+// The `version` field is the version this process actually puts on the wire
+// (FENCE_PREAMBLE decides; see Server.fenceVersion), not the newest one the
+// binary can emit.  A verifier negotiates its policy here — whether it can
+// require every non-whitespace byte to be fenced — so advertising a version
+// the fences do not carry would have it reject every response.
 func (s *Server) handleFencePublicKey(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprintf(w, `{"version":%q,"algorithm":"Ed25519","publicKey":%q,"fingerprint":%q}`+"\n",
-		fenceFormatVersion,
+		s.fenceVersion(),
 		fencePublicKeyBase64(s.fencePublicKey),
 		fenceKeyFingerprint(s.fencePublicKey))
 }

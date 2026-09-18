@@ -57,8 +57,8 @@ func TestWrapFence_AlwaysEmitsKeyIDAndVersion(t *testing.T) {
 	}
 	tag := extractOpeningTag(t, out)
 
-	if got := mustExtractAttr(t, tag, "version"); got != fenceFormatVersion {
-		t.Errorf("version = %q, want %q", got, fenceFormatVersion)
+	if got := mustExtractAttr(t, tag, "version"); got != s.fenceVersion() {
+		t.Errorf("version = %q, want %q", got, s.fenceVersion())
 	}
 	// kid must equal the fingerprint /fence/public-key reports, or a verifier
 	// keying its trusted set on that endpoint will never match a fence.
@@ -617,9 +617,9 @@ func mustExtractAttr(t *testing.T, tag, key string) string {
 // optional `source` attribute included only when present, signature and
 // xmlns excluded.  Mirrors fenceMetadata.canonicalAttributes.
 func reconstructCanonical(openTag string) string {
-	// keys is already in alphabetical order; the optional `source` slots
-	// between `rating` and `timestamp`.
-	keys := []string{"kid", "nonce", "rating", "source", "timestamp", "type", "version"}
+	// keys is already in alphabetical order; the optional `encoding` sorts
+	// first and `source` slots between `rating` and `timestamp`.
+	keys := []string{"encoding", "kid", "nonce", "rating", "source", "timestamp", "type", "version"}
 	var pairs []string
 	for _, k := range keys {
 		prefix := k + `="`
