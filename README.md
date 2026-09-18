@@ -205,6 +205,14 @@ response carries `encoding="cdata"`, and a verifier that assumes the
 entity-escaped form recovers different bytes than were signed and rejects a
 perfectly good fence.
 
+The diagram shows the default format 1.0 layout, where the awareness preamble
+travels as unsigned prose ahead of the fence. Under `FENCE_PREAMBLE=fenced`
+(format 1.1) each of those responses carries two fences instead — the preamble
+in its own signed `rating="trusted"` fence, then the content fence — and the
+gateway can then enforce that no unsigned bytes reached the model at all. See
+[Fenced awareness preamble](#security-notes) for the rollout, and the wire
+contract for what a verifier must check across the pair.
+
 ---
 
 ## Requirements
