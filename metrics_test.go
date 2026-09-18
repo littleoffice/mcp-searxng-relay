@@ -18,10 +18,10 @@ import (
 
 func TestHistogramBucketing(t *testing.T) {
 	var h histogram
-	h.Observe(10 * time.Millisecond)  // <= 0.05 → bucket 0
-	h.Observe(60 * time.Millisecond)  // <= 0.1  → bucket 1
-	h.Observe(20 * time.Second)       // <= 30   → last bucket
-	h.Observe(45 * time.Second)       // > 30    → overflow (+Inf only)
+	h.Observe(10 * time.Millisecond) // <= 0.05 → bucket 0
+	h.Observe(60 * time.Millisecond) // <= 0.1  → bucket 1
+	h.Observe(20 * time.Second)      // <= 30   → last bucket
+	h.Observe(45 * time.Second)      // > 30    → overflow (+Inf only)
 
 	if got := h.buckets[0].Load(); got != 1 {
 		t.Errorf("bucket le=0.05: got %d, want 1", got)
