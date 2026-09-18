@@ -249,9 +249,15 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			}
 		}
 
-		// Neither path matched. Point OAuth clients at the metadata document
-		// (RFC 9728 §5.1) so they can discover where to authenticate; the raw
-		// Authorization header is never logged, so a guess cannot leak.
+		// Neither path matched. One counter for the endpoint regardless of which
+		// credential path was tried: mcp_auth_failures_total measures the gated
+		// surface, and splitting it by mechanism would let a caller move the
+		// needle between series by choosing a header format.
+		s.metrics.recordAuthFailure("mcp")
+
+		// Point OAuth clients at the metadata document (RFC 9728 §5.1) so they
+		// can discover where to authenticate; the raw Authorization header is
+		// never logged, so a guess cannot leak.
 		if oauthOn {
 			w.Header().Set("WWW-Authenticate",
 				`Bearer realm="mcp", resource_metadata="`+resourceMetadataURL(r)+`"`)
@@ -275,12 +281,19 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 // short-circuit on the first differing byte) and never logs the offered
 // header. On failure it returns 401 with a WWW-Authenticate challenge naming
 // realm, and a warn line carrying logMsg and the remote address.
+//
+// realm doubles as the mcp_auth_failures_total endpoint label — it is always
+// "health" or "metrics" here, both of which are authFailureEndpoints values —
+// so a rejection bumps that counter when m is non-nil.
 func requireSharedSecret(
-	tokens map[tokenDigest]struct{}, realm, logMsg string, next http.Handler,
+	tokens map[tokenDigest]struct{}, realm, logMsg string, m *Metrics, next http.Handler,
 ) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got := sha256.Sum256([]byte(r.Header.Get("Authorization")))
 		if _, ok := tokens[got]; !ok {
+			if m != nil {
+				m.recordAuthFailure(realm)
+			}
 			slog.Warn(logMsg, "remote", r.RemoteAddr)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="`+realm+`"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -304,7 +317,7 @@ func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
 	if len(s.config.HealthToken) == 0 {
 		return next
 	}
-	return requireSharedSecret(s.config.HealthToken, "health", "unauthorized health request", next)
+	return requireSharedSecret(s.config.HealthToken, "health", "unauthorized health request", &s.metrics, next)
 }
 
 // requireMetricsAuth is the /metrics-dedicated auth check.  MCP_METRICS_TOKEN
@@ -340,6 +353,7 @@ func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
 func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
 	if len(s.config.MetricsToken) == 0 {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			s.metrics.recordAuthFailure("metrics")
 			slog.Warn("metrics request rejected: MCP_METRICS_TOKEN is not configured",
 				"remote", r.RemoteAddr,
 				"hint", "set MCP_METRICS_TOKEN to a value from `openssl rand -hex 32` and give it to your scraper")
@@ -347,7 +361,7 @@ func (s *Server) requireMetricsAuth(next http.Handler) http.Handler {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 		})
 	}
-	return requireSharedSecret(s.config.MetricsToken, "metrics", "unauthorized metrics request", next)
+	return requireSharedSecret(s.config.MetricsToken, "metrics", "unauthorized metrics request", &s.metrics, next)
 }
 
 // limitSessions rejects new initialize requests when the session cap is
@@ -481,11 +495,17 @@ func (s *Server) writeHealthResponse(w http.ResponseWriter, ok bool) {
 // via FENCE_SIGNING_KEY / FENCE_SIGNING_KEY_FILE, in which case it is stable
 // for as long as that key is (see fence_key.go).  The startup banner says
 // which of the two applies.
+//
+// The `version` field is the version this process actually puts on the wire
+// (FENCE_PREAMBLE decides; see Server.fenceVersion), not the newest one the
+// binary can emit.  A verifier negotiates its policy here — whether it can
+// require every non-whitespace byte to be fenced — so advertising a version
+// the fences do not carry would have it reject every response.
 func (s *Server) handleFencePublicKey(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = fmt.Fprintf(w, `{"version":%q,"algorithm":"Ed25519","publicKey":%q,"fingerprint":%q}`+"\n",
-		fenceFormatVersion,
+		s.fenceVersion(),
 		fencePublicKeyBase64(s.fencePublicKey),
 		fenceKeyFingerprint(s.fencePublicKey))
 }

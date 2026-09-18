@@ -31,7 +31,7 @@ type searchInput struct {
 	Categories string `json:"categories,omitempty"  jsonschema:"comma-separated SearXNG categories e.g. 'news', 'science', 'files', 'images' (default: general web)"`
 	Language   string `json:"language,omitempty"    jsonschema:"language code e.g. 'en', 'de', or 'all' (default: all)"`
 	TimeRange  string `json:"time_range,omitempty"  jsonschema:"filter by time: 'day', 'month', or 'year'"`
-	Engines    string `json:"engines,omitempty"     jsonschema:"comma-separated SearXNG engine names to query, e.g. 'wikipedia,github' — engine names appear in the engine field of prior results; unknown names are silently ignored by SearXNG (default: instance's configured engines)"`
+	Engines    string `json:"engines,omitempty"     jsonschema:"comma-separated engine names, e.g. 'wikipedia,github'; names also appear in each result's engine field; unknown names ignored (default: instance's engines)"`
 	Safesearch int    `json:"safesearch,omitempty"  jsonschema:"safe search level: 0 = off, 1 = moderate, 2 = strict (default: 0)"`
 }
 
@@ -305,6 +305,15 @@ func (s *Server) search(
 	// noisy but correct — the alternative is the silence that caused the
 	// misdiagnosis in the first place.
 	if failures := parseUnresponsiveEngines(searxResp.UnresponsiveEngines); len(failures) > 0 {
+		// Counted as well as logged.  The log line is how an operator
+		// diagnoses one incident; the counters are how they find out there
+		// is one — and, read against mcp_searches_total, how they learn
+		// whether backend flakiness is a background hum or the thing making
+		// answers worse.  A log line nobody greps is not monitoring.
+		s.metrics.SearchesDegraded.Add(1)
+		for _, f := range failures {
+			s.metrics.recordEngineFailure(f.Engine)
+		}
 		callerLogger(ctx).Warn("searxng search was degraded: some engines did not respond",
 			"unresponsive_engines", strings.Join(engineNames(failures), ","),
 			"unresponsive_count", len(failures),

@@ -4,6 +4,7 @@
 # The build is reproducible relative to:
 #   * the base-image digest pinned below,
 #   * the committed go.mod / go.sum,
+#   * the native-library digests pinned in native-deps.sha256,
 #   * the SERVER_VERSION value passed in,
 #   * SOURCE_DATE_EPOCH passed in.
 #
@@ -71,12 +72,36 @@ COPY go.mod go.sum ./
 ENV GOFLAGS="-mod=readonly"
 RUN go mod download
 
+# The digest pins for the native libraries, copied before the install steps
+# below so each one can verify what it fetched. Separate from the `COPY . .`
+# further down so editing Go source does not invalidate the (slow) library
+# install layers.
+#
+# go.sum pins every Go dependency by content. These two libraries are not Go
+# dependencies: they are prebuilt static archives fetched from GitHub release
+# assets, which are mutable — an asset can be re-uploaded under the same tag,
+# and a tag can be moved. Without a digest recorded on this side, the URLs
+# below pin a name and not bytes, and the bytes get statically linked into the
+# relay. See native-deps.sha256 for the full reasoning.
+COPY native-deps.sha256 verify-native-dep.sh ./
+
 # Install the pdf_oxide static library. The installer module is pinned by
 # version and verified through the Go module proxy and checksum database;
 # the precompiled libpdf_oxide.a it deposits in /pdf_oxide_lib is an upstream
 # artifact whose source-to-binary provenance is documented in supply-chain.md.
+#
+# The installer performs its own SHA-256 check, but it reads the expected
+# digest from the same release it just downloaded the archive from — so it
+# catches corruption in transit and nothing more: whoever can replace the
+# tarball can replace the digest file beside it. The check below is the
+# independent one, against a digest pinned in this repository, and it runs
+# against the static archive itself — the exact bytes the linker consumes.
 RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
-    go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib
+    GOARCH="$(go env GOARCH)" && \
+    go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib && \
+    ./verify-native-dep.sh \
+        "pdf_oxide/${PDF_OXIDE_VERSION}/linux_${GOARCH}/libpdf_oxide.a" \
+        "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a"
 
 # Install the office_oxide static library.
 #
@@ -96,6 +121,11 @@ RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_o
 # bundles BOTH the shared library and the static archive. We only need
 # the static archive for this build — the final binary is statically
 # linked into a scratch image — and discard the .so during repack.
+#
+# The archive is verified against its pinned digest BEFORE tar is allowed to
+# read it. Order matters: verifying after extraction would already have let a
+# hostile archive write wherever its member paths pointed. An archive that
+# fails the check is rejected, never unpacked.
 RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/office_oxide/go)" && \
     GOARCH="$(go env GOARCH)" && \
     case "${GOARCH}" in \
@@ -107,6 +137,9 @@ RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/of
     curl --proto =https --tlsv1.2 -fsSL \
         "https://github.com/yfedoseev/office_oxide/releases/download/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
         -o /tmp/office_oxide.tar.gz && \
+    ./verify-native-dep.sh \
+        "office_oxide/${OFFICE_OXIDE_VERSION}/native-linux-${OFFICE_ARCH}.tar.gz" \
+        /tmp/office_oxide.tar.gz && \
     tar -xzf /tmp/office_oxide.tar.gz -C /tmp/office_oxide_unpack && \
     cp /tmp/office_oxide_unpack/lib/liboffice_oxide.a "/office_oxide_lib/lib/linux_${GOARCH}/liboffice_oxide.a" && \
     cp -r /tmp/office_oxide_unpack/include/office_oxide_c /office_oxide_lib/include/ && \

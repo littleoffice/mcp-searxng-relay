@@ -49,7 +49,7 @@ that obligation, it just makes it explicit.
 
 ## Dependency inventory
 
-The project has **nine direct dependencies** and approximately thirty
+The project has **ten direct dependencies** and approximately thirty
 transitive ones. The full, authoritative list is `go.mod` / `go.sum` in the
 repository root; this section explains what each direct dependency is for, and
 is honest about the transitive surface introduced by the largest of them.
@@ -70,6 +70,7 @@ documentation bug worth reporting.
 | `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.8. |
 | `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.4. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.58.0. |
+| `golang.org/x/crypto` | `golang.org/x/crypto/acme` and `.../acme/autocert` for the optional in-process ACME TLS mode (`MCP_TLS_ACME_DOMAINS`). Only reached when that mode is enabled; the default plain-HTTP and manual-cert paths use the standard library alone. Maintained by the Go team. Pinned at v0.56.0. |
 | `github.com/coreos/go-oidc/v3` | OpenID Connect Resource-Server verification for the optional OAuth path (`MCP_OAUTH_*`): OIDC discovery, the auto-rotating remote JWKS cache, and JWT signature/claims validation. Reachable only when `MCP_OAUTH_ISSUER` is set; unused in the default static-token configuration. Widely used, maintained under the CoreOS/Red Hat umbrella. Pinned at v3.21.0. |
 | `github.com/go-jose/go-jose/v4` | JOSE primitives (JWS parsing and signature verification, JWKS types) underneath `go-oidc`, and used directly by the relay to verify against a static `MCP_OAUTH_JWKS_FILE`. The actively maintained successor to `square/go-jose`. Pinned at v4.1.5. |
 
@@ -111,22 +112,22 @@ worth knowing about are:
 - **Miscellaneous** — `elliotchance/pie/v2` (generic slice helpers used
   by trafilatura), `ebitengine/purego` (used by `pdf_oxide` for CGo-free
   function calls into the Rust library), `yosida95/uritemplate/v3` (URI
-  templates used by the SDK), `golang-jwt/jwt/v5` (pulled in by `go-oidc`
-  for its own JWT handling), and the Go-team extension modules
+  templates used by the SDK), and the Go-team extension modules
   `golang.org/x/{exp,oauth2,sys,text}` pulled in across the tree —
-  `x/oauth2` is now also used first-hand by `go-oidc`.
+  `x/oauth2` is now also reached first-hand by `go-oidc`.
 
 ### Why the dependency set looks the way it does
 
 The codebase itself uses **only the Go standard library** for HTTP serving,
 logging (`log/slog`), configuration (env vars parsed by hand), and JSON
 (`encoding/json`). There is no web framework, no ORM, no DI container, no
-configuration library. The nine direct dependencies are each there for a
+configuration library. The ten direct dependencies are each there for a
 specific reason:
 
 - The protocol SDK because we implement that protocol.
-- `golang-lru` and `golang.org/x/net` because they are small,
-  single-purpose, and Go-team-adjacent.
+- `golang-lru`, `golang.org/x/net`, and `golang.org/x/crypto` because they
+  are small, single-purpose, and Go-team-adjacent (`x/crypto` only when the
+  optional ACME TLS mode is enabled).
 - `go-oidc` and `go-jose` because verifying an OAuth JWT correctly (JWKS
   rotation, signature verification, the claim checks, and refusing the
   HMAC/`none` key-confusion class of forgery) is precisely the kind of
@@ -301,6 +302,15 @@ build then links against it via CGO. Two things follow from this:
   reviewer who wants full source-to-binary provenance for the PDF path would
   need to build that library from its Rust source themselves rather than trust
   the precompiled artifact.
+- **The blob is pinned by digest on this side.** The installer does perform a
+  SHA-256 check of its own, but it fetches the expected digest from the same
+  release it just downloaded the archive from — so it detects corruption in
+  transit and nothing further: whoever can replace the tarball can replace the
+  `.sha256` beside it. After the installer runs, the build compares
+  `libpdf_oxide.a` against a digest recorded in
+  [`native-deps.sha256`](../native-deps.sha256) and fails if it differs. The
+  check is on the static archive rather than the downloaded tarball because
+  that is the exact byte sequence the linker consumes.
 
 This is a deliberate trade-off: `pdf_oxide`'s Rust core provides panic-free,
 timeout-bounded PDF parsing that would be difficult to match with a pure-Go
@@ -353,16 +363,60 @@ There are two differences from `pdf_oxide` to be aware of:
 - **No checksum-database verification of the installer.** With `pdf_oxide`
   the installer module is fetched through the Go module proxy and verified
   against the checksum database before it runs. With the direct-download
-  workaround there is no equivalent intermediate verification step — the
-  build trusts GitHub Releases as the source of truth for the archive
-  itself, the same way it does for the Go binding via `go.sum`. The
-  archive's content is still version-pinned (the URL embeds the tag), so
-  the bytes are stable for a given version; what we lose is the
-  belt-and-braces second verification path.
+  workaround there is no equivalent intermediate verification step. What
+  replaces it is the digest pin described below: the archive is checked
+  against [`native-deps.sha256`](../native-deps.sha256) *before* `tar` is
+  allowed to read it, so a substituted archive is rejected rather than
+  unpacked.
 - **The Go binding (`github.com/yfedoseev/office_oxide/go`) IS still
   verified** through the Go module proxy and `go.sum`, the same as every
   other Go dependency. The deviation is limited to how the precompiled
   native library reaches the build environment.
+
+### A correction, and what replaced it
+
+An earlier revision of this document argued the direct download needed no
+digest of its own, on the grounds that *"the archive's content is still
+version-pinned (the URL embeds the tag), so the bytes are stable for a given
+version."*
+
+**That was wrong, and it is worth stating plainly rather than quietly editing.**
+A GitHub release asset is mutable: the publisher can delete an asset and
+re-upload different bytes under the same tag, and a git tag is a movable ref
+rather than a content address. A URL that embeds a version tag pins a *name*.
+Nothing about it makes the bytes stable. The same mistaken assumption had
+spread to two other fetches in `ci.yml` — the `office_oxide` header and the
+`actionlint` installer script, the latter piped directly into `bash`.
+
+The consequence was specific: the release pipeline produced cosign signatures,
+SLSA provenance and CycloneDX/SPDX SBOM attestations over an image whose
+statically linked native code nothing had verified. Those attestations were
+accurate about *who built the image*, and said nothing about whether its native
+inputs were the reviewed ones. An attestation over an unverified input attests
+to the build, not to the artifact's integrity.
+
+What replaced it:
+
+- Expected SHA-256 digests for both native libraries, the header, and the
+  `actionlint` script live in [`native-deps.sha256`](../native-deps.sha256),
+  in this repository, under review, in git history — which is the property
+  that matters, because a pin the artifact's publisher can also rewrite is not
+  a pin.
+- `verify-native-dep.sh` performs the comparison, and is shared by the
+  `Dockerfile` and both CI jobs so the same check cannot drift between them.
+- The version is part of each key, so bumping `go.mod` without re-pinning is a
+  hard build failure naming the missing key, not a silently skipped check —
+  the same fail-loud stance the relay takes toward its own security config, and
+  the same class of Dependabot-cannot-know-this invariant that
+  `.github/workflows/pin-consistency.yml` guards for the Go toolchain.
+- The `actionlint` script is downloaded, verified, and only then executed,
+  instead of being piped into `bash` unseen; its URL is additionally pinned to
+  a commit SHA so the fetch itself is immutable.
+
+This does not give source-to-binary provenance for the Rust libraries — that
+still requires building them from source, and remains a listed gap below. What
+it does give is a guarantee that every build links the *same* bytes a reviewer
+checked, and that a change to those bytes stops the build.
 
 Once upstream ships a fixed installer the `Dockerfile` and CI steps can be
 replaced with a one-liner mirroring `pdf_oxide`. The Go source-level
@@ -373,21 +427,28 @@ integration in this repository does not need to change.
 Stated plainly, because a supply-chain document that sounds airtight is not
 trustworthy:
 
-- **The `pdf_oxide` precompiled library** — see
-  [the section above](#the-pdf_oxide-build-step). Source-to-binary provenance
-  for that one artifact depends on trusting the upstream build. In practice the
-  installer version is pinned via `go.mod` and the downloaded archive has its
-  SHA-256 verified at install time, so the bytes are stable; but the chain from
-  Rust source to `.a` blob is upstream's, not this repository's, and a
-  reproducible build of *this* image still depends on the pinned version's
-  artifact (currently v0.3.61) remaining byte-stable on GitHub Releases.
-- **The `office_oxide` precompiled library** — same provenance gap as
-  `pdf_oxide`, plus the additional caveat that the install path is
-  currently a direct `curl` of the release archive rather than the
-  upstream installer, so the second verification step that `pdf_oxide`
-  gets via the Go module proxy is not present for `office_oxide` at this
-  time. See [the section above](#the-office_oxide-build-step). The Go
-  binding itself remains verified through `go.sum`.
+- **Source-to-binary provenance for both Rust libraries.** The `.a` blobs for
+  `pdf_oxide` and `office_oxide` are compiled by upstream, not here. Their
+  bytes are now pinned by digest in [`native-deps.sha256`](../native-deps.sha256)
+  and verified on every build, so a build cannot silently link something other
+  than the reviewed artifact — but *which* Rust source produced that artifact
+  is upstream's claim, not this repository's. Closing this properly means
+  building both libraries from source in the builder stage. See
+  [pdf_oxide](#the-pdf_oxide-build-step) and
+  [office_oxide](#the-office_oxide-build-step).
+- **Re-pinning is a manual step.** Dependabot bumps the Go module; it does not
+  know to update the digest file. The build fails loudly when the two disagree
+  (the key carries the version, so a bump without a re-pin misses the lookup),
+  which is the intended failure mode — but a maintainer then has to read the
+  upstream release notes and re-pin deliberately. Running
+  `./verify-native-dep.sh --print` blind on a compromised release would pin the
+  compromise; the tool records what upstream is serving, it does not judge it.
+- **`office_oxide` has no second verification path.** Its install is a direct
+  `curl` of the release archive, so unlike `pdf_oxide` it does not additionally
+  pass through the Go module proxy and checksum database. The digest pin is the
+  whole of its verification. Reverting to the upstream installer once the
+  asset-URL bug is fixed would restore the belt-and-braces path; the digest pin
+  stays either way. The Go binding itself remains verified through `go.sum`.
 
 If any of these gaps is a blocker for your environment, that is worth raising
 before adoption rather than after — some are straightforward to close and

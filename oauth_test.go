@@ -344,6 +344,12 @@ func TestRequireAuth_StaticAndOAuthCoexist(t *testing.T) {
 	if wa := rr.Header().Get("WWW-Authenticate"); !containsResourceMetadata(wa) {
 		t.Fatalf("WWW-Authenticate = %q, want a resource_metadata parameter", wa)
 	}
+	// The endpoint counter fires once for the rejected request regardless of
+	// which credential path was tried. Only the two successful requests above
+	// preceded it, and neither counts, so the total is exactly one.
+	if got := authCount(&s.metrics, "mcp"); got != 1 {
+		t.Errorf("mcp_auth_failures_total{endpoint=mcp} = %d, want 1", got)
+	}
 }
 
 func TestRequireAuth_OpenWhenNothingConfigured(t *testing.T) {

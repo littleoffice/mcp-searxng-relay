@@ -21,15 +21,54 @@ import (
 // can't leak token bytes via timing (the input has already been hashed).
 type tokenDigest [32]byte
 
+// engineDescriptor is one entry in the operator-curated engine roster
+// advertised to the model in the search tool's description. Name is a
+// SearXNG engine identifier (lowercased, matching the normalization the
+// search handler applies to the `engines` parameter); Purpose is a free-text,
+// operator-written line describing what the engine is good for, so the model
+// can route a query to it ("code-related → gitea"). Purpose may be empty for
+// a name-only entry.
+type engineDescriptor struct {
+	Name    string
+	Purpose string
+}
+
 type Config struct {
 	SearxngURL    string
 	AuthUsername  string
 	AuthPassword  string
 	SearxngTokens []string // SEARXNG_TOKENS: private-engine tokens, sent as ?tokens= on every search
-	UserAgent     string
-	LogLevel      string
-	LogFormat     string
-	AuthTokens    map[tokenDigest]string // digest → identity, populated by parseAuthTokens
+	// EngineRoster is the list of engines advertised to the model in the search
+	// tool description. It comes from up to three layered sources (lowest to
+	// highest priority): auto-discovery from SearXNG's /config (opt-in, see
+	// DiscoverEngines), then SEARXNG_ENGINES, then SEARXNG_ENGINES_FILE. A
+	// manual entry overrides a discovered one for the same engine name.
+	// Populated in main() (parseEngineRoster + discoverEngines, merged by
+	// mergeRosters); nil/empty omits the roster block from the description but
+	// leaves the generic query-dialect guidance intact.
+	//
+	// Discovery is OFF by default and curation remains the recommended path: the
+	// operator is the relay's trust boundary (see SearxngTokens) and is best
+	// placed to say which engines its model audience should know about, with
+	// human-written purposes /config cannot supply.
+	EngineRoster []engineDescriptor
+	// Engine-discovery controls (all default off/empty; discovery is opt-in).
+	// DiscoverEngines enables a one-shot GET {SEARXNG_URL}/config at startup to
+	// auto-populate the roster with the instance's enabled engines. It is
+	// soft-fail: an unreachable or blocked /config (common on hardened
+	// instances) logs a warning and leaves the manual roster intact, never
+	// failing startup. DiscoverCategories, when non-empty, restricts discovery
+	// to engines in those SearXNG categories (keeps the always-on description
+	// lean). ExcludeEngines names engines that discovery must never advertise —
+	// the control for keeping a private/token-gated engine's existence out of
+	// the description even when /config lists it. Both are lowercased.
+	DiscoverEngines    bool     // SEARXNG_ENGINES_DISCOVER
+	DiscoverCategories []string // SEARXNG_ENGINES_DISCOVER_CATEGORIES: category allowlist
+	ExcludeEngines     []string // SEARXNG_ENGINES_EXCLUDE: names never auto-advertised
+	UserAgent          string
+	LogLevel           string
+	LogFormat          string
+	AuthTokens         map[tokenDigest]string // digest → identity, populated by parseAuthTokens
 	// HealthToken gates the /health probe. It is a SEPARATE secret from the
 	// MCP bearer tokens in AuthTokens — the health probe and the MCP endpoint
 	// are different trust domains and must not share a credential. Populated
@@ -130,6 +169,35 @@ type Config struct {
 	OAuthRequiredScope string         // MCP_OAUTH_REQUIRED_SCOPE: scope every token must grant (empty = no requirement)
 	OAuthCARoots       string         // MCP_OAUTH_CA_ROOTS: PEM roots for a private issuer's TLS (scoped to JWKS fetch)
 	OAuth              *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
+
+	// FencePreamble selects where the awareness preamble travels: as unsigned
+	// prose ahead of the content fence ("prose", format 1.0, the default) or
+	// inside its own signed trusted-instruction fence ("fenced", format 1.1).
+	//
+	// Raw value read here, normalised in main() via parseFencePreambleMode so
+	// a typo fails startup rather than silently leaving the preamble unsigned
+	// at a deployment whose gateway was configured to require otherwise. Only
+	// meaningful alongside a persistent signing key the verifier pins: fencing
+	// the preamble under an ephemeral, same-origin key buys integrity against
+	// in-transit tampering, not against relay impersonation.
+	FencePreamble string // FENCE_PREAMBLE: "prose" (default) | "fenced"
+
+	// In-process TLS for the HTTP transport (opt-in). Raw values are read
+	// here; the compiled, validated form is populated in main() via
+	// newTLSSettings, following the same "read raw, validate in main" split
+	// used for FetchACL and the fence key. All empty/false by default, which
+	// keeps the historical plain-HTTP behaviour (TLS terminated by whatever
+	// fronts the relay). See tls.go for the two modes and the rationale.
+	// ACME has no on/off flag: setting any MCP_TLS_ACME_* value below turns it
+	// on, and MCP_TLS_ACME_DOMAINS is then required (see newTLSSettings).
+	TLSCertFile      string       // MCP_TLS_CERT: PEM certificate path (manual TLS)
+	TLSKeyFile       string       // MCP_TLS_KEY: PEM private-key path (manual TLS)
+	TLSACMEDomains   []string     // MCP_TLS_ACME_DOMAINS: hostnames the certificate may cover (required for ACME)
+	TLSACMEEmail     string       // MCP_TLS_ACME_EMAIL: ACME account contact address (optional; validated if set)
+	TLSACMEDirectory string       // MCP_TLS_ACME_DIRECTORY: ACME directory URL (default: Let's Encrypt)
+	TLSACMECacheDir  string       // MCP_TLS_ACME_CACHE_DIR: writable dir for issued-cert persistence (default: /var/cache/mcp-acme)
+	TLSACMECARoots   string       // MCP_TLS_ACME_CA_ROOTS: optional PEM roots confining private-CA trust to the ACME client
+	TLS              *tlsSettings // compiled form; nil until main() validates, and nil means plain HTTP
 }
 
 func configFromEnv() Config {
@@ -278,6 +346,13 @@ func configFromEnv() Config {
 	// another), and a filter that misses one of them fails open.  One relay
 	// per trust boundary keeps the enforcement where it cannot be bypassed.
 	c.SearxngTokens = parseCSV(os.Getenv("SEARXNG_TOKENS"))
+	// Engine discovery (opt-in). SEARXNG_ENGINES_DISCOVER turns on a startup
+	// /config fetch to auto-populate the roster; the category allowlist and
+	// exclude-list scope it. Category and engine names are lowercased to match
+	// SearXNG's own identifiers and the manual roster's normalization.
+	c.DiscoverEngines = parseBool(os.Getenv("SEARXNG_ENGINES_DISCOVER"))
+	c.DiscoverCategories = lowerAll(parseCSV(os.Getenv("SEARXNG_ENGINES_DISCOVER_CATEGORIES")))
+	c.ExcludeEngines = lowerAll(parseCSV(os.Getenv("SEARXNG_ENGINES_EXCLUDE")))
 	// Fetch allow-list — comma-separated. Parsed into raw slices here; the
 	// hosts and CIDRs are compiled and validated in main() via newFetchACL so
 	// a bad entry fails startup with a clear message instead of being silently
@@ -313,6 +388,22 @@ func configFromEnv() Config {
 	c.OAuthIdentityClaim = strings.TrimSpace(os.Getenv("MCP_OAUTH_IDENTITY_CLAIM"))
 	c.OAuthRequiredScope = strings.TrimSpace(os.Getenv("MCP_OAUTH_REQUIRED_SCOPE"))
 	c.OAuthCARoots = strings.TrimSpace(os.Getenv("MCP_OAUTH_CA_ROOTS"))
+	// Fence preamble layout — raw here, normalised in main() via
+	// parseFencePreambleMode. Unset keeps the 1.0 prose preamble.
+	c.FencePreamble = strings.TrimSpace(os.Getenv(fencePreambleEnvVar))
+	// In-process TLS — only the raw values are read here. Validation and the
+	// mutually-exclusive manual-vs-ACME decision happen in main() via
+	// newTLSSettings, so a half-configured or conflicting setup fails startup
+	// with a clear message instead of silently serving plain HTTP. Leaving all
+	// of these unset keeps the plain-HTTP default; ACME turns on when any
+	// MCP_TLS_ACME_* value is set (there is no separate on/off flag).
+	c.TLSCertFile = strings.TrimSpace(os.Getenv("MCP_TLS_CERT"))
+	c.TLSKeyFile = strings.TrimSpace(os.Getenv("MCP_TLS_KEY"))
+	c.TLSACMEDomains = parseCSV(os.Getenv("MCP_TLS_ACME_DOMAINS"))
+	c.TLSACMEEmail = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_EMAIL"))
+	c.TLSACMEDirectory = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_DIRECTORY"))
+	c.TLSACMECacheDir = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_CACHE_DIR"))
+	c.TLSACMECARoots = strings.TrimSpace(os.Getenv("MCP_TLS_ACME_CA_ROOTS"))
 	return c
 }
 
@@ -507,6 +598,127 @@ func parseHealthToken() (map[tokenDigest]struct{}, error) {
 // See Config.MetricsToken and requireMetricsAuth.
 func parseMetricsToken() (map[tokenDigest]struct{}, error) {
 	return parseSharedSecretToken("MCP_METRICS_TOKEN")
+}
+
+// parseEngineRoster reads the operator-curated engine roster from two sources
+// and merges them into an ordered list. Later sources override earlier ones by
+// engine name (updating the purpose in place, so display order is preserved).
+//
+// Sources, lowest to highest priority:
+//
+//  1. SEARXNG_ENGINES       inline, ';'-separated "name: purpose" entries
+//  2. SEARXNG_ENGINES_FILE  path; one "name: purpose" per line, '#' comments
+//     and blank lines ignored
+//
+// The two-source split mirrors the auth-token parser: the inline var suits a
+// handful of engines in a compose file, the file suits a longer curated list
+// mounted from config management (and keeps a private engine's existence out
+// of an env dump). The name is split off on the first ':' so a purpose may
+// itself contain colons; the name is lowercased to match the `engines`
+// parameter normalization in the search handler. A nameless entry is skipped
+// rather than erroring — a stray separator should not block startup — and an
+// empty purpose is allowed (a name-only entry still tells the model the engine
+// exists). A missing SEARXNG_ENGINES_FILE path IS a hard error, matching
+// MCP_AUTH_TOKEN_FILE: an operator who named a file meant to ship a roster.
+func parseEngineRoster() ([]engineDescriptor, error) {
+	var roster []engineDescriptor
+	index := make(map[string]int)
+
+	add := func(name, purpose string) {
+		if i, ok := index[name]; ok {
+			roster[i].Purpose = purpose
+			return
+		}
+		index[name] = len(roster)
+		roster = append(roster, engineDescriptor{Name: name, Purpose: purpose})
+	}
+
+	for _, entry := range strings.Split(os.Getenv("SEARXNG_ENGINES"), ";") {
+		if name, purpose, ok := parseEngineEntry(entry); ok {
+			add(name, purpose)
+		}
+	}
+
+	if path := strings.TrimSpace(os.Getenv("SEARXNG_ENGINES_FILE")); path != "" {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("SEARXNG_ENGINES_FILE %q: %w", path, err)
+		}
+		for _, raw := range strings.Split(string(b), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if name, purpose, ok := parseEngineEntry(line); ok {
+				add(name, purpose)
+			}
+		}
+	}
+
+	return roster, nil
+}
+
+// parseEngineEntry parses one "name: purpose" roster entry. It returns ok=false
+// for a blank entry or one whose name is empty after trimming, so callers can
+// skip stray separators without a special case. The name is lowercased; the
+// purpose is returned trimmed and may be empty.
+func parseEngineEntry(entry string) (name, purpose string, ok bool) {
+	entry = strings.TrimSpace(entry)
+	if entry == "" {
+		return "", "", false
+	}
+	n, p, _ := strings.Cut(entry, ":")
+	name = strings.ToLower(strings.TrimSpace(n))
+	if name == "" {
+		return "", "", false
+	}
+	return name, strings.TrimSpace(p), true
+}
+
+// lowerAll returns a copy of ss with each element trimmed and lowercased,
+// dropping empties. Used to normalize the discovery category allowlist and
+// engine exclude-list so they match SearXNG's own lowercase identifiers (and
+// the lowercase names parseEngineEntry produces).
+func lowerAll(ss []string) []string {
+	if len(ss) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ss))
+	for _, s := range ss {
+		if s = strings.ToLower(strings.TrimSpace(s)); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// mergeRosters combines roster layers in priority order, lowest first, into one
+// ordered list keyed by engine name. A later layer that names an engine already
+// present updates its purpose in place — so display order follows first
+// appearance — but only when the later purpose is non-empty, so a name-only
+// mention in a higher layer does not wipe a purpose a lower layer supplied.
+// This is how a discovered roster (lowest) and the operator's SEARXNG_ENGINES /
+// SEARXNG_ENGINES_FILE curation (higher) compose: discovery fills in names,
+// manual entries add engines or override purposes.
+func mergeRosters(layers ...[]engineDescriptor) []engineDescriptor {
+	var roster []engineDescriptor
+	index := make(map[string]int)
+	for _, layer := range layers {
+		for _, e := range layer {
+			if e.Name == "" {
+				continue
+			}
+			if i, ok := index[e.Name]; ok {
+				if e.Purpose != "" {
+					roster[i].Purpose = e.Purpose
+				}
+				continue
+			}
+			index[e.Name] = len(roster)
+			roster = append(roster, e)
+		}
+	}
+	return roster
 }
 
 // countIdentities returns the number of distinct identities in m.
