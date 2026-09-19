@@ -484,7 +484,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) by (le))",
           "instant": false,
           "range": true,
           "refId": "A"
@@ -1679,7 +1679,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.50, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.50, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) by (le))",
           "instant": false,
           "range": true,
           "refId": "A",
@@ -1691,7 +1691,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.90, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.90, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) by (le))",
           "instant": false,
           "range": true,
           "refId": "B",
@@ -1703,7 +1703,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.99, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.99, sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) by (le))",
           "instant": false,
           "range": true,
           "refId": "C",
@@ -1715,7 +1715,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(mcp_fetch_duration_seconds_sum{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) / clamp_min(sum(rate(mcp_fetch_duration_seconds_count{job=\"$job\", instance=\"$instance\"}[$__rate_interval])), 1)",
+          "expr": "sum(rate(mcp_fetch_duration_seconds_sum{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) / clamp_min(sum(rate(mcp_fetch_duration_seconds_count{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])), 1)",
           "instant": false,
           "range": true,
           "refId": "D",
@@ -1826,7 +1826,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\"}[$__rate_interval])) by (le)",
+          "expr": "sum(rate(mcp_fetch_duration_seconds_bucket{job=\"$job\", instance=\"$instance\", cache=\"miss\"}[$__rate_interval])) by (le)",
           "instant": false,
           "range": true,
           "refId": "A",
