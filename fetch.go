@@ -83,6 +83,7 @@ func (s *Server) toolReadURL(
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
+		s.metrics.recordFetchError(err)
 		s.metrics.recordFetchByDomain(domain, false)
 		// Recorded as well as logged.  A failed fetch missing from the
 		// history is indistinguishable from one never attempted, and the
@@ -95,9 +96,10 @@ func (s *Server) toolReadURL(
 			Read:    readDepthNone,
 		})
 		lg.Error("fetch failed",
-			"url", in.URL, "domain", domain,
+			"url", in.URL, "domain", domain, "tool", "searxng_read_url",
 			"duration_ms", elapsedMillis(callStart),
-			"outcome", "error", "error", err)
+			"outcome", "error", "reason", classifyFetchError(err),
+			"error", err)
 		return nil, nil, err
 	}
 	s.metrics.recordFetchByDomain(domain, true)
@@ -118,7 +120,8 @@ func (s *Server) toolReadURL(
 			FromCache: result.fromCache,
 		})
 		lg.Info("fetch completed",
-			"url", in.URL, "domain", domain, "kind", "image",
+			"url", in.URL, "domain", domain,
+			"tool", "searxng_read_url", "kind", "image",
 			"duration_ms", elapsedMillis(callStart),
 			"from_cache", result.fromCache, "outcome", "ok")
 		return &mcp.CallToolResult{
@@ -164,7 +167,8 @@ func (s *Server) toolReadURL(
 		FromCache:  result.fromCache,
 	})
 	lg.Info("fetch completed",
-		"url", in.URL, "domain", domain, "kind", "text",
+		"url", in.URL, "domain", domain,
+		"tool", "searxng_read_url", "kind", "text",
 		"duration_ms", elapsedMillis(callStart),
 		"from_cache", result.fromCache, "outcome", "ok",
 		"start_index", start, "end_index", end,
@@ -296,6 +300,7 @@ func (s *Server) toolURLMetadata(
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
+		s.metrics.recordFetchError(err)
 		s.metrics.recordFetchByDomain(domain, false)
 		s.recordFetch(ctx, fetchRecord{
 			Tool:    "searxng_url_metadata",
@@ -305,7 +310,10 @@ func (s *Server) toolURLMetadata(
 			Read:    readDepthNone,
 		})
 		lg.Error("metadata fetch failed",
-			"url", in.URL, "error", err)
+			"url", in.URL, "domain", domain, "tool", "searxng_url_metadata",
+			"duration_ms", elapsedMillis(callStart),
+			"outcome", "error", "reason", classifyFetchError(err),
+			"error", err)
 		return nil, nil, err
 	}
 	s.metrics.recordFetchByDomain(domain, true)
@@ -342,7 +350,7 @@ func (s *Server) toolURLMetadata(
 		FromCache: result.fromCache,
 	})
 	lg.Info("metadata fetch completed",
-		"url", in.URL, "domain", domain,
+		"url", in.URL, "domain", domain, "tool", "searxng_url_metadata",
 		"duration_ms", elapsedMillis(callStart),
 		"from_cache", result.fromCache, "outcome", "ok",
 		"has_title", payload.Title != "",
@@ -406,10 +414,10 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// Validate scheme before doing anything.
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return urlFetchResult{}, fmt.Errorf("invalid URL: %w", err)
+		return urlFetchResult{}, fmt.Errorf("%w: %w", errInvalidURL, err)
 	}
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return urlFetchResult{}, fmt.Errorf("only http/https URLs are permitted")
+		return urlFetchResult{}, fmt.Errorf("%w: only http/https URLs are permitted", errSchemeRejected)
 	}
 
 	// Use fetchClient (SSRF-safe DialContext + redirect validation).
@@ -436,7 +444,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return urlFetchResult{}, fmt.Errorf("URL returned HTTP %d", resp.StatusCode)
+		return urlFetchResult{}, fmt.Errorf("%w: URL returned HTTP %d", errHTTPStatus, resp.StatusCode)
 	}
 
 	// The transport followed any redirects (revalidating SSRF policy at each
@@ -505,7 +513,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		var pageCount int
 		content, truncated, pageCount, err = extractPDF(body, s.config.MaxExtractedChars)
 		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", err)
+			return urlFetchResult{}, fmt.Errorf("%w: PDF text: %w", errExtractFailed, err)
 		}
 		metadata.PageCount = pageCount
 	case officeFormat(contentType, targetURL) != "":
@@ -528,7 +536,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		s.metrics.FetchOffice.Add(1)
 		content, truncated, err = extractOffice(body, format, s.config.MaxExtractedChars)
 		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, err)
+			return urlFetchResult{}, fmt.Errorf("%w: %s text: %w", errExtractFailed, format, err)
 		}
 	case isPlainText(contentType):
 		// Plain-text responses can declare a non-UTF-8 charset just like HTML

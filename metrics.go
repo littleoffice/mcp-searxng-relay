@@ -210,6 +210,17 @@ type Metrics struct {
 	FetchDomainOverflowOK    atomic.Int64
 	FetchDomainOverflowError atomic.Int64
 
+	// Fetch failures by cause, indexed by fetchErrorReasons.  Separate from
+	// FetchErrors rather than a label on it: mcp_fetch_errors_total is on
+	// the dashboard and in whatever alerts an operator already wrote, and
+	// relabelling a live series breaks both.  This follows the by-domain /
+	// by-type naming already used for the other breakdowns.
+	//
+	// Covers both URL tools, like the by-domain counter above: they share
+	// the readURL pipeline, and a caller who cannot reach a host cares
+	// about that whether they asked for content or for metadata.
+	FetchErrorsByReason [len(fetchErrorReasons)]atomic.Int64
+
 	// ── SearXNG backend engine health ────────────────────────────────────────
 	//
 	// SearchesDegraded counts searches where at least one backend failed to
@@ -330,6 +341,29 @@ func (m *Metrics) recordSSRFBlock(reason string) {
 func (m *Metrics) recordAuthFailure(endpoint string) {
 	if i := authEndpointIndex(endpoint); i >= 0 {
 		m.AuthFailures[i].Add(1)
+	}
+}
+
+// recordFetchError bumps the by-reason counter for a failed fetch.  It takes
+// the error rather than a string so classification lives in one place and
+// every call site cannot disagree about what a timeout is.  An unrecognised
+// error lands in "other", never silently nowhere.
+func (m *Metrics) recordFetchError(err error) {
+	reason := classifyFetchError(err)
+	for i, r := range fetchErrorReasons {
+		if r == reason {
+			m.FetchErrorsByReason[i].Add(1)
+			return
+		}
+	}
+	// classifyFetchError only ever returns a member of fetchErrorReasons,
+	// so this is unreachable short of the two drifting apart; count it as
+	// "other" rather than dropping the observation.
+	for i, r := range fetchErrorReasons {
+		if r == "other" {
+			m.FetchErrorsByReason[i].Add(1)
+			return
+		}
 	}
 }
 
@@ -481,6 +515,18 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		"Total number of searxng_read_url calls that returned an error.", &m.FetchErrors)
 
 	// Fetch by content type
+	// Fetch failures by cause — a closed label set; see fetchErrorReasons.
+	// Zero series are emitted so a reason appearing for the first time is a
+	// change in an existing series rather than a new one showing up, which
+	// is what makes `increase()` behave on it.
+	_, _ = fmt.Fprintf(w, "# HELP mcp_fetch_errors_by_reason_total Total failed URL fetches broken down by cause, across searxng_read_url and searxng_url_metadata.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetch_errors_by_reason_total counter\n")
+	for i, reason := range fetchErrorReasons {
+		_, _ = fmt.Fprintf(w, "mcp_fetch_errors_by_reason_total{reason=\"%s\"} %d\n",
+			reason, m.FetchErrorsByReason[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
+
 	_, _ = fmt.Fprintf(w, "# HELP mcp_fetches_by_type_total Total fetches broken down by content type.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetches_by_type_total counter\n")
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"html\"} %d\n", m.FetchHTML.Load())
