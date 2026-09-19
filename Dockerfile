@@ -161,6 +161,16 @@ COPY . .
 #   -tags netgo              Go's pure-Go DNS resolver (avoids glibc NSS)
 #   -linkmode=external       hand off final linking to gcc so extldflags apply
 #   -extldflags='-static'    final binary has no shared-library dependency
+#   -s -w                    drop the symbol table and DWARF, ~12 MB of ~73 MB
+#
+# On -s -w: Go panic traces survive it, because they are reconstructed from
+# .gopclntab rather than from the symbol table, and that section is not
+# stripped -- a panic still reports function names and line numbers. The
+# embedded build info survives too, so `go version -m`, syft's SBOM and
+# module-level govulncheck all still read the binary. What is lost is
+# function-level detail for anyone inspecting the shipped artefact directly
+# (delve, or govulncheck in binary mode, which falls back to coarser
+# module-level reachability without a symbol table).
 #
 # CGO_LDFLAGS replaces -lgcc_s (shared-only) with -lgcc_eh -lgcc, which have
 # static counterparts in the Debian gcc package.
@@ -172,7 +182,7 @@ RUN GOARCH="$(go env GOARCH)" && \
         -trimpath \
         -buildvcs=false \
         -tags netgo \
-        -ldflags "-linkmode=external -extldflags '-static -Wl,--build-id=none' -buildid= -X main.ServerVersion=${SERVER_VERSION}" \
+        -ldflags "-s -w -linkmode=external -extldflags '-static -Wl,--build-id=none' -buildid= -X main.ServerVersion=${SERVER_VERSION}" \
         -o mcp-searxng-relay .
 
 # ---------------------------------------------------------------------------
