@@ -1,0 +1,48 @@
+# Promtail tails the mcp-searxng-relay container's logs and ships them to Loki.
+#
+# Discovery is via the Podman API socket (Docker-compatible), so this does not
+# depend on where Podman stores json-file logs on disk (which differs between
+# rootless and rootful). The relay must run with LOG_FORMAT=json (set in
+# ../envs/.mcp-searxng-relay.env) so the lines parse with `| json` in LogQL.
+#
+# Cardinality: only low-cardinality identifiers become Loki labels (job,
+# container, level). The high-cardinality / sensitive fields — url, query,
+# session_id, identity — stay inside the JSON log line and are extracted at
+# query time with `| json`, never as labels. This mirrors the relay's own
+# metrics boundary (hostnames only, capped at 512; full URLs and queries live in
+# logs, not series).
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: podman
+    docker_sd_configs:
+      # Mounted from the Podman socket in docker-compose.monitoring.yaml.
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 15s
+    relabel_configs:
+      # Keep only the relay container; drop everything else on the host.
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/?mcp-searxng-relay'
+        action: keep
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/?(.*)'
+        target_label: container
+        replacement: '$1'
+      - target_label: job
+        replacement: mcp-searxng-relay
+    pipeline_stages:
+      # Promote only the log level to a label; leave the rest of the JSON intact
+      # in the line for `| json` at query time.
+      - json:
+          expressions:
+            level: level
+      - labels:
+          level:
