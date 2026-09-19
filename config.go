@@ -162,13 +162,21 @@ type Config struct {
 	// leaves the static MCP_AUTH_TOKEN* table as the only credential path.
 	// When enabled it runs ALONGSIDE the static table, not instead of it:
 	// requireAuth tries the static digest first, then OAuth. See oauth.go.
-	OAuthIssuer        string         // MCP_OAUTH_ISSUER: OIDC issuer URL; enables OAuth and (by default) JWKS discovery
-	OAuthAudience      string         // MCP_OAUTH_AUDIENCE: value every token's aud must carry (this relay's resource id)
-	OAuthJWKSFile      string         // MCP_OAUTH_JWKS_FILE: static JWKS path; offline alternative to issuer discovery
-	OAuthIdentityClaim string         // MCP_OAUTH_IDENTITY_CLAIM: claim used as the audit identity (default "sub")
-	OAuthRequiredScope string         // MCP_OAUTH_REQUIRED_SCOPE: scope every token must grant (empty = no requirement)
-	OAuthCARoots       string         // MCP_OAUTH_CA_ROOTS: PEM roots for a private issuer's TLS (scoped to JWKS fetch)
-	OAuth              *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
+	OAuthIssuer        string // MCP_OAUTH_ISSUER: OIDC issuer URL; enables OAuth and (by default) JWKS discovery
+	OAuthAudience      string // MCP_OAUTH_AUDIENCE: value every token's aud must carry (this relay's resource id)
+	OAuthJWKSFile      string // MCP_OAUTH_JWKS_FILE: static JWKS path; offline alternative to issuer discovery
+	OAuthIdentityClaim string // MCP_OAUTH_IDENTITY_CLAIM: claim used as the audit identity (default "sub")
+	OAuthRequiredScope string // MCP_OAUTH_REQUIRED_SCOPE: scope every token must grant (empty = no requirement)
+	OAuthCARoots       string // MCP_OAUTH_CA_ROOTS: PEM roots for a private issuer's TLS (scoped to JWKS fetch)
+
+	// TrustForwardedHeaders makes the relay believe X-Forwarded-Proto and
+	// X-Forwarded-Host when it builds the RFC 9728 resource_metadata URL in
+	// a 401 challenge. Off by default: those headers are caller-supplied
+	// unless something in front strips and re-sets them, and the value ends
+	// up in a discovery URL an OAuth client may follow. Only turn it on when
+	// a proxy you control terminates every request.
+	TrustForwardedHeaders bool           // MCP_TRUST_FORWARDED_HEADERS
+	OAuth                 *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
 
 	// FencePreamble selects where the awareness preamble travels: as unsigned
 	// prose ahead of the content fence ("prose", format 1.0, the default) or
@@ -388,6 +396,7 @@ func configFromEnv() Config {
 	c.OAuthIdentityClaim = strings.TrimSpace(os.Getenv("MCP_OAUTH_IDENTITY_CLAIM"))
 	c.OAuthRequiredScope = strings.TrimSpace(os.Getenv("MCP_OAUTH_REQUIRED_SCOPE"))
 	c.OAuthCARoots = strings.TrimSpace(os.Getenv("MCP_OAUTH_CA_ROOTS"))
+	c.TrustForwardedHeaders = parseBool(os.Getenv("MCP_TRUST_FORWARDED_HEADERS"))
 	// Fence preamble layout — raw here, normalised in main() via
 	// parseFencePreambleMode. Unset keeps the 1.0 prose preamble.
 	c.FencePreamble = strings.TrimSpace(os.Getenv(fencePreambleEnvVar))

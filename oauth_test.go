@@ -425,9 +425,29 @@ func TestResourceMetadataURL_HonoursForwardedHeaders(t *testing.T) {
 	req.Host = "internal:8080"
 	req.Header.Set("X-Forwarded-Proto", "https")
 	req.Header.Set("X-Forwarded-Host", "relay.example.com")
-	got := resourceMetadataURL(req)
+	got := resourceMetadataURL(req, true)
 	want := "https://relay.example.com" + oauthMetadataPath
 	if got != want {
 		t.Fatalf("resourceMetadataURL = %q, want %q", got, want)
+	}
+}
+
+// The same request without the operator opting in must describe the
+// connection the client actually made, not the one its headers claim. An
+// unauthenticated caller reaches this path — every 401 carries the result —
+// so the header must not be able to nominate the issuer a client discovers.
+func TestResourceMetadataURL_IgnoresForwardedHeadersByDefault(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://internal:8080/", nil)
+	req.Host = "internal:8080"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "attacker.example.com")
+
+	got := resourceMetadataURL(req, false)
+	want := "http://internal:8080" + oauthMetadataPath
+	if got != want {
+		t.Fatalf("resourceMetadataURL = %q, want %q", got, want)
+	}
+	if strings.Contains(got, "attacker.example.com") {
+		t.Error("forwarded host reached the advertised metadata URL without the operator opting in")
 	}
 }

@@ -401,20 +401,38 @@ func bearerToken(header string) string {
 }
 
 // resourceMetadataURL builds the absolute URL of the protected-resource
-// metadata document for the WWW-Authenticate challenge, honouring the
-// X-Forwarded-Proto / X-Forwarded-Host headers a terminating proxy sets so the
-// advertised URL matches how the client actually reached the relay.
-func resourceMetadataURL(r *http.Request) string {
+// metadata document for the WWW-Authenticate challenge.
+//
+// X-Forwarded-Proto / X-Forwarded-Host are honoured only when the operator has
+// set MCP_TRUST_FORWARDED_HEADERS, because nothing about an inbound request
+// distinguishes a header a reverse proxy set from one the caller typed. The
+// value lands in a discovery URL that an RFC 9728 client may fetch to learn
+// which authorization server to trust, so taking it from an unauthenticated
+// request means letting that caller nominate the issuer.
+//
+// The unauthenticated caller only poisons the challenge returned to itself,
+// which makes this hardening rather than a live vector — but "the attacker can
+// only attack themselves" stops being true the moment a cache without a Vary,
+// or a future code path that stores or forwards the value, is introduced. The
+// default costs a correct deployment one environment variable.
+//
+// Without the flag the URL is derived from the connection: r.TLS for the
+// scheme and r.Host for the authority, which is what the client actually
+// dialled.
+func resourceMetadataURL(r *http.Request, trustForwarded bool) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
-		scheme = strings.TrimSpace(strings.Split(p, ",")[0])
-	}
 	host := r.Host
-	if h := r.Header.Get("X-Forwarded-Host"); h != "" {
-		host = strings.TrimSpace(strings.Split(h, ",")[0])
+
+	if trustForwarded {
+		if p := r.Header.Get("X-Forwarded-Proto"); p != "" {
+			scheme = strings.TrimSpace(strings.Split(p, ",")[0])
+		}
+		if h := r.Header.Get("X-Forwarded-Host"); h != "" {
+			host = strings.TrimSpace(strings.Split(h, ",")[0])
+		}
 	}
 	return scheme + "://" + host + oauthMetadataPath
 }

@@ -145,7 +145,12 @@ func newManualTLS(cfg Config) (*tlsSettings, error) {
 	}
 	return &tlsSettings{
 		tlsConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS12,
+			// TLS 1.3 floor. This config serves ordinary client handshakes
+			// and nothing else: the in-process TLS path is opt-in, and every
+			// client that reaches it — MCP clients, a Prometheus scraper, a
+			// Kubernetes probe — is a modern runtime with 1.3 support. The
+			// ACME config below deliberately keeps a 1.2 floor; see there.
+			MinVersion:     tls.VersionTLS13,
 			GetCertificate: r.getCertificate,
 		},
 		mode:   "manual",
@@ -305,6 +310,13 @@ func newACMETLS(cfg Config) (*tlsSettings, error) {
 		Client:     client,
 	}
 	tc := m.TLSConfig() // wires GetCertificate + the acme-tls/1 ALPN protocol
+	// Deliberately 1.2, unlike the manual config above. This listener also
+	// answers the CA's TLS-ALPN-01 challenge handshakes, and the CA is the
+	// other end of that connection — including a private directory such as
+	// step-ca, which this path explicitly supports and whose TLS support is
+	// not ours to assume. A floor the validator cannot meet does not degrade
+	// to a weaker cipher, it fails issuance outright and leaves the relay
+	// with no certificate at all.
 	tc.MinVersion = tls.VersionTLS12
 	// autocert emits no logs of its own, so wrap the certificate hook to make
 	// every handshake and every issuance failure visible (see logGetCertificate).
