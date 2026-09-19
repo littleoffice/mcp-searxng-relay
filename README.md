@@ -1073,55 +1073,111 @@ The multi-stage build compiles the binary on the digest-pinned `golang:1.26.6-tr
 
 All log output goes to **stderr**. Set `LOG_FORMAT=json` for structured logging compatible with log aggregators.
 
-On startup the server prints a configuration banner to stderr regardless of log level. The banner lists all active settings with secrets redacted. `AUTH_USERNAME` is only shown when it is set.
+On startup the server prints a configuration banner to stderr regardless of log level. It lists every active setting with secrets redacted, so what the process is actually running can be read off the logs rather than reconstructed from the environment it was given. Below is an HTTP-mode relay with three tokens and everything else left at its default:
 
 ```
-######################################################################################################################
+###########################################################################################
 
 mcp-searxng-relay v1.0.0
 
-######################################################################################################################
+###########################################################################################
 
 mode             streamable-http
 address          :3000
 searxng          http://searxng:8080
 password         [not set]
-user-agent       Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36
+user-agent       mcp-searxng-relay/v1.0.0
 cache ttl        5m0s
 cache entries    1000 max
 body limit       500000 bytes
 pdf limit        50000000 bytes
 office limit     50000000 bytes
 image limit      7500000 bytes
+extract limit    1000000 chars
+source history   50 per caller
 log level        info
 log format       text
 session mode     stateless
+fetch policy     public only
 auth tokens      3 configured (3 identities)
+oauth            disabled (static tokens only)
+health auth      disabled (/health open — set MCP_HEALTH_TOKEN to require a token)
+metrics auth     CLOSED (/metrics returns 401 — set MCP_METRICS_TOKEN to enable scraping)
+tls              disabled (plain HTTP)
 rate limit       5 rps, burst 10
-fence key        3e21267250e41cbb
+link extraction  enabled
+prune selector   [class*="related"], [id*="related"]
+fence key        d550b6b9f221ccfa (ephemeral, rotates on restart)
+fence preamble   prose (format 1.0, preamble unsigned)
 
-######################################################################################################################
+###########################################################################################
 ```
 
-Once the server is running, typical log lines look like this (stateful mode, `LOG_FORMAT=text`):
+Rows are shown only where they mean something, so the banner never states a setting the running process would ignore:
+
+- `address` — HTTP mode only; stdio serves no socket.
+- `searxng tokens` and `username` — only when `SEARXNG_TOKENS` / `AUTH_USERNAME` are set. The token *count* is shown, never the values.
+- `session max age` and `janitor interval` — stateful mode only; in stateless mode there are no sessions for the janitor to expire.
+- `allowed hosts`, `allowed cidrs` — only once `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS` have widened the SSRF policy, in which case `fetch policy` flips from `public only` to `widened` and lists exactly what you allowed, in the order you wrote it.
+- `fetch proxy` — only when `FETCH_PROXY` is set, with any password in the URL redacted and the scope named.
+
+The same relay with upstream tokens, an HTTP-auth username, a widened fetch policy and an egress proxy therefore adds (or changes) these rows:
 
 ```
-time=2026-05-24T07:41:10.301Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks content_type="text/html; charset=utf-8" bytes_raw=372821 chars_extracted=5469
-time=2026-05-24T07:41:10.302Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:43:39.212Z level=INFO msg="search completed" query="site:github.com/asgeirtj/system_prompts_leaks \"Claude Code\" system prompt" page=1 results=10 categories="" identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:43:52.249Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md content_type="text/html; charset=utf-8" bytes_raw=500000 chars_extracted=185
-time=2026-05-24T07:43:52.253Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:44:07.656Z level=INFO msg="url fetched" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md content_type="text/plain; charset=utf-8" bytes_raw=58874 chars_extracted=58873
-time=2026-05-24T07:44:07.657Z level=INFO msg="fetch completed" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
+searxng tokens   2 configured
+username         relay
+fetch policy     widened (internal targets allowed)
+allowed hosts    wiki.internal:443, docs.internal:8080
+allowed cidrs    10.42.0.0/16:443
+fetch proxy      http://user:xxxxx@proxy.internal:3128 (allow-listed hosts only)
 ```
 
-A search where some SearXNG backends failed is not an error — the upstream answers `200` with whatever the surviving engines produced — but it is a degraded answer, and it is logged as one:
+In stdio mode the four rows that describe network surface read `n/a` rather than `disabled` — `oauth`, `health auth`, `metrics auth` and `tls` all refer to endpoints or sockets that mode does not serve, and "disabled" would imply a setting that could be turned on:
 
 ```
-level=WARN msg="searxng search was degraded: some engines did not respond"
+oauth            n/a (stdio serves no network socket)
+health auth      n/a (stdio has no /health endpoint)
+metrics auth     n/a (stdio has no /metrics endpoint)
+tls              n/a (stdio serves no network socket)
+```
+
+The `metrics auth`, `health auth`, `tls`, `fetch policy`, `fence key` and `fence preamble` rows are the ones worth reading on every deploy: each names a security boundary whose state is otherwise only discoverable by tripping over it — a blank dashboard, a rejected fence, an agent that can suddenly reach an internal host. Their individual meanings are covered under [Security notes](#security-notes), [Metrics](#metrics) and [Health endpoint](#health-endpoint).
+
+Once the server is running, typical log lines look like this (stateful mode, `LOG_FORMAT=text`) — one session's worth of calls, from the handshake to a fetch that failed:
+
+```
+time=2026-09-19T23:54:48.813Z level=INFO msg="session initialized" session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT identity=zed
+time=2026-09-19T23:54:52.104Z level=INFO msg="search completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT query="searxng json api settings" page=1 duration_ms=131 outcome=ok results=3 categories="" engines=""
+time=2026-09-19T23:55:14.596Z level=INFO msg="url fetched" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst content_type="text/plain; charset=utf-8" bytes_raw=2688 chars_extracted=2687 extraction_truncated=false
+time=2026-09-19T23:55:14.596Z level=INFO msg="fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_read_url kind=text duration_ms=105 from_cache=false outcome=ok start_index=0 end_index=2687 total_chars=2687 read=full
+time=2026-09-19T23:55:14.603Z level=INFO msg="fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_read_url kind=text duration_ms=0 from_cache=true outcome=ok start_index=1200 end_index=2687 total_chars=2687 read=full
+time=2026-09-19T23:55:14.609Z level=INFO msg="metadata fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_url_metadata duration_ms=0 from_cache=true outcome=ok has_title=false has_date=false
+time=2026-09-19T23:55:14.616Z level=INFO msg="session sources listed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT duration_ms=0 outcome=ok returned=1 total_fetches=3 elided=0 since_seq=0
+time=2026-09-19T23:55:19.021Z level=ERROR msg="fetch failed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://github.com/searxng/searxng domain=github.com tool=searxng_read_url duration_ms=252 outcome=error reason=http_status error="upstream returned a non-success status: URL returned HTTP 403"
+```
+
+Every tool-completion line carries the same spine, which is what makes the log queryable rather than merely readable:
+
+| Field | On | Meaning |
+|---|---|---|
+| `identity`, `session_id` | every tool line | Who made the call, in which session. Both are always present — they degrade to `""` rather than being dropped, so a log processor can rely on the key set |
+| `tool` | fetch/metadata lines | Which tool touched the URL: `searxng_read_url` or `searxng_url_metadata`. The same domain reached by a metadata triage and by a full read are different events |
+| `domain` | fetch/metadata lines | Destination host, matching the `domain` label on `mcp_fetches_by_domain_total` |
+| `duration_ms` | every completion line | Whole milliseconds, as an integer rather than a duration string, so it can be compared numerically in a log store without parsing |
+| `outcome` | every completion line | `ok` or `error`; `reason` on a failure narrows it to the same closed set as `mcp_fetch_errors_by_reason_total` (`http_status` above) |
+| `from_cache` | fetch/metadata lines | Whether the bytes came from the response cache. The second fetch above is a cache hit at `duration_ms=0`, so latency percentiles can exclude what never left the process |
+| `start_index`, `end_index`, `total_chars`, `read` | `searxng_read_url` | Which window of the document was returned and how deep the read went — the same read-depth vocabulary `searxng_session_sources` reports to the model |
+
+The `"fetch failed"` line records the same attribution and timing as a success, so a failing destination is as visible in the audit trail as a working one. The URL it logs is the redacted form: any credentials in the URL's userinfo are stripped before the line is written, the same way they are stripped from the ledger and from anything the model sees.
+
+A search where some SearXNG backends failed is not an error — the upstream answers `200` with whatever the surviving engines produced — but it is a degraded answer, and it is logged as one (one line in reality, wrapped here to fit):
+
+```
+time=2026-09-19T23:55:31.402Z level=WARN msg="searxng search was degraded: some engines did not respond"
+  identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT
   unresponsive_engines=google,bing unresponsive_count=2
   detail="google: Suspended: Access denied; bing: timeout"
-  query="..." results=7
+  query="degraded engines test" results=1
   hint="results are incomplete; check the named engines in your SearXNG instance
         before treating thin results as a relay or model problem"
 ```
@@ -1130,7 +1186,13 @@ Engines break — upstream markup changes, an API is deprecated, a captcha wall 
 
 The same event increments `mcp_searches_degraded_total` and `mcp_searxng_engine_errors_total{engine="…"}` (see [Metrics](#metrics)): the log line is how you diagnose one incident, the counters are how you find out there is one — a WARN nobody greps is not monitoring.
 
-The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
+The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. A failed bearer-token attempt is logged without the credential it presented — only the method, path and remote address:
+
+```
+time=2026-09-19T23:55:52.184Z level=WARN msg="unauthorized request" method=POST path=/ remote=127.0.0.1:48060
+```
+
+In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
 
 ---
 
