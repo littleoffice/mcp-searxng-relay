@@ -172,6 +172,19 @@ func callerLogger(ctx context.Context) *slog.Logger {
 	)
 }
 
+// elapsedMillis reports how long ago start was, in whole milliseconds, for
+// the "duration_ms" attr on tool-completion log lines.
+//
+// An integer, not a duration string: these lines are shipped to a log store
+// and queried numerically (slowest domains, p95 per tool), and "1.234s" has
+// to be parsed before it can be compared.  Milliseconds because the useful
+// range here spans a cached read to a slow origin, and sub-millisecond
+// precision would only add noise — the histograms in metrics.go remain the
+// precise instrument.
+func elapsedMillis(start time.Time) int64 {
+	return time.Since(start).Milliseconds()
+}
+
 // ── HTTP wrappers ─────────────────────────────────────────────────────────────
 //
 // The MCP Streamable HTTP transport (POST/GET/DELETE on /, SSE responses,

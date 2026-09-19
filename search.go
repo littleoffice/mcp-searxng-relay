@@ -183,7 +183,9 @@ func (s *Server) toolSearch(
 	if err != nil {
 		s.metrics.SearchErrors.Add(1)
 		lg.Error("search failed",
-			"query", in.Query, "error", err)
+			"query", in.Query,
+			"duration_ms", elapsedMillis(searchStart),
+			"outcome", "error", "error", err)
 		return nil, nil, err
 	}
 	s.metrics.SearchTotal.Add(1)
@@ -195,6 +197,8 @@ func (s *Server) toolSearch(
 
 	lg.Info("search completed",
 		"query", in.Query, "page", pageno,
+		"duration_ms", elapsedMillis(searchStart),
+		"outcome", "ok",
 		"results", len(results), "categories", in.Categories,
 		"engines", engines)
 

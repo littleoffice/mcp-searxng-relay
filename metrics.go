@@ -90,6 +90,19 @@ func authEndpointIndex(endpoint string) int {
 // quantile queries, so treat the set as stable.
 var latencyBuckets = [...]float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 
+// cacheOutcomes indexes FetchDuration.  A cache hit and a real network fetch
+// are different operations that happened to share a function: hits return in
+// microseconds and, at a healthy hit rate, outnumber misses badly enough to
+// drag every quantile of a combined histogram toward zero.  Splitting them
+// makes mcp_fetch_duration_seconds{cache="miss"} mean "how slow is the open
+// web", which is the question an operator actually alerts on.
+var cacheOutcomes = [...]string{"hit", "miss"}
+
+const (
+	cacheOutcomeHit = iota
+	cacheOutcomeMiss
+)
+
 // histogram is a fixed-bucket Prometheus histogram safe for concurrent use
 // without a mutex.  Internally each bucket counts only its own range
 // (non-cumulative), so Observe touches exactly one bucket counter plus sum
@@ -134,15 +147,35 @@ func (h *histogram) Observe(d time.Duration) {
 func (h *histogram) write(w io.Writer, name, help string) {
 	_, _ = fmt.Fprintf(w, "# HELP %s %s\n", name, help)
 	_, _ = fmt.Fprintf(w, "# TYPE %s histogram\n", name)
+	h.writeSeries(w, name, "", "")
+	_, _ = fmt.Fprintln(w)
+}
+
+// writeSeries emits just this histogram's series, optionally carrying one
+// extra label.  It deliberately writes no HELP/TYPE header and no trailing
+// blank line: a metric name split across several label sets must declare
+// those once for the whole family, so the caller owns them and calls this
+// once per label value.  An empty labelKey emits the unlabelled form.
+//
+// Same derived-cumulative reasoning as write: +Inf and _count come from one
+// cumulative sum so the Prometheus invariant holds under concurrent Observe.
+func (h *histogram) writeSeries(w io.Writer, name, labelKey, labelValue string) {
+	// Prefix for the {le="…"} buckets, which always carry a label, and the
+	// suffix for _sum / _count, which carry one only when labelled.
+	bucketLead, plain := "", ""
+	if labelKey != "" {
+		bucketLead = fmt.Sprintf("%s=\"%s\",", labelKey, escapePromLabel(labelValue))
+		plain = fmt.Sprintf("{%s=\"%s\"}", labelKey, escapePromLabel(labelValue))
+	}
 	var cum int64
 	for i, ub := range latencyBuckets {
 		cum += h.buckets[i].Load()
-		_, _ = fmt.Fprintf(w, "%s_bucket{le=\"%g\"} %d\n", name, ub, cum)
+		_, _ = fmt.Fprintf(w, "%s_bucket{%sle=\"%g\"} %d\n", name, bucketLead, ub, cum)
 	}
 	cum += h.overflow.Load()
-	_, _ = fmt.Fprintf(w, "%s_bucket{le=\"+Inf\"} %d\n", name, cum)
-	_, _ = fmt.Fprintf(w, "%s_sum %g\n", name, float64(h.sumNanos.Load())/1e9)
-	_, _ = fmt.Fprintf(w, "%s_count %d\n\n", name, cum)
+	_, _ = fmt.Fprintf(w, "%s_bucket{%sle=\"+Inf\"} %d\n", name, bucketLead, cum)
+	_, _ = fmt.Fprintf(w, "%s_sum%s %g\n", name, plain, float64(h.sumNanos.Load())/1e9)
+	_, _ = fmt.Fprintf(w, "%s_count%s %d\n", name, plain, cum)
 }
 
 // Metrics holds all in-process counters exposed at /metrics in Prometheus
@@ -176,6 +209,17 @@ type Metrics struct {
 	domains                  map[string]*domainStats
 	FetchDomainOverflowOK    atomic.Int64
 	FetchDomainOverflowError atomic.Int64
+
+	// Fetch failures by cause, indexed by fetchErrorReasons.  Separate from
+	// FetchErrors rather than a label on it: mcp_fetch_errors_total is on
+	// the dashboard and in whatever alerts an operator already wrote, and
+	// relabelling a live series breaks both.  This follows the by-domain /
+	// by-type naming already used for the other breakdowns.
+	//
+	// Covers both URL tools, like the by-domain counter above: they share
+	// the readURL pipeline, and a caller who cannot reach a host cares
+	// about that whether they asked for content or for metadata.
+	FetchErrorsByReason [len(fetchErrorReasons)]atomic.Int64
 
 	// ── SearXNG backend engine health ────────────────────────────────────────
 	//
@@ -247,11 +291,11 @@ type Metrics struct {
 	//
 	// SearchDuration measures the SearXNG round-trip inside toolSearch.
 	// FetchDuration measures the readURL pipeline (dial through
-	// extraction) and therefore includes cache hits, which observe as
-	// sub-millisecond values in the lowest bucket; alert on upper
-	// quantiles, and read the p50 alongside mcp_cache_hits_total.
+	// extraction), split by whether the call was served from cache — see
+	// cacheOutcomes for why the two are not one series.  Alert on
+	// cache="miss"; cache="hit" is a cache-health signal, not a latency one.
 	SearchDuration histogram
-	FetchDuration  histogram
+	FetchDuration  [len(cacheOutcomes)]histogram
 
 	// ── rate limiting ────────────────────────────────────────────────────────
 	// Single counter — no per-identity label.  The rejection event is
@@ -297,6 +341,29 @@ func (m *Metrics) recordSSRFBlock(reason string) {
 func (m *Metrics) recordAuthFailure(endpoint string) {
 	if i := authEndpointIndex(endpoint); i >= 0 {
 		m.AuthFailures[i].Add(1)
+	}
+}
+
+// recordFetchError bumps the by-reason counter for a failed fetch.  It takes
+// the error rather than a string so classification lives in one place and
+// every call site cannot disagree about what a timeout is.  An unrecognised
+// error lands in "other", never silently nowhere.
+func (m *Metrics) recordFetchError(err error) {
+	reason := classifyFetchError(err)
+	for i, r := range fetchErrorReasons {
+		if r == reason {
+			m.FetchErrorsByReason[i].Add(1)
+			return
+		}
+	}
+	// classifyFetchError only ever returns a member of fetchErrorReasons,
+	// so this is unreachable short of the two drifting apart; count it as
+	// "other" rather than dropping the observation.
+	for i, r := range fetchErrorReasons {
+		if r == "other" {
+			m.FetchErrorsByReason[i].Add(1)
+			return
+		}
 	}
 }
 
@@ -448,6 +515,18 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		"Total number of searxng_read_url calls that returned an error.", &m.FetchErrors)
 
 	// Fetch by content type
+	// Fetch failures by cause — a closed label set; see fetchErrorReasons.
+	// Zero series are emitted so a reason appearing for the first time is a
+	// change in an existing series rather than a new one showing up, which
+	// is what makes `increase()` behave on it.
+	_, _ = fmt.Fprintf(w, "# HELP mcp_fetch_errors_by_reason_total Total failed URL fetches broken down by cause, across searxng_read_url and searxng_url_metadata.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetch_errors_by_reason_total counter\n")
+	for i, reason := range fetchErrorReasons {
+		_, _ = fmt.Fprintf(w, "mcp_fetch_errors_by_reason_total{reason=\"%s\"} %d\n",
+			reason, m.FetchErrorsByReason[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
+
 	_, _ = fmt.Fprintf(w, "# HELP mcp_fetches_by_type_total Total fetches broken down by content type.\n")
 	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetches_by_type_total counter\n")
 	_, _ = fmt.Fprintf(w, "mcp_fetches_by_type_total{type=\"html\"} %d\n", m.FetchHTML.Load())
@@ -553,8 +632,13 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	// Latency histograms
 	m.SearchDuration.write(w, "mcp_search_duration_seconds",
 		"Duration of SearXNG search round-trips, in seconds.")
-	m.FetchDuration.write(w, "mcp_fetch_duration_seconds",
-		"Duration of the URL fetch pipeline (dial through extraction), in seconds. Includes cache hits, which observe as sub-millisecond values.")
+	// One HELP/TYPE header for the family, then a series per cache outcome.
+	_, _ = fmt.Fprintf(w, "# HELP mcp_fetch_duration_seconds Duration of the URL fetch pipeline (dial through extraction), in seconds, by whether the call was served from cache.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_fetch_duration_seconds histogram\n")
+	for i, outcome := range cacheOutcomes {
+		m.FetchDuration[i].writeSeries(w, "mcp_fetch_duration_seconds", "cache", outcome)
+	}
+	_, _ = fmt.Fprintln(w)
 
 	// Sessions (gauge — current live count, snapshotted from the SDK)
 	writeGauge("mcp_active_sessions",
