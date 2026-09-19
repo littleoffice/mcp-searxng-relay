@@ -72,10 +72,18 @@ func (s *Server) toolReadURL(
 	}
 	s.metrics.FetchTotal.Add(1)
 
+	// Wall clock for the whole tool call, logged on every exit below.  The
+	// FetchDuration histogram measures the same span but cannot be sliced by
+	// domain without putting an unbounded label on a histogram; the log line
+	// carries domain and duration together, so "which domains are slow" is a
+	// log query instead of a cardinality problem.
+	callStart := time.Now()
+	domain := domainOf(in.URL)
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
-		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		s.metrics.recordFetchByDomain(domain, false)
 		// Recorded as well as logged.  A failed fetch missing from the
 		// history is indistinguishable from one never attempted, and the
 		// model would be free to cite the URL as read.
@@ -87,10 +95,12 @@ func (s *Server) toolReadURL(
 			Read:    readDepthNone,
 		})
 		lg.Error("fetch failed",
-			"url", in.URL, "error", err)
+			"url", in.URL, "domain", domain,
+			"duration_ms", elapsedMillis(callStart),
+			"outcome", "error", "error", err)
 		return nil, nil, err
 	}
-	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
+	s.metrics.recordFetchByDomain(domain, true)
 
 	if result.isImage() {
 		// ImageContent.Data takes raw bytes; the SDK base64-encodes during
@@ -108,7 +118,9 @@ func (s *Server) toolReadURL(
 			FromCache: result.fromCache,
 		})
 		lg.Info("fetch completed",
-			"url", in.URL, "kind", "image")
+			"url", in.URL, "domain", domain, "kind", "image",
+			"duration_ms", elapsedMillis(callStart),
+			"from_cache", result.fromCache, "outcome", "ok")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.ImageContent{
 				Data:     result.imageData,
@@ -152,7 +164,9 @@ func (s *Server) toolReadURL(
 		FromCache:  result.fromCache,
 	})
 	lg.Info("fetch completed",
-		"url", in.URL, "kind", "text",
+		"url", in.URL, "domain", domain, "kind", "text",
+		"duration_ms", elapsedMillis(callStart),
+		"from_cache", result.fromCache, "outcome", "ok",
 		"start_index", start, "end_index", end,
 		"total_chars", len(result.text),
 		"read", string(depth))
@@ -276,10 +290,13 @@ func (s *Server) toolURLMetadata(
 	}
 	s.metrics.MetadataTotal.Add(1)
 
+	callStart := time.Now()
+	domain := domainOf(in.URL)
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
-		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		s.metrics.recordFetchByDomain(domain, false)
 		s.recordFetch(ctx, fetchRecord{
 			Tool:    "searxng_url_metadata",
 			URL:     in.URL,
@@ -291,7 +308,7 @@ func (s *Server) toolURLMetadata(
 			"url", in.URL, "error", err)
 		return nil, nil, err
 	}
-	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
+	s.metrics.recordFetchByDomain(domain, true)
 
 	// Make sure URL is always populated — for non-HTML content types
 	// the extractor never runs, so result.metadata may be zero apart
@@ -325,7 +342,9 @@ func (s *Server) toolURLMetadata(
 		FromCache: result.fromCache,
 	})
 	lg.Info("metadata fetch completed",
-		"url", in.URL,
+		"url", in.URL, "domain", domain,
+		"duration_ms", elapsedMillis(callStart),
+		"from_cache", result.fromCache, "outcome", "ok",
 		"has_title", payload.Title != "",
 		"has_date", payload.Date != nil)
 	return &mcp.CallToolResult{
@@ -340,10 +359,17 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// extraction.  Placed here rather than in the tool handlers so both
 	// searxng_read_url and searxng_url_metadata feed the same histogram —
 	// they share this pipeline and an operator alerting on fetch latency
-	// wants both.  Cache hits observe as sub-millisecond values by design;
-	// see the FetchDuration field comment.
+	// wants both.
+	//
+	// The outcome is resolved inside the cache branch below and read by the
+	// deferred observation, so a hit and a miss land in different series
+	// (see cacheOutcomes).  It starts as a miss because every path that does
+	// not take the hit branch performs a real fetch.
 	fetchStart := time.Now()
-	defer func() { s.metrics.FetchDuration.Observe(time.Since(fetchStart)) }()
+	cacheOutcome := cacheOutcomeMiss
+	defer func() {
+		s.metrics.FetchDuration[cacheOutcome].Observe(time.Since(fetchStart))
+	}()
 
 	// Cache check — skipped when force_refresh is set.
 	// The cache stores text + metadata together so that the read-url and
@@ -355,6 +381,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		if entry, ok := s.cache.Get(targetURL); ok {
 			if time.Now().Before(entry.expiresAt) {
 				lg.Debug("cache hit", "url", targetURL)
+				cacheOutcome = cacheOutcomeHit
 				s.metrics.CacheHits.Add(1)
 				return urlFetchResult{
 					text:      entry.content,

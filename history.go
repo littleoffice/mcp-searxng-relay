@@ -449,6 +449,7 @@ func (s *Server) toolSessionSources(
 	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
 	lg := callerLogger(ctx)
 	s.metrics.SourcesTotal.Add(1)
+	callStart := time.Now()
 
 	h := s.historyFor(ctx)
 	var records []fetchRecord
@@ -526,6 +527,8 @@ func (s *Server) toolSessionSources(
 	}
 
 	lg.Info("session sources listed",
+		"duration_ms", elapsedMillis(callStart),
+		"outcome", "ok",
 		"returned", len(entries),
 		"total_fetches", total,
 		"elided", payload.Elided,
