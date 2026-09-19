@@ -273,7 +273,7 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		// never logged, so a guess cannot leak.
 		if oauthOn {
 			w.Header().Set("WWW-Authenticate",
-				`Bearer realm="mcp", resource_metadata="`+resourceMetadataURL(r)+`"`)
+				`Bearer realm="mcp", resource_metadata="`+resourceMetadataURL(r, s.config.TrustForwardedHeaders)+`"`)
 		} else {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
 		}
