@@ -42,7 +42,7 @@ import (
 //     for the exact wire format and the rationale).
 //   - NO MCP CLIENT VERIFIES THESE SIGNATURES.  The signature provides
 //     authentication semantics ONLY when paired with a downstream verifier
-//     (the paper's "security gateway").  One exists — promptfence-gateway,
+//     (the paper's "security gateway").  One exists — fence-gateway,
 //     which proxies MCP and checks fences in transit — but it is a separate
 //     hop an operator has to deploy, so a client talking straight to this
 //     relay still gets no verification.  The public key is exposed at
