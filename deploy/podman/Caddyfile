@@ -3,11 +3,24 @@ https://searxng.domain.tld:443 {
      ca https://acme.domain.tld:9000/acme/acme/directory
    }
 
+   # /mcp is the verifying gateway, not the relay: every fence is checked
+   # before the response leaves this host.  handle_path strips the prefix, so
+   # the gateway sees "/", which is where its MCP handler is mounted.
    handle_path /mcp* {
-     reverse_proxy mcp-searxng-relay:3000 {
-       flush_interval -1	
+     reverse_proxy fence-gateway:3001 {
+       flush_interval -1
      }
    }
+
+   # The relay, unverified, bypassing the fence entirely.  Off by default —
+   # uncomment only to compare the two side by side while testing, and
+   # comment it out again afterwards.  Anything reaching this path gets the
+   # signatures without the check.
+   #handle_path /raw-mcp* {
+   #  reverse_proxy mcp-searxng-relay:3000 {
+   #    flush_interval -1
+   #  }
+   #}
 
    reverse_proxy searxng:8080
 }

@@ -14,7 +14,7 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     networks: [edge]
-    depends_on: [searxng, mcp-searxng-relay]
+    depends_on: [searxng, mcp-searxng-relay, fence-gateway]
     logging: &log { driver: json-file, options: { max-size: 1m, max-file: "1" } }
     restart: unless-stopped
 
@@ -30,6 +30,42 @@ services:
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
     networks: [edge]
     depends_on: [searxng]
+    logging: *log
+    restart: unless-stopped
+
+  # Verifies the relay's <sec:fence> signatures before any bytes reach a model,
+  # and is what /mcp resolves to at the edge — the relay is no longer routed
+  # from outside.  Every client credential is forwarded to the relay unchanged
+  # (UPSTREAM_MCP_AUTH_MODE=passthrough), so the relay still tells its callers
+  # apart; see README step 4.
+  fence-gateway:
+    # No release is published yet, so this is built locally — README step 2.
+    # Once one exists, pin it by digest like every other image here:
+    #   image: ghcr.io/littleoffice/fence-gateway@sha256:...
+    image: localhost/fence-gateway:dev
+    container_name: fence-gateway
+    env_file: ./envs/.fence-gateway.env
+    command:
+      - -upstream=http://mcp-searxng-relay:3000/mcp
+      # reject is the only policy that stops a boundary-escape attack rather
+      # than describing it.  annotate and audit are for rollout.
+      - -policy=reject
+      # Pin the relay's fence key once you have its fingerprint (README step 5).
+      # Without a pin, verification proves the fence came from whoever answered
+      # /fence/public-key, which is not the same claim.
+      #- -pin=<16 hex chars>
+      #- -max-age=10m
+      #- -require-all-fenced   # pair with FENCE_PREAMBLE=fenced on the relay
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    stdin_open: false
+    volumes:
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    networks: [edge]
+    # Start ordering only.  The gateway gives the relay ~7.5s to answer before
+    # exiting; the restart policy covers a relay that takes longer.
+    depends_on: [mcp-searxng-relay]
     logging: *log
     restart: unless-stopped
 
