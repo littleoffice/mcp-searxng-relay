@@ -13,8 +13,10 @@ services:
       - caddy_config:/config:rw
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    # Caddy shares a network with the gateway, oauth2-proxy and SearXNG only.
+    # It has no route to the relay at all, so no Caddyfile edit can expose it.
     networks: [edge]
-    depends_on: [searxng, mcp-searxng-relay, fence-gateway]
+    depends_on: [searxng, fence-gateway, oauth2-proxy]
     logging: &log { driver: json-file, options: { max-size: 1m, max-file: "1" } }
     restart: unless-stopped
 
@@ -28,7 +30,11 @@ services:
     stdin_open: false
     volumes:
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
-    networks: [edge]
+    # relay:  reachable from the gateway, and from nothing else.
+    # search: its private line to SearXNG.
+    # egress: its own route out, for fetching URLs.  Shared with nobody, so
+    #         being on a non-internal network does not make it reachable.
+    networks: [relay, search, egress]
     depends_on: [searxng]
     logging: *log
     restart: unless-stopped
@@ -50,9 +56,10 @@ services:
       # reject is the only policy that stops a boundary-escape attack rather
       # than describing it.  annotate and audit are for rollout.
       - -policy=reject
-      # Pin the relay's fence key once you have its fingerprint (README step 5).
-      # Without a pin, verification proves the fence came from whoever answered
-      # /fence/public-key, which is not the same claim.
+      # Pin the relay's fence key (README step 6).  Required: the key is
+      # fetched over plain HTTP from another container, and without a pin the
+      # gateway refuses to start rather than trust whoever answers
+      # /fence/public-key.
       #- -pin=<16 hex chars>
       #- -max-age=10m
       #- -require-all-fenced   # pair with FENCE_PREAMBLE=fenced on the relay
@@ -62,10 +69,34 @@ services:
     stdin_open: false
     volumes:
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
-    networks: [edge]
+    # edge: what Caddy forwards /mcp to.  relay: its only way to the relay.
+    # Not on `search`: the gateway has no business talking to SearXNG.
+    networks: [edge, relay]
     # Start ordering only.  The gateway gives the relay ~7.5s to answer before
     # exiting; the restart policy covers a relay that takes longer.
     depends_on: [mcp-searxng-relay]
+    logging: *log
+    restart: unless-stopped
+
+  # Single sign-on in front of the SearXNG web UI.  Caddy asks it, through
+  # forward_auth, whether each browser request carries a valid session, and
+  # sends anyone without one to your identity provider.  Agents never pass
+  # through here: /mcp is bearer-only at the gateway.
+  oauth2-proxy:
+    # Pin by digest like every other image here (README step 5):
+    #   podman pull quay.io/oauth2-proxy/oauth2-proxy:v7 && \
+    #   podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7
+    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:CHANGEME
+    container_name: oauth2-proxy
+    env_file: ./envs/.oauth2-proxy.env
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    volumes:
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    # edge only: Caddy asks it, and it reaches your identity provider.  It
+    # never proxies to SearXNG itself; Caddy does that once it says yes.
+    networks: [edge]
     logging: *log
     restart: unless-stopped
 
@@ -80,7 +111,9 @@ services:
       - ./settings.yml:/etc/searxng/settings.yml
       - core_config:/etc/searxng/
       - core_data:/var/cache/searxng/
-    networks: [edge, backend]
+    # edge: Caddy serves the web UI from it, behind oauth2-proxy.
+    # search: the relay's private line in.  backend: Valkey.
+    networks: [edge, search, backend]
     depends_on: [valkey]
     logging: *log
     restart: always
@@ -102,8 +135,23 @@ services:
     logging: *log
     restart: always
 
+# Each network is one trust boundary.  Who shares a network with whom is the
+# whole access-control story for this stack: a container can only connect to
+# the containers it shares a network with.
+#
+#   edge     caddy, fence-gateway, oauth2-proxy, searxng   what Caddy can reach
+#   relay    fence-gateway, mcp-searxng-relay              the only way to the relay
+#   search   mcp-searxng-relay, searxng                    the relay's line to SearXNG
+#   egress   mcp-searxng-relay                             the relay's own route out
+#   backend  searxng, valkey                               SearXNG's cache
 networks:
   edge:
+    internal: false
+  relay:
+    internal: true
+  search:
+    internal: true
+  egress:
     internal: false
   backend:
     internal: true

@@ -44,6 +44,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - [Using with Claude Desktop (stdio mode)](#using-with-claude-desktop-stdio-mode)
 - [Using with Claude Desktop (HTTP mode)](#using-with-claude-desktop-http-mode)
 - [Scoping a relay to specific engines](#scoping-a-relay-to-specific-engines)
+- [Deployment checklist](#deployment-checklist)
 - [Security notes](#security-notes)
 - [Rate limiting](#rate-limiting)
 - [Session limits](#session-limits)
@@ -714,6 +715,35 @@ Notes:
 - **The roster is advisory.** It only changes the tool *description*; it does not restrict which engines can be queried (that is `SEARXNG_TOKENS` upstream) and the query is never rewritten. A model can still name an engine you did not list, and a `site:` filter is still forwarded verbatim — the roster steers, it does not enforce.
 - **Cheap and stable.** The description is built once at startup and stays constant for the process, so it sits in the tool-definitions prefix that clients and inference caches reuse across turns — a handful of engines costs a few hundred input tokens once, not per call.
 - **Leave it unset** to ship only the generic dialect guidance (select by engine/`!bang`, not `site:`) with no engine names — still useful, but the model then has to discover engine names from result `engine` fields.
+
+## Deployment checklist
+
+The relay's controls (bearer auth, rate limits, the audit log, the source ledger, the fence) only apply to traffic that goes through it. SearXNG has no authentication of its own, so anything that can reach it can search without leaving a trace here. Likewise, with a verifying [fence-gateway](https://github.com/littleoffice/fence-gateway) in front, anything that can reach the relay directly gets unverified output. Three rules close those side doors:
+
+1. **Publish only the front door.** That is the gateway, or the relay when there is no gateway. Never publish SearXNG's port or the relay's port behind a gateway, and never route a reverse proxy to them, except for the web UI case below.
+2. **Give every hop its own credential, and don't forward it further.** Each credential is checked at one hop:
+
+   | Hop | Credential | Set where |
+   |---|---|---|
+   | client → gateway | gateway token or OAuth JWT | gateway `MCP_AUTH_TOKEN*` / `MCP_OAUTH_*` |
+   | gateway → relay | gateway's own token (`static`), or a token minted for the relay (`exchange`) | gateway `UPSTREAM_MCP_*`, relay `MCP_AUTH_TOKEN*` / `MCP_OAUTH_*` |
+   | relay → SearXNG | network reachability; optionally engine tokens | relay `SEARXNG_TOKENS`, SearXNG `tokens:` |
+   | scraper → `/metrics` | a metrics-only token, never an MCP token | relay `MCP_METRICS_TOKEN`; through the gateway, its `MCP_METRICS_TOKEN` + `UPSTREAM_METRICS_TOKEN` |
+   | prober → `/health` | none, or `MCP_HEALTH_TOKEN` | relay |
+
+   The gateway's `passthrough` mode forwards the client's token to the relay, so that token is valid at both hops. That is only safe when rule 3 holds.
+3. **Make each service reachable only from the one in front of it.** SearXNG accepts connections only from the relay, and the relay only from the gateway (plus your scraper, if it scrapes the relay directly). In Compose, use internal networks that only those two containers share. In Kubernetes, use NetworkPolicy; a ClusterIP Service on its own is reachable from every pod in the cluster.
+
+If people also use the SearXNG web UI, that is a second, deliberate front door. Put single sign-on in front of it (for example oauth2-proxy). Searches made there do not pass through the relay and are not in its audit log.
+
+Where each shipped deployment stands:
+
+| Deployment | How the rules are met |
+|---|---|
+| stdio | No listener; nothing to reach. SearXNG exposure is up to you |
+| [`deploy/podman`](deploy/podman/README.md) | Gateway in front; separate internal networks per hop; web UI behind oauth2-proxy |
+| [`deploy/kubernetes`](deploy/kubernetes/README.md) | `networkpolicy.yaml` for the relay; `networkpolicy-searxng.example.yaml` for SearXNG |
+| [searxng-helm](https://github.com/littleoffice/searxng-helm) | Default-deny NetworkPolicies. Set `allowSameNamespace: false` to narrow them to specific peers |
 
 ## Security notes
 

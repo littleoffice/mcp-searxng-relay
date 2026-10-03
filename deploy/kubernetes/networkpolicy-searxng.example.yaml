@@ -1,0 +1,44 @@
+# Example policy for the SearXNG side: only the relay may reach SearXNG, plus
+# (optionally) your ingress controller when people use the SearXNG web UI.
+#
+# Not in kustomization.yaml: SearXNG lives in its own namespace, deployed by
+# whatever installs it.  The searxng-helm chart writes an equivalent policy
+# itself (set networkPolicy.ingress.allowSameNamespace: false there).
+#
+# If people use the web UI, the controller rule below is a deliberate second
+# door: put single sign-on in front of it (for example oauth2-proxy through
+# your ingress controller's external-auth annotations).  Searches made there go
+# straight to SearXNG, so they are not in the relay's audit log.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: searxng-only-from-relay
+  namespace: searxng
+spec:
+  podSelector:
+    matchLabels:
+      app: searxng                       # match your SearXNG pod labels
+  policyTypes:
+    - Ingress
+  ingress:
+    # The relay, from its namespace.  Replace "default" with the namespace you
+    # applied deploy/kubernetes into.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: default
+          podSelector:
+            matchLabels:
+              app: mcp-searxng
+      ports:
+        - port: 8080
+          protocol: TCP
+    # The web UI for people, behind SSO at the Ingress.  Delete this rule if
+    # only agents use SearXNG.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - port: 8080
+          protocol: TCP

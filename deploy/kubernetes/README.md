@@ -20,7 +20,7 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
 
    `secret.yaml` is intentionally **not** in `kustomization.yaml` so that future `apply -k .` runs cannot accidentally roll back to the placeholder values.
 
-3. Apply the Deployment and Service:
+3. Edit `networkpolicy.yaml` for your cluster (ingress controller namespace, SearXNG namespace and labels — see [NetworkPolicy](#networkpolicy)), then apply the Deployment, Service and NetworkPolicy:
 
    ```bash
    kubectl apply -k .
@@ -48,6 +48,8 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
 |---|---|
 | `deployment.yaml` | Deployment with `securityContext`, split TCP/HTTP probes, resource requests/limits |
 | `service.yaml` | ClusterIP service on port 8080 |
+| `networkpolicy.yaml` | Who may reach the relay (ingress controller or fence-gateway, Prometheus) and where it may connect (DNS, SearXNG, public internet) |
+| `networkpolicy-searxng.example.yaml` | The matching policy for SearXNG's namespace: only the relay (and, optionally, the web UI's Ingress). Not in `kustomization.yaml` |
 | `secret.example.yaml` | Template for the auth-token Secret. Not in `kustomization.yaml`; create your own |
 | `ingress.example.yaml` | Template Ingress that terminates TLS via cert-manager. Not in `kustomization.yaml`; copy and edit |
 | `kustomization.yaml` | Entry point for `kubectl apply -k .` |
@@ -111,9 +113,36 @@ Two supported shapes:
 
 - **In-pod TLS.** If you run the relay by itself with no Ingress, it can serve HTTPS directly via the `MCP_TLS_*` variables (see the main README "TLS" section). `deployment.yaml` carries commented entries for both the manual-cert and ACME modes, plus the `443` port, the cert Secret mount, and the writable `emptyDir` ACME cache (which keeps `readOnlyRootFilesystem: true`). For manual certs, a cert-manager `Certificate` resource writing to a Secret pairs well — the relay hot-reloads the pair on renewal without a restart.
 
+## NetworkPolicy
+
+A ClusterIP Service is not private. Without a NetworkPolicy, every pod in every namespace can reach the relay, and anything that can reach SearXNG can search without going through the relay at all. The rule these policies enforce is that each service is reachable only from the one directly in front of it:
+
+```
+ingress controller ─▶ [fence-gateway ─▶] relay ─▶ SearXNG
+```
+
+`networkpolicy.yaml` (applied by `kustomization.yaml`) covers the relay:
+
+- **Inbound:** your ingress controller's namespace, or, with [fence-gateway](https://github.com/littleoffice/fence-gateway) in front, the gateway's pods only and no Ingress for the relay. With the gateway in `UPSTREAM_MCP_AUTH_MODE=passthrough` this is required: a client's token works at the relay too, so the network is what keeps clients from skipping the gateway. Prometheus is admitted from the `monitoring` namespace for `/metrics`.
+- **Outbound:** DNS, SearXNG, and the public internet on 80/443 with private ranges carved out, matching the relay's SSRF policy. Add a rule for any `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS` targets.
+
+`networkpolicy-searxng.example.yaml` is the other half, for SearXNG's namespace: the relay may reach it, and nothing else unless people use the web UI. In that case the ingress controller is a deliberate second door, so put single sign-on (e.g. oauth2-proxy via your controller's external-auth annotations) in front of it.
+
+Policies need a network plugin that enforces them. Calico, Cilium and most managed offerings do; plain Flannel accepts the objects and ignores them. Check that it works with a throwaway pod in a namespace that is *not* allowed in. Both of these must time out:
+
+```bash
+kubectl -n default run probe --rm -it --restart=Never --image=curlimages/curl -- \
+  curl -sS -m 5 http://mcp-searxng.<relay-namespace>.svc:8080/health
+kubectl -n default run probe --rm -it --restart=Never --image=curlimages/curl -- \
+  curl -sS -m 5 http://searxng.searxng.svc:8080/
+```
+
+(Run them from a namespace other than the ones you allowed. `default` works unless that is where you applied the relay.)
+
+The step 4 `kubectl port-forward` check still works: port-forwarding goes through the kubelet, not the pod network. It also means anyone with `pods/portforward` RBAC in the namespace can reach the relay directly, so keep that right narrow.
+
 ## Things deliberately omitted
 
-- **NetworkPolicy.** Strongly recommended in production: egress should be restricted to DNS + your SearXNG Service + the public internet (the URL-fetch tool needs that). The exact syntax depends on your CNI plugin, so providing a one-size policy would be wrong.
 - **HorizontalPodAutoscaler.** Only useful in stateless mode (HPA on a stateful service breaks session affinity). If you've adopted stateless multi-replica and have load to justify it, add one targeting CPU at ~70%.
 - **PodDisruptionBudget.** Worth adding (`minAvailable: 1`) once you have 2+ replicas and use voluntary disruption controls (cluster autoscaler, node drains).
 - **Secret rotation automation.** External Secrets Operator, Vault Agent Injector, CSI Secrets Store all work with `MCP_AUTH_TOKEN_FILE` unchanged because they all end at "a file exists at this path". Pick the one your platform already uses; no code changes here.

@@ -1,0 +1,113 @@
+# Who may reach the relay, and where the relay may connect to.
+#
+# A ClusterIP Service is not private: without a NetworkPolicy, every pod in
+# every namespace can reach it.  This policy closes that.  Each service should
+# be reachable only from the one directly in front of it:
+#
+#   ingress controller ─▶ relay ─▶ SearXNG     (no gateway)
+#   ingress controller ─▶ fence-gateway ─▶ relay ─▶ SearXNG
+#
+# NetworkPolicy is enforced by the cluster's network plugin.  Calico, Cilium
+# and most managed offerings enforce it; plain Flannel accepts the object and
+# silently ignores it.  Check with the probe in README.md "NetworkPolicy".
+#
+# Kubelet health probes come from the node and are not subject to this policy,
+# so the readiness/liveness probes in deployment.yaml keep working.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-searxng
+  labels:
+    app: mcp-searxng
+spec:
+  podSelector:
+    matchLabels:
+      app: mcp-searxng
+  policyTypes:
+    - Ingress
+    - Egress
+  # Anything not matched below is denied.
+  ingress:
+    # Callers of the MCP endpoint.  Pick ONE of the two peers:
+    #
+    #  - No gateway: your ingress controller's namespace (ingress-nginx here,
+    #    matching ingress.example.yaml).
+    #  - With fence-gateway in front: the gateway's pods only, and no Ingress
+    #    for the relay at all.  Required, not optional, when the gateway runs
+    #    with UPSTREAM_MCP_AUTH_MODE=passthrough: a client's token then works
+    #    at the relay too, and this rule is the only thing keeping clients from
+    #    skipping the gateway.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+        # - podSelector:
+        #     matchLabels:
+        #       app.kubernetes.io/name: fence-gateway
+        # (gateway in another namespace: put a namespaceSelector in the same
+        # list entry as the podSelector, so both must match)
+      ports:
+        - port: 8080
+          protocol: TCP
+    # Prometheus scraping /metrics (bearer MCP_METRICS_TOKEN).  Drop this rule
+    # if you do not scrape, or if fence-gateway scrapes the relay on
+    # Prometheus's behalf (its /metrics/relay endpoint).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - port: 8080
+          protocol: TCP
+  egress:
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # SearXNG.  Must match SEARXNG_URL in deployment.yaml.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: searxng
+          podSelector:
+            matchLabels:
+              app: searxng
+      ports:
+        - port: 8080
+          protocol: TCP
+    # The open web, for searxng_read_url and searxng_url_metadata.  Private,
+    # link-local and CGNAT ranges are carved out, matching the relay's own SSRF
+    # policy, so even a bypass of that check cannot reach the cluster or your
+    # VPC.  If you set FETCH_ALLOWED_HOSTS / FETCH_ALLOWED_CIDRS, add a rule for
+    # exactly those addresses and ports.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 0.0.0.0/8
+              - 10.0.0.0/8
+              - 100.64.0.0/10
+              - 127.0.0.0/8
+              - 169.254.0.0/16
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+        - ipBlock:
+            cidr: ::/0
+            except:
+              - ::1/128
+              - fc00::/7
+              - fe80::/10
+      ports:
+        - port: 80
+          protocol: TCP
+        - port: 443
+          protocol: TCP

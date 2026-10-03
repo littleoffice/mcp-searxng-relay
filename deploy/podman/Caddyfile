@@ -5,23 +5,42 @@ https://searxng.domain.tld:443 {
 
    # /mcp is the verifying gateway, not the relay: every fence is checked
    # before the response leaves this host.  handle_path strips the prefix, so
-   # the gateway sees "/", which is where its MCP handler is mounted.
+   # the gateway sees "/", which is where its MCP handler is mounted.  Agents
+   # authenticate here with a bearer token; there is no SSO on this path.
+   #
+   # There is deliberately no route to the relay itself, not even a commented
+   # one: Caddy shares no network with it (see docker-compose.yaml), so the
+   # gateway is the only way in.
    handle_path /mcp* {
      reverse_proxy fence-gateway:3001 {
        flush_interval -1
      }
    }
 
-   # The relay, unverified, bypassing the fence entirely.  Off by default —
-   # uncomment only to compare the two side by side while testing, and
-   # comment it out again afterwards.  Anything reaching this path gets the
-   # signatures without the check.
-   #handle_path /raw-mcp* {
-   #  reverse_proxy mcp-searxng-relay:3000 {
-   #    flush_interval -1
-   #  }
-   #}
+   # oauth2-proxy's own endpoints: sign-in, the IdP callback, sign-out.
+   handle /oauth2/* {
+     reverse_proxy oauth2-proxy:4180 {
+       header_up X-Real-IP {remote_host}
+       header_up X-Forwarded-Uri {uri}
+     }
+   }
 
-   reverse_proxy searxng:8080
+   # Everything else is the SearXNG web UI, for people.  Each request is
+   # checked with oauth2-proxy first; without a session the browser is sent to
+   # sign in.  This is the front door for humans, and it is the only way to
+   # SearXNG from outside: searches made here go straight to SearXNG, so they
+   # are not in the relay's audit log or source ledger.
+   handle {
+     forward_auth oauth2-proxy:4180 {
+       uri /oauth2/auth
+       header_up X-Real-IP {remote_host}
+       copy_headers X-Auth-Request-User X-Auth-Request-Email
+
+       @unauthenticated status 401
+       handle_response @unauthenticated {
+         redir * /oauth2/sign_in?rd={scheme}://{host}{uri}
+       }
+     }
+     reverse_proxy searxng:8080
+   }
 }
-

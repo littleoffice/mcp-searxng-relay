@@ -1,12 +1,33 @@
 # Podman deployment
 
-This deployment is based on the official SearXNG [docker-compose.yaml](https://github.com/searxng/searxng/blob/master/container/docker-compose.yml), adapted to run on Podman for its stricter default isolation (rootless, daemonless, cgroups v2). It brings up five containers: [Caddy](https://caddyserver.com/) for TLS termination, [`fence-gateway`](https://github.com/littleoffice/fence-gateway) verifying every fence signature in transit, `mcp-searxng-relay` (stateful mode by default), [SearXNG](https://github.com/searxng/searxng) as the upstream search engine, and [Valkey](https://valkey.io/) as SearXNG's result cache.
+This deployment is based on the official SearXNG [docker-compose.yaml](https://github.com/searxng/searxng/blob/master/container/docker-compose.yml), adapted to run on Podman for its stricter default isolation (rootless, daemonless, cgroups v2). It brings up six containers: [Caddy](https://caddyserver.com/) for TLS termination, [`oauth2-proxy`](https://oauth2-proxy.github.io/oauth2-proxy/) for single sign-on to the SearXNG web UI, [`fence-gateway`](https://github.com/littleoffice/fence-gateway) verifying every fence signature in transit, `mcp-searxng-relay` (stateful mode by default), [SearXNG](https://github.com/searxng/searxng) as the upstream search engine, and [Valkey](https://valkey.io/) as SearXNG's result cache.
 
 The gateway is what turns the fence into an enforced control rather than forward compatibility. The relay signs every tool response; with nothing checking those signatures, the model is asked to respect a boundary it cannot verify. The gateway checks each one deterministically before the bytes leave this host, and drops the response when it fails. The wire contract it implements is [`docs/fence-verification.md`](../../docs/fence-verification.md).
 
 > ⚠️ **Not internet-facing without further hardening.** The shipped configuration is meant for trusted networks (lab, internal tooling, VPN-fronted). For public exposure, treat the bearer tokens, rate limits, and Caddy ACME source as deliberate decisions — start from the [Security notes](../../README.md#security-notes) in the main README.
 
-Caddy, the gateway, the relay, and SearXNG sit on the `edge` network; Valkey sits on a separate `backend` network declared `internal: true`, so it has no route to the host or the public internet — only SearXNG can reach it. All five services run with `cap_drop: [ALL]`, `no-new-privileges`, and read-only root filesystems. At the edge, `/mcp` is the gateway: the relay is reachable only from inside the `edge` network, so a client cannot route around the verification.
+All six services run with `cap_drop: [ALL]`, `no-new-privileges`, and read-only root filesystems.
+
+### Who can reach what
+
+A container can only connect to containers it shares a network with, so the network layout is the access-control policy. Each service is reachable only from the one in front of it:
+
+| Network | Members | Purpose |
+|---|---|---|
+| `edge` | caddy, fence-gateway, oauth2-proxy, searxng | what Caddy can reach |
+| `relay` (internal) | fence-gateway, mcp-searxng-relay | the only way to the relay |
+| `search` (internal) | mcp-searxng-relay, searxng | the relay's line to SearXNG |
+| `egress` | mcp-searxng-relay | the relay's own route out, for fetching URLs; shared with nobody |
+| `backend` (internal) | searxng, valkey | SearXNG's cache |
+
+And two doors in from outside, each with its own credential:
+
+| Path | Who | Credential | Goes to |
+|---|---|---|---|
+| `https://<host>/mcp` | agents | bearer token (or OAuth JWT), checked by the gateway | gateway → relay → SearXNG |
+| `https://<host>/` | people | SSO session, checked by oauth2-proxy | SearXNG web UI |
+
+Caddy has no network in common with the relay, so no edit to the Caddyfile can route around the gateway. The gateway is not on `search`, so it cannot query SearXNG directly. One SearXNG serves both agents and people; searches made in the web UI go straight to SearXNG and are therefore not in the relay's audit log.
 
 ## 1. Replace the placeholder hostname
 
@@ -54,21 +75,41 @@ The gateway forwards each client's credential to the relay unchanged (`UPSTREAM_
 So N clients means N + 1 secrets, not 2N: one token each, plus one for the gateway.
 
 ```bash
-# the gateway's own credential
-echo "UPSTREAM_MCP_TOKEN=$(openssl rand -hex 32)" >> envs/.fence-gateway.env
-# one client token, in both tables
-tok="$(openssl rand -hex 32)"
-echo "MCP_AUTH_TOKEN=$tok" >> envs/.fence-gateway.env
-echo "MCP_AUTH_TOKEN=$tok" >> envs/.mcp-searxng-relay.env
+gw="$(openssl rand -hex 32)"    # the gateway's own credential
+tok="$(openssl rand -hex 32)"   # one client's token
+echo "UPSTREAM_MCP_TOKEN=$gw" >> envs/.fence-gateway.env
+echo "MCP_AUTH_TOKEN=$tok"    >> envs/.fence-gateway.env
+# the relay accepts both: the client's (forwarded) and the gateway's (startup)
+echo "MCP_AUTH_TOKENS=fence-gateway:$gw,claude-desktop:$tok" >> envs/.mcp-searxng-relay.env
 ```
 
-(Each file ships with a `CHANGEME` placeholder on those lines; delete it once the real value is appended.)
+(Each file ships with a `CHANGEME` placeholder on those lines; delete it once the real value is appended. In the relay's file, delete the `MCP_AUTH_TOKEN=CHANGEME` line.) Keep the two values different even with a single client: if they were the same, the client would also hold the gateway's credential.
+
+Pass-through has a price: a client's token is valid at the relay too. What stops a client from using it there is the network — only the gateway shares a network with the relay (see [Who can reach what](#who-can-reach-what)). Don't publish a port for the relay, put it on `edge`, or route Caddy to it while pass-through is on.
 
 For more than one client, use `MCP_AUTH_TOKENS` (`identity:token` pairs) in both files, with the same values and the same labels, so relay and gateway logs name the same caller the same way. See [Configuration](../../README.md#configuration) for `MCP_AUTH_TOKENS` and `MCP_AUTH_TOKEN_FILE`.
 
 Alternatively, if you already run an identity provider, both services can verify **OAuth 2.0 / OIDC** bearer JWTs. Pass-through forwards a JWT untouched, so pointing both at the same issuer carries identity end to end in the token's `sub` with no shared secrets at all — provided its `aud` satisfies both sides. See [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc).
 
-## 5. Pin the fence signing key
+With OAuth there is a stricter option: `UPSTREAM_MCP_AUTH_MODE=exchange`. The gateway trades each caller's token at your identity provider for a token issued to the relay, so a caller's own token is refused at the relay even if they could reach it. The network then becomes a second layer instead of the only one. Setup: [token exchange](https://github.com/littleoffice/fence-gateway/blob/main/docs/token-exchange.md).
+
+## 5. SearXNG secret and single sign-on
+
+SearXNG needs its own secret. [`settings.yml`](./settings.yml) ships SearXNG's `ultrasecretkey` sentinel, which it refuses to start with, so this step is not optional:
+
+```bash
+echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> envs/.searxng.env
+```
+
+People reach the SearXNG web UI through [oauth2-proxy](https://oauth2-proxy.github.io/oauth2-proxy/). On every browser request Caddy asks it (`forward_auth`) whether the request carries a valid session, and sends the browser to your identity provider when it doesn't.
+
+1. At your identity provider, register a confidential OIDC client with redirect URI `https://<your-hostname>/oauth2/callback`.
+2. Fill in the `CHANGEME` values in [`envs/.oauth2-proxy.env`](./envs/.oauth2-proxy.env): issuer URL, client ID and secret, and a cookie secret (`openssl rand -base64 32 | tr -- '+/' '-_'`). Narrow who may sign in with `OAUTH2_PROXY_EMAIL_DOMAINS` or `OAUTH2_PROXY_ALLOWED_GROUPS`.
+3. Pin the image: `podman pull quay.io/oauth2-proxy/oauth2-proxy:v7`, read its digest with `podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7`, and put it in the `image:` line in [`docker-compose.yaml`](./docker-compose.yaml) in place of `sha256:CHANGEME`.
+
+Agents never pass through oauth2-proxy: `/mcp` is bearer-only at the gateway.
+
+## 6. Pin the fence signing key
 
 By default the relay generates a fresh signing key on every start, so the fingerprint a verifier pins changes at every restart. Give it a persistent one:
 
@@ -76,15 +117,16 @@ By default the relay generates a fresh signing key on every start, so the finger
 echo "FENCE_SIGNING_KEY=$(openssl rand -base64 32)" >> envs/.mcp-searxng-relay.env
 ```
 
-Bring the stack up (step 6), then read the fingerprint from the relay's startup banner:
+The gateway refuses to start without a pin here: it fetches the relay's key over plain HTTP from another container, and anyone on that path could serve their own key. So start the relay on its own first and read the fingerprint from its startup banner:
 
 ```bash
+podman-compose up -d mcp-searxng-relay
 podman-compose logs mcp-searxng-relay | grep -i "fence key"
 ```
 
-Uncomment `-pin=<fingerprint>` in the `fence-gateway` service's `command:` and restart it. Until you do, verification proves the fence was signed by whoever answered `/fence/public-key`. That is the paper's §6.3.2 defence and it does hold against hostile *fetched content* — a malicious page cannot mint signatures — but it proves nothing against a substituted relay. The pin is what closes that.
+Uncomment `-pin=<fingerprint>` in the `fence-gateway` service's `command:` and put the value there. With the pin, the gateway accepts only fences signed by that key. That covers hostile *fetched content*, which cannot mint signatures (the paper's §6.3.2 defence), and also a substituted relay, which would have to hold the relay's private key.
 
-## 6. Bring it up
+## 7. Bring it up
 
 ```bash
 podman-compose up -d        # or, for Podman 4.x+ native compose:
@@ -109,11 +151,37 @@ they do.
 
 Once Caddy has provisioned its certificate, the MCP endpoint is at `https://<your-hostname>/mcp` — the gateway, with the relay behind it. Each verified tool call then logs `fence.verified …` and `fence.ok tool=… identity=… blocks=N`.
 
-## 7. Testing the fence
+## 8. Check the isolation and the fence
 
-**Prove it is actually enforcing.** Set `-pin=` in the compose file to a fingerprint that is not the relay's, `podman-compose up -d fence-gateway`, and make any tool call. It should come back as an error carrying no content, with `fence.policy.reject` in the gateway log. Restore the real pin afterwards. A gateway that passes traffic in this state is not verifying anything.
+**Prove nothing routes around the gateway.** Each of these must fail with a name-resolution error or a timeout, because the two containers share no network:
 
-**Compare against the unverified path.** Uncomment the `/raw-mcp*` block in the [`Caddyfile`](./Caddyfile) and reload Caddy to expose the relay directly, so the same query can be run with and without the check. Comment it out again when you're done — it is a route around the control.
+```bash
+podman exec caddy wget -qO- -T 5 http://mcp-searxng-relay:3000/health   # Caddy → relay
+podman exec fence-gateway wget -qO- -T 5 http://searxng:8080/            # gateway → SearXNG
+```
+
+The `caddy` image includes busybox `wget`. The gateway image is `FROM scratch` with no shell, so the second check needs a debug container sharing the gateway's networks instead: `podman run --rm --network container:fence-gateway docker.io/library/busybox wget -qO- -T 5 http://searxng:8080/`.
+
+And from outside:
+
+```bash
+curl -sI https://<your-hostname>/ | head -1             # 302 to /oauth2/sign_in, not SearXNG
+curl -s -o /dev/null -w '%{http_code}\n' https://<your-hostname>/mcp   # 401 without a token
+```
+
+**Prove the fence is actually enforced.** Set `-pin=` in the compose file to a fingerprint that is not the relay's, `podman-compose up -d fence-gateway`, and make any tool call. It should come back as an error carrying no content, with `fence.policy.reject` in the gateway log. Restore the real pin afterwards. A gateway that passes traffic in this state is not verifying anything.
+
+**Compare against the unverified path** from inside the `relay` network, never by routing Caddy to the relay. A throwaway container joined to that network can query the relay directly with the gateway's own token:
+
+```bash
+podman run --rm --network podman_relay docker.io/curlimages/curl -s \
+  -H "Authorization: Bearer $gw" -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}' \
+  http://mcp-searxng-relay:3000/mcp
+```
+
+Compose prefixes network names with the project name (the directory name, by default), so the network is `podman_relay` when the stack runs from this directory; `podman network ls` shows the actual name.
 
 **Roll out gradually.** `-policy=annotate` forwards a failing result with a warning and `isError` set; `-policy=audit` only logs. Both are for seeing what would be blocked. Neither stops an attack, so neither is a destination.
 
@@ -123,4 +191,5 @@ Once Caddy has provisioned its certificate, the MCP endpoint is at `https://<you
 
 - **Nothing rate-limits the gateway.** Pass-through keeps the relay's per-identity buckets working, but the gateway has no limiter of its own, so a caller can still spend the relay's budget as fast as the relay will serve it.
 - **The gateway runs single-replica here.** It holds MCP sessions in memory. More than one instance needs `MCP_STATELESS=true` on both it and the relay — the two settings have to agree, or the relay's session state is stranded on whichever replica answered first. See [Deployment shapes](../kubernetes/README.md#deployment-shapes).
-- **`/metrics` and `/health` are unchanged**, still served by the relay and scraped from it directly; the gateway exposes neither.
+- **Metrics go through the gateway.** The relay is not reachable from a scraper, so Prometheus scrapes the gateway: `/mcp/metrics/gateway` for the gateway's own series, and `/mcp/metrics/relay` for the relay's, which the gateway fetches over the `relay` network. Both need the gateway's `MCP_METRICS_TOKEN`; set `UPSTREAM_METRICS_TOKEN` to the relay's `MCP_METRICS_TOKEN` (see [`envs/.fence-gateway.env`](./envs/.fence-gateway.env)). The gateway's `/mcp/health` answers `ok` without a credential and says nothing else.
+- **Web UI searches are not audited by the relay.** They go from oauth2-proxy-authenticated browsers straight to SearXNG. oauth2-proxy logs who signed in; SearXNG does not log per-user queries.

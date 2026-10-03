@@ -8,6 +8,9 @@ kind: Kustomization
 resources:
   - deployment.yaml
   - service.yaml
+  # Edit the namespace and label selectors in it before applying: as shipped
+  # it admits the ingress-nginx namespace and reaches SearXNG in "searxng".
+  - networkpolicy.yaml
 
 # Useful overlays you may want to layer in your own kustomization:
 #
