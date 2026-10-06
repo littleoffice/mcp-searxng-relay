@@ -67,7 +67,7 @@ documentation bug worth reporting.
 | `github.com/markusmobius/go-trafilatura` | HTML-to-Markdown extraction: identifies the main article subtree, strips boilerplate (navigation, sidebars, footers, cookie banners), and pulls structured metadata from `<meta>`, OpenGraph, and JSON-LD. Pinned at v1.12.2. See [The trafilatura trade-off](#the-trafilatura-trade-off) below — this dependency brings most of the transitive tree. |
 | `github.com/hashicorp/golang-lru/v2` | The bounded in-memory LRU cache used for fetched URL content and for the rate-limiter's per-caller token buckets. Small, single-purpose, widely used. Pinned at v2.0.7. |
 | `github.com/yfedoseev/pdf_oxide/go` | PDF text extraction. Go bindings over a Rust core; see [The pdf_oxide build step](#the-pdf_oxide-build-step) below — this is one of the two dependencies with a non-standard installation path. Pinned at v0.3.78. |
-| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.11. |
+| `github.com/yfedoseev/office_oxide/go` | Office document text extraction (DOCX, XLSX, PPTX + legacy DOC, XLS, PPT). Go bindings over a Rust core, same architecture and same author as `pdf_oxide`; see [The office_oxide build step](#the-office_oxide-build-step) below for the (currently slightly more manual) install path. Pinned at v0.1.12. |
 | `github.com/andybalholm/cascadia` | CSS-selector parsing. Used directly at startup to validate `PRUNE_SELECTOR` (`main.go`) so an operator's bad selector fails loudly at boot rather than silently skipping pruning on every fetch. Also arrives transitively under `go-trafilatura`, which is where it entered the tree before the relay began calling it. Pinned at v1.3.5. |
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.59.0. |
 | `golang.org/x/crypto` | `golang.org/x/crypto/acme` and `.../acme/autocert` for the optional in-process ACME TLS mode (`MCP_TLS_ACME_DOMAINS`). Only reached when that mode is enabled; the default plain-HTTP and manual-cert paths use the standard library alone. Maintained by the Go team. Pinned at v0.57.0. |
@@ -351,7 +351,7 @@ RUN OFFICE_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/of
 
 Same observations apply as for `pdf_oxide`:
 
-- The version is **derived from `go.mod` at build time** (currently v0.1.11)
+- The version is **derived from `go.mod` at build time** (currently v0.1.12)
   rather than hardcoded. Bumping the module in `go.mod` is the single
   source of truth for both the Go binding and the downloaded archive.
 - The `liboffice_oxide.a` binary blob in the archive is precompiled upstream.
