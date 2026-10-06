@@ -54,10 +54,19 @@ transitive ones. The full, authoritative list is `go.mod` / `go.sum` in the
 repository root; this section explains what each direct dependency is for, and
 is honest about the transitive surface introduced by the largest of them.
 
-The specific version numbers cited in this section are point-in-time references
-for a reader's convenience; `go.mod` is the authoritative pin. If a number here
-ever disagrees with `go.mod`, trust `go.mod` and treat the discrepancy as a
-documentation bug worth reporting.
+The specific version numbers cited in this section are for a reader's
+convenience; `go.mod` is the authoritative pin. They are no longer
+point-in-time: `./check-doc-pins.sh` compares every version named below against
+`go.mod`, and the `doc-pins-match` job in
+[`pin-consistency.yml`](../.github/workflows/pin-consistency.yml) fails the
+build when they disagree. The check also fails when a direct dependency is
+added without a row here, or when the count above stops matching `go.mod`.
+
+So if a number here disagrees with `go.mod`, trust `go.mod` — but that state
+should not reach `main`, and finding it there means the check has a gap worth
+reporting. Run `./check-doc-pins.sh --fix` after a dependency bump to resync the
+numbers, and write the prose yourself: a version bump often deserves a sentence
+about what changed.
 
 ### Direct dependencies
 
