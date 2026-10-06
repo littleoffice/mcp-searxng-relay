@@ -1,0 +1,49 @@
+# Minimal single-binary Loki for a single mcp-searxng-relay instance.
+# Filesystem storage, no clustering, no auth — this is a local/trusted-network
+# log store to pair with the Grafana dashboard's "Activity (logs)" panels, not a
+# production multi-tenant deployment. See the SECURITY note in README.md: these
+# logs contain full fetch URLs, search-query text and caller identities.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: warn
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  storage:
+    filesystem:
+      chunks_directory: /loki/chunks
+      rules_directory: /loki/rules
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: filesystem
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  # A relay emits few log lines relative to a busy web app; keep retention short
+  # and reject nothing at these volumes. Raise volume/ingestion limits if you
+  # attach more instances.
+  retention_period: 168h        # 7 days
+  reject_old_samples: true
+  reject_old_samples_max_age: 168h
+
+compactor:
+  working_directory: /loki/compactor
+  delete_request_store: filesystem
+  retention_enabled: true
+
+analytics:
+  reporting_enabled: false
