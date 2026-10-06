@@ -2,13 +2,15 @@
 
 A Model Context Protocol (MCP) server giving AI agents web search and URL fetching through your own self-hosted [SearXNG](https://github.com/searxng/searxng) instance — built for environments where search must stay on approved infrastructure and every query must be auditable. No third-party search APIs, no external data brokers; queries never leave infrastructure you control.
 
-**Who this is for.** Teams running AI agents in corporate or government environments where outbound search is restricted, monitored, or both — and where "we use a hosted search API" is not an acceptable answer. The project prioritizes a defensible security posture and a clean audit trail over breadth of features.
+**Who this is for.** Teams running AI agents in environments where outbound search is restricted, monitored, or both — and where "we use a hosted search API" is not an acceptable answer. The project prioritizes a defensible security posture and a clean audit trail over breadth of features.
 
 **What's distinctive.** Most search tooling for agents stops at "here are some results." This relay also tells you what the agent *actually did with them*.
 
 `searxng_session_sources` returns the URLs this relay genuinely fetched for a given caller — byte-exact, newest first, each marked with how much was really read: the full text, one window of a longer document, metadata only, or a fetch that failed. Agents transcribe URLs badly when they compose a final answer thousands of tokens after the tool call that produced it, and fabricate them outright when they never fetched one at all. An instruction like "don't cite sources you haven't read" is unenforceable against a model's recall; against this list it is a lookup. The read-depth distinction is the part that matters — "fetched" and "read in full" are not the same claim, and it is precisely the one models lose.
 
 A hosted search API structurally cannot offer this: it sees one query at a time and keeps no per-caller ledger. The same reasoning runs through the rest of the project — every search and fetch is [attributed to an identity and a session](#logging), the [SSRF policy](#security-notes) is documented and its reach is stated in config rather than inferred, and nothing that would widen a security boundary is allowed to happen silently. If you need to be able to say what your agents searched, what they read, and how much of it, that is what this is for.
+
+Every tool response leaves the relay wrapped in a signed `<sec:fence>` element, implementing the prompt-fencing specification from [Peh, S. (2025), "Prompt Fencing: A Cryptographic Approach to Establishing Security Boundaries in Large Language Model Prompts", arXiv:2511.19727](https://arxiv.org/abs/2511.19727) (referred to below as *the paper*). The boundary between what the relay says and what a fetched page says is cryptographic rather than typographic, so content that tries to impersonate the relay cannot forge its way across it. See [Security notes](#security-notes) for the details.
 
 **Companion projects.** This relay is designed to be deployed alongside [searxng-helm](https://github.com/littleoffice/searxng-helm), a hardened Helm chart for SearXNG on Kubernetes (rootless, read-only rootfs, deny-by-default NetworkPolicies, cosign-signed). The chart deploys both SearXNG and this relay as a pair; see its README for the full infrastructure security story. The relay also ships minimal standalone K8s manifests for quick testing — see [Kubernetes](#kubernetes) below.
 
@@ -74,7 +76,7 @@ This MCP server supports both the **stdio** transport (for local use with Claude
 - **Per-domain fetch metrics** — `/metrics` exposes `mcp_fetches_by_domain_total{domain="…",outcome="success|error"}` so an operator can see which destination hosts are healthy and which aren't. Bounded cardinality: at most 512 distinct domains tracked, with the remainder rolled up under `domain="__overflow__"`.
 - **Response caching** with configurable TTL and per-request cache bypass
 - **SSRF protection** — non-globally-routable addresses are blocked at TCP-dial time (loopback, link-local, private, multicast, broadcast, unspecified, plus a hardcoded blocklist covering CGNAT, TEST-NET-{1,2,3}, benchmark, IETF protocol assignments, NAT64, Teredo, 6to4, IPv6 documentation, ORCHID, the discard prefix, future-reserved 240/4, and other reserved ranges the stdlib predicates miss). Redirect chains are revalidated at every hop to close the DNS-rebinding window. Operators can opt in to reaching internal resources (Confluence, Jira, wikis) via `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS`; both require an explicit port, so allow-listing a wiki never also exposes the Redis or kubelet listener beside it.
-- **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging
+- **Bearer token authentication** with multi-token tables (`MCP_AUTH_TOKEN`, `MCP_AUTH_TOKENS`, or `MCP_AUTH_TOKEN_FILE`) and per-identity audit logging, or **OAuth 2.0 / OIDC** JWT verification against your own identity provider (`MCP_OAUTH_ISSUER`) — the two can run side by side
 - **Per-caller rate limiting** — token-bucket throttle keyed by identity when authenticated and by source IP otherwise. Configurable RPS and burst, default 5 rps / burst 10. Exposed at `mcp_rate_limit_rejections_total`.
 - **Prompt fencing** — every tool response is wrapped in a signed `<sec:fence>` element with a per-response random nonce, implementing arXiv:2511.19727. Public key exposed at `/fence/public-key` for forward compatibility with verifying clients. The signing key is per-process by default, or operator-supplied via `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE` when a verifier needs a stable fingerprint to pin. `FENCE_PREAMBLE=fenced` additionally moves the awareness preamble inside its own signed trusted-instruction fence (format 1.1), leaving no unsigned bytes in a response.
 - **Reproducible container builds** — bit-for-bit. Given the same source commit and `SOURCE_DATE_EPOCH`, the build produces a byte-identical image, verifiable via `docker save <image> | sha256sum`. Toolchain pinned by digest, `go.sum` frozen, no embedded paths, VCS state, or build IDs. Details in [`supply-chain.md`](docs/supply-chain.md).
@@ -306,7 +308,7 @@ Note that Docker and Podman use slightly different on-disk manifest encodings, s
 
 ## Configuration
 
-All configuration is via environment variables. The server will refuse to start if `SEARXNG_URL` is not set. At least one of `MCP_AUTH_TOKEN` / `MCP_AUTH_TOKENS` / `MCP_AUTH_TOKEN_FILE` is required when `MCP_PORT` is set.
+All configuration is via environment variables. The server will refuse to start if `SEARXNG_URL` is not set. When `MCP_PORT` is set, some authentication layer is required — either at least one of `MCP_AUTH_TOKEN` / `MCP_AUTH_TOKENS` / `MCP_AUTH_TOKEN_FILE` (static bearer tokens) or OAuth verification via `MCP_OAUTH_ISSUER` (see [OAuth 2.0 / OIDC](#oauth-20--oidc)). The two can run side by side.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
@@ -315,10 +317,17 @@ All configuration is via environment variables. The server will refuse to start 
 | `MCP_AUTH_TOKEN` | HTTP mode¹ | — | Single bearer token; identity is logged as `"default"`. Backwards-compatible with single-tenant deployments |
 | `MCP_AUTH_TOKENS` | HTTP mode¹ | — | Comma-separated `identity:token` pairs for small static fleets, e.g. `alice:abc...,bob:def...` |
 | `MCP_AUTH_TOKEN_FILE` | HTTP mode¹ | — | Path to a file with one `identity:token` per line; `#` comments and blank lines ignored |
+| `MCP_OAUTH_ISSUER` | HTTP mode¹ | — | OIDC issuer URL. Setting it turns on OAuth 2.0 bearer-JWT verification alongside the static token table. By default the issuer's `/.well-known/openid-configuration` and JWKS are discovered at startup and rotated automatically. See [OAuth 2.0 / OIDC](#oauth-20--oidc) |
+| `MCP_OAUTH_AUDIENCE` | with issuer | — | Required when `MCP_OAUTH_ISSUER` is set. The resource identifier every token must carry in its `aud` claim (this relay), e.g. `https://relay.example.com`. Tokens minted for another service are rejected |
+| `MCP_OAUTH_JWKS_FILE` | no | — | Path to a static JWKS document, used instead of network discovery (air-gapped or key-synced deployments). Hot-reloaded on mtime change, like a rotated cert-manager Secret. `MCP_OAUTH_ISSUER` is still required (for `iss` validation) |
+| `MCP_OAUTH_IDENTITY_CLAIM` | no | `sub` | Token claim used as the audit identity in logs (`identity=<value>`). Common alternatives: `email`, `client_id`, `azp` |
+| `MCP_OAUTH_REQUIRED_SCOPE` | no | — | If set, every token must grant this scope (checked against the space-delimited `scope` string and the `scp` array). Tokens without it are rejected |
+| `MCP_OAUTH_CA_ROOTS` | no | — | PEM CA roots for reaching a private issuer whose own TLS certificate is not in the system trust store (e.g. an internal Keycloak). Scoped to OAuth discovery/JWKS fetching only — does not affect the fetch tool or the SearXNG client |
+| `MCP_TRUST_FORWARDED_HEADERS` | no | `false` | Believe `X-Forwarded-Proto` / `X-Forwarded-Host` when building the RFC 9728 `resource_metadata` URL advertised in a `401` challenge. Off by default: nothing about an inbound request distinguishes a header a reverse proxy set from one the caller typed, and that value names where an OAuth client goes to discover which authorization server to trust. Turn it on only when a proxy you control terminates every request; without it the URL is derived from the connection the client actually made |
 | `MCP_HEALTH_TOKEN` | no | — | Optional bearer token that gates `GET /health`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset (the default) leaves `/health` open. Same 32-character minimum. If you set it, **every** prober must send it (see [Health endpoint](#health-endpoint)) |
 | `MCP_METRICS_TOKEN` | to scrape | — | Bearer token that gates `GET /metrics`. A **separate** secret from the MCP tokens above — do not reuse a value. Unset, `/metrics` returns `401` to everyone, including callers holding a valid MCP token. Same 32-character minimum. Required if you scrape metrics (see [Metrics](#metrics)) |
 | `MCP_TLS_CERT` | no | — | Path to a PEM certificate. With `MCP_TLS_KEY`, the relay serves HTTPS directly instead of plain HTTP. The pair is hot-reloaded on file change, so a renewal is picked up without a restart. Mutually exclusive with the `MCP_TLS_ACME_*` variables. See [TLS](#tls) |
-| `MCP_TLS_KEY` | no | — | Path to the PEM private key for `MCP_TLS_CERT`. Both are required together; one alone fails startup |
+| `MCP_TLS_KEY` | no | — | Path to the PEM private key for `MCP_TLS_CERT`. Both are required together; one alone fails startup. This listener negotiates **TLS 1.3 or better**; the ACME listener below keeps a 1.2 floor because it also answers the CA's challenge handshakes |
 | `MCP_TLS_ACME_DOMAINS` | for ACME | — | Comma-separated hostnames the certificate may cover (the ACME host allow-list). **Setting this (or any `MCP_TLS_ACME_*` variable) turns ACME on** — there is no separate on/off flag — and this one is then required. Certificates are obtained automatically, with challenges served over TLS-ALPN-01 on the same port (no second port needed). Mutually exclusive with `MCP_TLS_CERT`. See [TLS](#tls) |
 | `MCP_TLS_ACME_EMAIL` | no | — | ACME account contact address. Optional; if set it must be a valid bare address (e.g. `admin@example.com`), or startup fails — a public CA rejects a malformed contact at registration. Leave unset to register without a contact |
 | `MCP_TLS_ACME_DIRECTORY` | no | Let's Encrypt | ACME directory URL. Point it at a private CA (e.g. step-ca) to use one instead of Let's Encrypt |
@@ -360,7 +369,7 @@ All configuration is via environment variables. The server will refuse to start 
 | `LOG_LEVEL` | no | `info` | Log verbosity: `debug`, `info`, `warn`, `error`, `off` |
 | `LOG_FORMAT` | no | `text` | Log format: `text` or `json` |
 
-¹ HTTP mode requires *at least one* of the three auth-token variables. They can also be combined: later sources override earlier ones if the same digest appears in more than one. All tokens are independently validated against a 32-character minimum.
+¹ HTTP mode requires an authentication layer: *at least one* of the three static auth-token variables **or** OAuth (`MCP_OAUTH_ISSUER` + `MCP_OAUTH_AUDIENCE`). The static variables can also be combined: later sources override earlier ones if the same digest appears in more than one. All static tokens are independently validated against a 32-character minimum. When both static tokens and OAuth are configured, a request is accepted if *either* validates.
 
 Generate a strong token:
 
@@ -385,6 +394,34 @@ alice:newtokenvaluefor32charsminimum0123456789abcdef0123456789abcdef
 ```
 
 Set the file mode to `0600` and place it on `tmpfs` (or a Docker secret / Kubernetes projected volume) if your threat model includes other users on the host.
+
+### OAuth 2.0 / OIDC
+
+The static token table above is a shared secret you mint and distribute yourself. For fleets that already run an identity provider — Keycloak, Auth0, Microsoft Entra, Okta, Dex, Ory Hydra — the relay can instead **verify OAuth 2.0 bearer JWTs** the provider issues, and derive the audit identity from a token claim rather than a lookup table.
+
+The relay is only a **Resource Server**: it verifies presented tokens. It is **not** an Authorization Server — it runs no `/authorize` or `/token` endpoint, shows no consent screen, and stores no refresh tokens. The provider owns the whole token lifecycle; a client obtains a token from the provider (the OAuth flow, PKCE, refresh — all on the provider's side) and sends it as `Authorization: Bearer <jwt>`. The relay checks the signature and the `iss` / `aud` / `exp` / `nbf` claims, optionally a required scope, then attaches the identity claim to the request context exactly as a static token's identity would be — so per-identity audit logging, history, and the rate-limit exempt list all work unchanged.
+
+**Enable it** by pointing the relay at your issuer and naming the audience it should accept:
+
+```bash
+-e MCP_OAUTH_ISSUER=https://idp.example.com/realms/main \
+-e MCP_OAUTH_AUDIENCE=https://relay.example.com
+```
+
+At startup the relay fetches `https://idp.example.com/realms/main/.well-known/openid-configuration` and the JWKS it names; the key set is then cached and rotated automatically as the provider publishes new keys, so a signing-key roll needs no relay restart. A discovery endpoint that is unreachable or misconfigured **fails startup** rather than silently accepting nothing.
+
+**Two key sources**, mutually exclusive:
+
+- **Issuer discovery** (default) — keys fetched from the issuer over the network, as above. For a private issuer whose own TLS certificate is not publicly trusted, add `MCP_OAUTH_CA_ROOTS=/etc/mcp/idp-ca.pem`; that trust is scoped to OAuth traffic only and never widens the fetch tool or the SearXNG client.
+- **Static JWKS file** — `MCP_OAUTH_JWKS_FILE=/etc/mcp/jwks.json` supplies the verification keys from disk, for air-gapped deployments or ones that sync keys by other means. `MCP_OAUTH_ISSUER` is still required (its value is checked against each token's `iss`). The file is hot-reloaded on mtime change, so a key rotation is picked up without a restart.
+
+**Identity and scope.** By default the `sub` claim becomes the audit identity; set `MCP_OAUTH_IDENTITY_CLAIM=email` (or `client_id`, `azp`, …) to use another. Set `MCP_OAUTH_REQUIRED_SCOPE=search` to reject any token that does not grant that scope.
+
+**Static tokens and OAuth coexist.** When both are configured, each request is tried against the static digest table first (a cheap fixed-length lookup) and then OAuth verification; either one validating admits the request. This lets you keep a static token for CI or a monitoring probe while human or agent callers authenticate through the IdP. You can also run OAuth *only* — with no `MCP_AUTH_TOKEN*` set at all — and the HTTP-mode "authentication is required" check is satisfied by the issuer alone.
+
+**Client discovery.** When OAuth is enabled the relay serves [RFC 9728](https://www.rfc-editor.org/rfc/rfc9728) protected-resource metadata at `GET /.well-known/oauth-protected-resource` (unauthenticated — it only names the issuer and audience), and every `401` carries a `WWW-Authenticate: Bearer … resource_metadata="…"` challenge pointing at it. A spec-compliant MCP client can follow that to discover which issuer to authenticate against with no out-of-band configuration.
+
+> **Rate limiting note.** OAuth-authenticated callers are currently bucketed **per source IP**, not per identity, because token verification happens inside the auth middleware which runs *after* the rate limiter (the limiter cheaply re-hashes static tokens, but a full JWT verification on the limiter path would be wasteful). Static-token callers are still bucketed per identity. If you need per-identity limits for OAuth callers, put them behind distinct source addresses or a proxy that sets a stable client key.
 
 ### Session modes
 
@@ -870,6 +907,8 @@ Two notes:
 
 **Authentication.** Incoming `Authorization` headers are run through SHA-256 once and looked up in an in-memory table keyed by the SHA-256 of each configured `"Bearer <token>"`. The lookup operates on fixed-length 32-byte keys, so it cannot leak token length via response-timing differences (a bare byte-by-byte equality check would short-circuit at the first differing byte). Only digests sit in process memory after startup — the raw tokens are only ever read from the env / token file during parsing. Tokens themselves never appear in logs; the startup banner shows only the count of configured tokens and distinct identities. On successful match, the identity associated with that token is attached to the request context and recorded in every tool-call log line (`identity=<name>`) for audit correlation.
 
+**OAuth 2.0 verification.** When `MCP_OAUTH_ISSUER` is set, a presented `Bearer` JWT that misses the static digest table is verified against the configured issuer instead: the signature is checked against the issuer's JWKS (fetched and rotated automatically, or hot-reloaded from `MCP_OAUTH_JWKS_FILE`), and the `iss` / `aud` / `exp` / `nbf` claims — plus an optional required scope — are validated before the identity claim is attached to the request context in exactly the same way a static token's identity is. Only asymmetric signing algorithms are accepted (RS/PS/ES families); the HMAC families and `alg=none` are refused by construction, which closes the RS256→HS256 key-confusion class of forgery. The relay never issues, stores, or refreshes tokens — it is a Resource Server that only verifies them. Verification failures are logged without the offered token, and a `401` advertises the RFC 9728 metadata document so a compliant client can discover where to authenticate. See [OAuth 2.0 / OIDC](#oauth-20--oidc).
+
 **Cross-origin protection.** The Streamable HTTP transport is wrapped in Go's `net/http.CrossOriginProtection` by the go-sdk (v1.4.1+, applied as the fix for CVE-2026-33252 — "Cross-Site Tool Execution for HTTP Servers without Authorization"). Browser-originated POSTs whose `Sec-Fetch-Site` or `Origin` headers indicate a cross-origin request are rejected, as are POSTs without `Content-Type: application/json`. Non-browser clients — `curl`, Go `http.Client`, AI-agent traffic — send neither `Sec-Fetch-Site` nor `Origin` and pass through unaffected, so legitimate remote-agent usage is unimpacted. This is in addition to bearer-token authentication, not a substitute: the cross-origin check fires before request processing, but any request that survives it still has to present a valid token to reach the MCP handler.
 
 **Container hardening.** The Docker image runs as a non-root user (UID 1001) on a minimal `scratch` base — the runtime image contains only the statically linked binary and CA certificates, with no shell, package manager, or OS userland.
@@ -1034,55 +1073,111 @@ The multi-stage build compiles the binary on the digest-pinned `golang:1.26.6-tr
 
 All log output goes to **stderr**. Set `LOG_FORMAT=json` for structured logging compatible with log aggregators.
 
-On startup the server prints a configuration banner to stderr regardless of log level. The banner lists all active settings with secrets redacted. `AUTH_USERNAME` is only shown when it is set.
+On startup the server prints a configuration banner to stderr regardless of log level. It lists every active setting with secrets redacted, so what the process is actually running can be read off the logs rather than reconstructed from the environment it was given. Below is an HTTP-mode relay with three tokens and everything else left at its default:
 
 ```
-######################################################################################################################
+###########################################################################################
 
 mcp-searxng-relay v1.0.0
 
-######################################################################################################################
+###########################################################################################
 
 mode             streamable-http
 address          :3000
 searxng          http://searxng:8080
 password         [not set]
-user-agent       Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36
+user-agent       mcp-searxng-relay/v1.0.0
 cache ttl        5m0s
 cache entries    1000 max
 body limit       500000 bytes
 pdf limit        50000000 bytes
 office limit     50000000 bytes
 image limit      7500000 bytes
+extract limit    1000000 chars
+source history   50 per caller
 log level        info
 log format       text
 session mode     stateless
+fetch policy     public only
 auth tokens      3 configured (3 identities)
+oauth            disabled (static tokens only)
+health auth      disabled (/health open — set MCP_HEALTH_TOKEN to require a token)
+metrics auth     CLOSED (/metrics returns 401 — set MCP_METRICS_TOKEN to enable scraping)
+tls              disabled (plain HTTP)
 rate limit       5 rps, burst 10
-fence key        3e21267250e41cbb
+link extraction  enabled
+prune selector   [class*="related"], [id*="related"]
+fence key        d550b6b9f221ccfa (ephemeral, rotates on restart)
+fence preamble   prose (format 1.0, preamble unsigned)
 
-######################################################################################################################
+###########################################################################################
 ```
 
-Once the server is running, typical log lines look like this (stateful mode, `LOG_FORMAT=text`):
+Rows are shown only where they mean something, so the banner never states a setting the running process would ignore:
+
+- `address` — HTTP mode only; stdio serves no socket.
+- `searxng tokens` and `username` — only when `SEARXNG_TOKENS` / `AUTH_USERNAME` are set. The token *count* is shown, never the values.
+- `session max age` and `janitor interval` — stateful mode only; in stateless mode there are no sessions for the janitor to expire.
+- `allowed hosts`, `allowed cidrs` — only once `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS` have widened the SSRF policy, in which case `fetch policy` flips from `public only` to `widened` and lists exactly what you allowed, in the order you wrote it.
+- `fetch proxy` — only when `FETCH_PROXY` is set, with any password in the URL redacted and the scope named.
+
+The same relay with upstream tokens, an HTTP-auth username, a widened fetch policy and an egress proxy therefore adds (or changes) these rows:
 
 ```
-time=2026-05-24T07:41:10.301Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks content_type="text/html; charset=utf-8" bytes_raw=372821 chars_extracted=5469
-time=2026-05-24T07:41:10.302Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:43:39.212Z level=INFO msg="search completed" query="site:github.com/asgeirtj/system_prompts_leaks \"Claude Code\" system prompt" page=1 results=10 categories="" identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:43:52.249Z level=INFO msg="url fetched" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md content_type="text/html; charset=utf-8" bytes_raw=500000 chars_extracted=185
-time=2026-05-24T07:43:52.253Z level=INFO msg="fetch completed" url=https://github.com/asgeirtj/system_prompts_leaks/blob/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
-time=2026-05-24T07:44:07.656Z level=INFO msg="url fetched" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md content_type="text/plain; charset=utf-8" bytes_raw=58874 chars_extracted=58873
-time=2026-05-24T07:44:07.657Z level=INFO msg="fetch completed" url=https://raw.githubusercontent.com/asgeirtj/system_prompts_leaks/main/Anthropic/claude-code.md kind=text identity=zed session_id=O3GD67SQIYXDYN57XCVQMZYKDI
+searxng tokens   2 configured
+username         relay
+fetch policy     widened (internal targets allowed)
+allowed hosts    wiki.internal:443, docs.internal:8080
+allowed cidrs    10.42.0.0/16:443
+fetch proxy      http://user:xxxxx@proxy.internal:3128 (allow-listed hosts only)
 ```
 
-A search where some SearXNG backends failed is not an error — the upstream answers `200` with whatever the surviving engines produced — but it is a degraded answer, and it is logged as one:
+In stdio mode the four rows that describe network surface read `n/a` rather than `disabled` — `oauth`, `health auth`, `metrics auth` and `tls` all refer to endpoints or sockets that mode does not serve, and "disabled" would imply a setting that could be turned on:
 
 ```
-level=WARN msg="searxng search was degraded: some engines did not respond"
+oauth            n/a (stdio serves no network socket)
+health auth      n/a (stdio has no /health endpoint)
+metrics auth     n/a (stdio has no /metrics endpoint)
+tls              n/a (stdio serves no network socket)
+```
+
+The `metrics auth`, `health auth`, `tls`, `fetch policy`, `fence key` and `fence preamble` rows are the ones worth reading on every deploy: each names a security boundary whose state is otherwise only discoverable by tripping over it — a blank dashboard, a rejected fence, an agent that can suddenly reach an internal host. Their individual meanings are covered under [Security notes](#security-notes), [Metrics](#metrics) and [Health endpoint](#health-endpoint).
+
+Once the server is running, typical log lines look like this (stateful mode, `LOG_FORMAT=text`) — one session's worth of calls, from the handshake to a fetch that failed:
+
+```
+time=2026-09-19T23:54:48.813Z level=INFO msg="session initialized" session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT identity=zed
+time=2026-09-19T23:54:52.104Z level=INFO msg="search completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT query="searxng json api settings" page=1 duration_ms=131 outcome=ok results=3 categories="" engines=""
+time=2026-09-19T23:55:14.596Z level=INFO msg="url fetched" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst content_type="text/plain; charset=utf-8" bytes_raw=2688 chars_extracted=2687 extraction_truncated=false
+time=2026-09-19T23:55:14.596Z level=INFO msg="fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_read_url kind=text duration_ms=105 from_cache=false outcome=ok start_index=0 end_index=2687 total_chars=2687 read=full
+time=2026-09-19T23:55:14.603Z level=INFO msg="fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_read_url kind=text duration_ms=0 from_cache=true outcome=ok start_index=1200 end_index=2687 total_chars=2687 read=full
+time=2026-09-19T23:55:14.609Z level=INFO msg="metadata fetch completed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://raw.githubusercontent.com/searxng/searxng/master/docs/admin/settings/settings_server.rst domain=raw.githubusercontent.com tool=searxng_url_metadata duration_ms=0 from_cache=true outcome=ok has_title=false has_date=false
+time=2026-09-19T23:55:14.616Z level=INFO msg="session sources listed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT duration_ms=0 outcome=ok returned=1 total_fetches=3 elided=0 since_seq=0
+time=2026-09-19T23:55:19.021Z level=ERROR msg="fetch failed" identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT url=https://github.com/searxng/searxng domain=github.com tool=searxng_read_url duration_ms=252 outcome=error reason=http_status error="upstream returned a non-success status: URL returned HTTP 403"
+```
+
+Every tool-completion line carries the same spine, which is what makes the log queryable rather than merely readable:
+
+| Field | On | Meaning |
+|---|---|---|
+| `identity`, `session_id` | every tool line | Who made the call, in which session. Both are always present — they degrade to `""` rather than being dropped, so a log processor can rely on the key set |
+| `tool` | fetch/metadata lines | Which tool touched the URL: `searxng_read_url` or `searxng_url_metadata`. The same domain reached by a metadata triage and by a full read are different events |
+| `domain` | fetch/metadata lines | Destination host, matching the `domain` label on `mcp_fetches_by_domain_total` |
+| `duration_ms` | every completion line | Whole milliseconds, as an integer rather than a duration string, so it can be compared numerically in a log store without parsing |
+| `outcome` | every completion line | `ok` or `error`; `reason` on a failure narrows it to the same closed set as `mcp_fetch_errors_by_reason_total` (`http_status` above) |
+| `from_cache` | fetch/metadata lines | Whether the bytes came from the response cache. The second fetch above is a cache hit at `duration_ms=0`, so latency percentiles can exclude what never left the process |
+| `start_index`, `end_index`, `total_chars`, `read` | `searxng_read_url` | Which window of the document was returned and how deep the read went — the same read-depth vocabulary `searxng_session_sources` reports to the model |
+
+The `"fetch failed"` line records the same attribution and timing as a success, so a failing destination is as visible in the audit trail as a working one. The URL it logs is the redacted form: any credentials in the URL's userinfo are stripped before the line is written, the same way they are stripped from the ledger and from anything the model sees.
+
+A search where some SearXNG backends failed is not an error — the upstream answers `200` with whatever the surviving engines produced — but it is a degraded answer, and it is logged as one (one line in reality, wrapped here to fit):
+
+```
+time=2026-09-19T23:55:31.402Z level=WARN msg="searxng search was degraded: some engines did not respond"
+  identity=zed session_id=SCBNSDQJ2CXWV4SYOZXUMJL3NT
   unresponsive_engines=google,bing unresponsive_count=2
   detail="google: Suspended: Access denied; bing: timeout"
-  query="..." results=7
+  query="degraded engines test" results=1
   hint="results are incomplete; check the named engines in your SearXNG instance
         before treating thin results as a relay or model problem"
 ```
@@ -1091,7 +1186,13 @@ Engines break — upstream markup changes, an API is deprecated, a captcha wall 
 
 The same event increments `mcp_searches_degraded_total` and `mcp_searxng_engine_errors_total{engine="…"}` (see [Metrics](#metrics)): the log line is how you diagnose one incident, the counters are how you find out there is one — a WARN nobody greps is not monitoring.
 
-The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. The `"unauthorized request"` line shows what a failed bearer-token attempt looks like — the rejected `Authorization` value is never logged, only the remote address. In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
+The `session_id` field joins each tool call back to the `"session initialized"` line where the client's `identity` was first recorded; combined they form the audit trail. A failed bearer-token attempt is logged without the credential it presented — only the method, path and remote address:
+
+```
+time=2026-09-19T23:55:52.184Z level=WARN msg="unauthorized request" method=POST path=/ remote=127.0.0.1:48060
+```
+
+In `LOG_FORMAT=json` the same fields appear as a flat JSON object per line, which is what most log aggregators expect.
 
 ---
 
@@ -1138,7 +1239,8 @@ The exposed series are:
 | `mcp_searxng_engine_errors_total` | `engine=<name>` | Failures per SearXNG backend, from the upstream `unresponsive_engines` field. Answers *which* engine once the ratio above says there is a problem. Bounded to 256 distinct names; the remainder aggregates under `engine="__overflow__"` |
 | `mcp_active_sessions` | — | Gauge: current live MCP sessions (stateful mode only) |
 | `mcp_search_duration_seconds` | `le` | Histogram: SearXNG search round-trip latency. Buckets from 50ms to 30s |
-| `mcp_fetch_duration_seconds` | `le` | Histogram: URL fetch pipeline latency (dial through extraction), observed for both `searxng_read_url` and `searxng_url_metadata`. Includes cache hits, which land in the lowest bucket — alert on upper quantiles (e.g. `histogram_quantile(0.99, ...)`) and read the p50 alongside `mcp_cache_hits_total`. The top bucket matches the 30s fetch client timeout, so `+Inf` observations are timeout-adjacent requests |
+| `mcp_fetch_duration_seconds` | `cache=hit\|miss`, `le` | Histogram: URL fetch pipeline latency (dial through extraction), observed for both `searxng_read_url` and `searxng_url_metadata`. **Alert on `cache="miss"`** — that is origin latency. `cache="hit"` returns in microseconds and is a cache-health signal, not a latency one; summing the two back together reproduces the diluted number this split exists to remove. The top bucket matches the 30s fetch client timeout, so `+Inf` observations are timeout-adjacent requests |
+| `mcp_fetch_errors_by_reason_total` | `reason=invalid_url\|scheme_rejected\|ssrf_blocked\|dns\|timeout\|refused\|http_status\|extract_failed\|other` | Failed fetches by cause, across both URL tools. `mcp_fetch_errors_total` says the failure rate moved; this says whether it was a slow origin, a bad URL, the SSRF guardrail firing, or a document that would not parse. The set is closed by design — a fetched page picks its own status code, so a per-status label would be unbounded cardinality driven by hostile input. A rising `other` means a failure mode nobody has classified yet |
 
 ### Per-domain cardinality
 

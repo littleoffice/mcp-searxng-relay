@@ -1,0 +1,26 @@
+# Build output.
+#
+# `go build` with no -o writes the binary here, named after the module. It is
+# ~73 MB — mostly the statically linked pdf_oxide/office_oxide Rust cores — and
+# it has been committed by accident once already. Anchored with a leading slash
+# so it only matches the repo root, leaving the directory name itself alone.
+/mcp-searxng-relay
+
+# `go test -c` and `go test -o` output.
+*.test
+
+# Coverage profiles from `go test -coverprofile`.
+*.cover
+coverage.out
+
+# Native dependency artefacts, if anyone installs them into the tree rather
+# than the module cache. The Dockerfile and ci.yml both keep these outside the
+# repo, but a local `go run .../cmd/install` invoked from here would not.
+/pdf_oxide_lib/
+/office_oxide_lib/
+libpdf_oxide.a
+liboffice_oxide.a
+office_oxide.h
+
+# Delve's default binary name.
+__debug_bin*

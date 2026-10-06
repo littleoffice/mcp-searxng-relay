@@ -315,6 +315,7 @@ func TestComputeFenceSignature_DetectsMetadataTamper(t *testing.T) {
 		t.Error("verification should have failed after rating downgrade")
 	}
 }
+
 // A signature produced by one server's key must not verify against another
 // server's key.  This is properly a property of Ed25519, but we exercise it
 // here so generateFenceKeypair does not silently regress to a fixed key.
@@ -452,7 +453,7 @@ func TestWrapFence_RoundTrip(t *testing.T) {
 		t.Fatalf("decode signature: %v", err)
 	}
 
-  canonical := reconstructCanonical(openTag)
+	canonical := reconstructCanonical(openTag)
 	msg, err := buildFenceSigningInput(content, canonical)
 	if err != nil {
 		t.Fatalf("buildFenceSigningInput: %v", err)

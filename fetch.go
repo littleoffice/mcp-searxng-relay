@@ -72,25 +72,40 @@ func (s *Server) toolReadURL(
 	}
 	s.metrics.FetchTotal.Add(1)
 
+	// Wall clock for the whole tool call, logged on every exit below.  The
+	// FetchDuration histogram measures the same span but cannot be sliced by
+	// domain without putting an unbounded label on a histogram; the log line
+	// carries domain and duration together, so "which domains are slow" is a
+	// log query instead of a cardinality problem.
+	callStart := time.Now()
+	domain := domainOf(in.URL)
+	// in.URL still carries any credentials the caller supplied, because the
+	// fetch needs them; safeURL is the copy everything observable uses.
+	safeURL := redactURLCredentials(in.URL)
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
-		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		s.metrics.recordFetchError(err)
+		s.metrics.recordFetchByDomain(domain, false)
 		// Recorded as well as logged.  A failed fetch missing from the
 		// history is indistinguishable from one never attempted, and the
 		// model would be free to cite the URL as read.
 		s.recordFetch(ctx, fetchRecord{
 			Tool:    "searxng_read_url",
-			URL:     in.URL,
+			URL:     safeURL,
 			Outcome: "error",
 			Err:     err.Error(),
 			Read:    readDepthNone,
 		})
 		lg.Error("fetch failed",
-			"url", in.URL, "error", err)
+			"url", safeURL, "domain", domain, "tool", "searxng_read_url",
+			"duration_ms", elapsedMillis(callStart),
+			"outcome", "error", "reason", classifyFetchError(err),
+			"error", err)
 		return nil, nil, err
 	}
-	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
+	s.metrics.recordFetchByDomain(domain, true)
 
 	if result.isImage() {
 		// ImageContent.Data takes raw bytes; the SDK base64-encodes during
@@ -100,15 +115,18 @@ func (s *Server) toolReadURL(
 		// risk. Vision-model interpretation is out of scope for prompt fencing.
 		s.recordFetch(ctx, fetchRecord{
 			Tool:      "searxng_read_url",
-			URL:       in.URL,
-			FinalURL:  result.finalURL,
+			URL:       safeURL,
+			FinalURL:  redactURLCredentials(result.finalURL),
 			FetchedAt: result.fetchedAt,
 			Outcome:   "ok",
 			Read:      readDepthImage,
 			FromCache: result.fromCache,
 		})
 		lg.Info("fetch completed",
-			"url", in.URL, "kind", "image")
+			"url", safeURL, "domain", domain,
+			"tool", "searxng_read_url", "kind", "image",
+			"duration_ms", elapsedMillis(callStart),
+			"from_cache", result.fromCache, "outcome", "ok")
 		return &mcp.CallToolResult{
 			Content: []mcp.Content{&mcp.ImageContent{
 				Data:     result.imageData,
@@ -127,7 +145,7 @@ func (s *Server) toolReadURL(
 		return nil, nil, err
 	}
 
-	fenced, err := s.wrapFence(windowed, FenceTypeContent, FenceUntrusted, in.URL)
+	fenced, err := s.wrapFence(windowed, FenceTypeContent, FenceUntrusted, safeURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
@@ -141,8 +159,8 @@ func (s *Server) toolReadURL(
 	}
 	s.recordFetch(ctx, fetchRecord{
 		Tool:       "searxng_read_url",
-		URL:        in.URL,
-		FinalURL:   result.finalURL,
+		URL:        safeURL,
+		FinalURL:   redactURLCredentials(result.finalURL),
 		Title:      result.metadata.Title,
 		FetchedAt:  result.fetchedAt,
 		Outcome:    "ok",
@@ -152,7 +170,10 @@ func (s *Server) toolReadURL(
 		FromCache:  result.fromCache,
 	})
 	lg.Info("fetch completed",
-		"url", in.URL, "kind", "text",
+		"url", safeURL, "domain", domain,
+		"tool", "searxng_read_url", "kind", "text",
+		"duration_ms", elapsedMillis(callStart),
+		"from_cache", result.fromCache, "outcome", "ok",
 		"start_index", start, "end_index", end,
 		"total_chars", len(result.text),
 		"read", string(depth))
@@ -276,22 +297,30 @@ func (s *Server) toolURLMetadata(
 	}
 	s.metrics.MetadataTotal.Add(1)
 
+	callStart := time.Now()
+	domain := domainOf(in.URL)
+	safeURL := redactURLCredentials(in.URL)
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
-		s.metrics.recordFetchByDomain(domainOf(in.URL), false)
+		s.metrics.recordFetchError(err)
+		s.metrics.recordFetchByDomain(domain, false)
 		s.recordFetch(ctx, fetchRecord{
 			Tool:    "searxng_url_metadata",
-			URL:     in.URL,
+			URL:     safeURL,
 			Outcome: "error",
 			Err:     err.Error(),
 			Read:    readDepthNone,
 		})
 		lg.Error("metadata fetch failed",
-			"url", in.URL, "error", err)
+			"url", safeURL, "domain", domain, "tool", "searxng_url_metadata",
+			"duration_ms", elapsedMillis(callStart),
+			"outcome", "error", "reason", classifyFetchError(err),
+			"error", err)
 		return nil, nil, err
 	}
-	s.metrics.recordFetchByDomain(domainOf(in.URL), true)
+	s.metrics.recordFetchByDomain(domain, true)
 
 	// Make sure URL is always populated — for non-HTML content types
 	// the extractor never runs, so result.metadata may be zero apart
@@ -306,7 +335,7 @@ func (s *Server) toolURLMetadata(
 		return nil, nil, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	fenced, err := s.wrapFence(string(jsonBytes), FenceTypeData, FenceUntrusted, in.URL)
+	fenced, err := s.wrapFence(string(jsonBytes), FenceTypeData, FenceUntrusted, safeURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
@@ -316,8 +345,8 @@ func (s *Server) toolURLMetadata(
 	// reliably loses.
 	s.recordFetch(ctx, fetchRecord{
 		Tool:      "searxng_url_metadata",
-		URL:       in.URL,
-		FinalURL:  result.finalURL,
+		URL:       safeURL,
+		FinalURL:  redactURLCredentials(result.finalURL),
 		Title:     payload.Title,
 		FetchedAt: result.fetchedAt,
 		Outcome:   "ok",
@@ -325,7 +354,9 @@ func (s *Server) toolURLMetadata(
 		FromCache: result.fromCache,
 	})
 	lg.Info("metadata fetch completed",
-		"url", in.URL,
+		"url", safeURL, "domain", domain, "tool", "searxng_url_metadata",
+		"duration_ms", elapsedMillis(callStart),
+		"from_cache", result.fromCache, "outcome", "ok",
 		"has_title", payload.Title != "",
 		"has_date", payload.Date != nil)
 	return &mcp.CallToolResult{
@@ -340,21 +371,33 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// extraction.  Placed here rather than in the tool handlers so both
 	// searxng_read_url and searxng_url_metadata feed the same histogram —
 	// they share this pipeline and an operator alerting on fetch latency
-	// wants both.  Cache hits observe as sub-millisecond values by design;
-	// see the FetchDuration field comment.
+	// wants both.
+	//
+	// The outcome is resolved inside the cache branch below and read by the
+	// deferred observation, so a hit and a miss land in different series
+	// (see cacheOutcomes).  It starts as a miss because every path that does
+	// not take the hit branch performs a real fetch.
 	fetchStart := time.Now()
-	defer func() { s.metrics.FetchDuration.Observe(time.Since(fetchStart)) }()
+	cacheOutcome := cacheOutcomeMiss
+	defer func() {
+		s.metrics.FetchDuration[cacheOutcome].Observe(time.Since(fetchStart))
+	}()
 
 	// Cache check — skipped when force_refresh is set.
 	// The cache stores text + metadata together so that the read-url and
 	// url-metadata tools share a single upstream fetch.  Image fetches
 	// always bypass the text cache.
 	lg := callerLogger(ctx)
+	// The cache is still keyed on the credentialed URL — two callers with
+	// different credentials for the same path must not share an entry — but
+	// every line logged from here down uses the redacted copy.
+	safeTarget := redactURLCredentials(targetURL)
 
 	if !forceRefresh {
 		if entry, ok := s.cache.Get(targetURL); ok {
 			if time.Now().Before(entry.expiresAt) {
-				lg.Debug("cache hit", "url", targetURL)
+				lg.Debug("cache hit", "url", safeTarget)
+				cacheOutcome = cacheOutcomeHit
 				s.metrics.CacheHits.Add(1)
 				return urlFetchResult{
 					text:      entry.content,
@@ -369,20 +412,20 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		}
 		s.metrics.CacheMisses.Add(1)
 	} else {
-		lg.Debug("force refresh, bypassing cache", "url", targetURL)
+		lg.Debug("force refresh, bypassing cache", "url", safeTarget)
 		s.cache.Remove(targetURL)
 		s.metrics.CacheForceRefresh.Add(1)
 		s.metrics.CacheMisses.Add(1)
 	}
-	lg.Debug("cache miss, fetching", "url", targetURL)
+	lg.Debug("cache miss, fetching", "url", safeTarget)
 
 	// Validate scheme before doing anything.
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil {
-		return urlFetchResult{}, fmt.Errorf("invalid URL: %w", err)
+		return urlFetchResult{}, fmt.Errorf("%w: %w", errInvalidURL, err)
 	}
 	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return urlFetchResult{}, fmt.Errorf("only http/https URLs are permitted")
+		return urlFetchResult{}, fmt.Errorf("%w: only http/https URLs are permitted", errSchemeRejected)
 	}
 
 	// Use fetchClient (SSRF-safe DialContext + redirect validation).
@@ -409,7 +452,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return urlFetchResult{}, fmt.Errorf("URL returned HTTP %d", resp.StatusCode)
+		return urlFetchResult{}, fmt.Errorf("%w: URL returned HTTP %d", errHTTPStatus, resp.StatusCode)
 	}
 
 	// The transport followed any redirects (revalidating SSRF policy at each
@@ -455,7 +498,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	if isImage(contentType, targetURL) {
 		mimeType := imageMIMEType(contentType, targetURL)
 		s.metrics.FetchImage.Add(1)
-		lg.Info("image fetched", "url", targetURL,
+		lg.Info("image fetched", "url", safeTarget,
 			"mime_type", mimeType,
 			"bytes", len(body))
 		return urlFetchResult{
@@ -478,7 +521,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		var pageCount int
 		content, truncated, pageCount, err = extractPDF(body, s.config.MaxExtractedChars)
 		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract PDF text: %w", err)
+			return urlFetchResult{}, fmt.Errorf("%w: PDF text: %w", errExtractFailed, err)
 		}
 		metadata.PageCount = pageCount
 	case officeFormat(contentType, targetURL) != "":
@@ -501,7 +544,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		s.metrics.FetchOffice.Add(1)
 		content, truncated, err = extractOffice(body, format, s.config.MaxExtractedChars)
 		if err != nil {
-			return urlFetchResult{}, fmt.Errorf("failed to extract %s text: %w", format, err)
+			return urlFetchResult{}, fmt.Errorf("%w: %s text: %w", errExtractFailed, format, err)
 		}
 	case isPlainText(contentType):
 		// Plain-text responses can declare a non-UTF-8 charset just like HTML
@@ -522,7 +565,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 			// Extraction failure is non-fatal: log and proceed with what
 			// we have.  The metadata at minimum carries the URL.
 			lg.Debug("html extraction failed",
-				"url", targetURL, "error", extractErr)
+				"url", safeTarget, "error", extractErr)
 		}
 		// A nil linkBase switches off link annotation in the renderer.
 		// targetURL has already been parsed and scheme-checked upstream, so
@@ -536,7 +579,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		metadata = extractedMeta
 	}
 
-	lg.Info("url fetched", "url", targetURL,
+	lg.Info("url fetched", "url", safeTarget,
 		"content_type", contentType,
 		"bytes_raw", len(body),
 		"chars_extracted", len(content),
@@ -822,6 +865,55 @@ func imageMIMEType(contentType, rawURL string) string {
 // URL can't be parsed or has no host. Used as the label value for per-domain
 // fetch metrics; defensive against junk input so a malformed URL can't break
 // /metrics output.
+// redactURLCredentials strips the userinfo component from a URL so it can be
+// logged, recorded in the session ledger, or named as a fence `source`.
+//
+// A caller may legitimately embed credentials in a URL — basic auth against an
+// internal service reached through FETCH_ALLOWED_HOSTS is the obvious case —
+// and the fetch itself needs them. Nothing downstream of the fetch does. Left
+// intact they reach the audit log (and from there whatever ships it), the
+// per-caller ledger that searxng_session_sources reads back, and the fence
+// `source` attribute, which puts them in the model's context where they may be
+// echoed into a reply or another tool call.
+//
+// The whole userinfo component goes, username included: "which service account
+// was used" is not worth the risk of the two halves being separated by one
+// refactor. domainOf is unaffected — it already reads u.Hostname(), which
+// excludes userinfo.
+//
+// An unparseable URL falls back to a textual strip rather than being returned
+// as-is: a malformed string is exactly the case where url.Parse declines to
+// help, and mangling a broken URL in a log line beats printing a password.
+func redactURLCredentials(rawURL string) string {
+	if u, err := url.Parse(rawURL); err == nil {
+		if u.User == nil {
+			return rawURL
+		}
+		u.User = nil
+		return u.String()
+	}
+
+	// Fallback: drop anything between "://" and the last "@" of the authority,
+	// which is where userinfo lives. Bounded to the authority so a "@" in a
+	// path or query is left alone.
+	sep := strings.Index(rawURL, "://")
+	if sep < 0 {
+		return rawURL
+	}
+	authStart := sep + len("://")
+	authEnd := strings.IndexAny(rawURL[authStart:], "/?#")
+	if authEnd < 0 {
+		authEnd = len(rawURL)
+	} else {
+		authEnd += authStart
+	}
+	at := strings.LastIndex(rawURL[authStart:authEnd], "@")
+	if at < 0 {
+		return rawURL
+	}
+	return rawURL[:authStart] + rawURL[authStart+at+1:]
+}
+
 func domainOf(rawURL string) string {
 	u, err := url.Parse(rawURL)
 	if err != nil || u.Host == "" {

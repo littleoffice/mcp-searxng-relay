@@ -178,7 +178,9 @@ searxng_read_url / searxng_url_metadata
   budget; raise `MAX_EXTRACTED_CHARS` to page deeper into very large documents.
 - **Leave the health probe TTL alone.** It is not configurable, and 10 seconds
   is below any sane load-balancer interval.
-- **Watch `mcp_cache_hits_total` against `mcp_fetch_duration_seconds`.** Cache
-  hits land in the lowest histogram bucket, so alert on upper quantiles and
-  read the p50 alongside the hit counter, or a healthy cache will look like a
-  latency improvement that is not there.
+- **Watch `mcp_cache_hits_total` against `mcp_fetch_duration_seconds`.** The
+  histogram is split by `cache`, so the two questions no longer contaminate
+  each other: `cache="miss"` is origin latency and the thing to alert on,
+  `cache="hit"` is how fast the cache answers. Summing them back together
+  recreates the old problem, where a healthy cache looked like a latency
+  improvement that was not there.

@@ -34,6 +34,14 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
    curl http://localhost:8080/health
    ```
 
+> **Using OAuth instead of static tokens?** If callers authenticate through an
+> OIDC provider, you can skip the token Secret entirely: set `MCP_OAUTH_ISSUER`
+> and `MCP_OAUTH_AUDIENCE` on the Deployment (from a ConfigMap or a Secret) and
+> the HTTP-mode auth requirement is met without `MCP_AUTH_TOKEN_FILE`. For a
+> private in-cluster issuer whose CA is not publicly trusted, mount its roots
+> and point `MCP_OAUTH_CA_ROOTS` at them. See
+> [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc) in the main README.
+
 ## What's in here
 
 | File | Purpose |
