@@ -96,12 +96,27 @@ COPY native-deps.sha256 verify-native-dep.sh ./
 # tarball can replace the digest file beside it. The check below is the
 # independent one, against a digest pinned in this repository, and it runs
 # against the static archive itself — the exact bytes the linker consumes.
+#
+# Once verified, the archive's office_* symbols are made local. pdf_oxide
+# compiles in its own copy of the office_oxide crate (for Office-to-PDF
+# conversion), and that copy's C API — every office_* function — is exported
+# from libpdf_oxide.a. Linked ahead of liboffice_oxide.a, it silently supplied
+# the relay's Office extraction with pdf_oxide's bundled office_oxide (0.1.9
+# under pdf_oxide v0.3.78) rather than the version go.mod pins; and as soon as
+# the Go binding calls a function the bundled copy lacks, both copies are
+# pulled in and the link fails on duplicate symbols. With them localized,
+# liboffice_oxide.a is the only provider. pdf_oxide reaches its own copy
+# through mangled Rust symbols, which are untouched, and nothing in the archive
+# refers to office_* by name. -D keeps the rewritten archive deterministic, and
+# the nm check fails the build if any office_* export survives.
 RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
     GOARCH="$(go env GOARCH)" && \
     go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib && \
     ./verify-native-dep.sh \
         "pdf_oxide/${PDF_OXIDE_VERSION}/linux_${GOARCH}/libpdf_oxide.a" \
-        "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a"
+        "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" && \
+    objcopy -D --wildcard --localize-symbol='office_*' "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" && \
+    [ -z "$(nm -g --defined-only "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/')" ]
 
 # Install the office_oxide static library.
 #
@@ -161,6 +176,16 @@ COPY . .
 #   -tags netgo              Go's pure-Go DNS resolver (avoids glibc NSS)
 #   -linkmode=external       hand off final linking to gcc so extldflags apply
 #   -extldflags='-static'    final binary has no shared-library dependency
+#   -s -w                    drop the symbol table and DWARF, ~12 MB of ~73 MB
+#
+# On -s -w: Go panic traces survive it, because they are reconstructed from
+# .gopclntab rather than from the symbol table, and that section is not
+# stripped -- a panic still reports function names and line numbers. The
+# embedded build info survives too, so `go version -m`, syft's SBOM and
+# module-level govulncheck all still read the binary. What is lost is
+# function-level detail for anyone inspecting the shipped artefact directly
+# (delve, or govulncheck in binary mode, which falls back to coarser
+# module-level reachability without a symbol table).
 #
 # CGO_LDFLAGS replaces -lgcc_s (shared-only) with -lgcc_eh -lgcc, which have
 # static counterparts in the Debian gcc package.
@@ -172,7 +197,7 @@ RUN GOARCH="$(go env GOARCH)" && \
         -trimpath \
         -buildvcs=false \
         -tags netgo \
-        -ldflags "-linkmode=external -extldflags '-static -Wl,--build-id=none' -buildid= -X main.ServerVersion=${SERVER_VERSION}" \
+        -ldflags "-s -w -linkmode=external -extldflags '-static -Wl,--build-id=none' -buildid= -X main.ServerVersion=${SERVER_VERSION}" \
         -o mcp-searxng-relay .
 
 # ---------------------------------------------------------------------------

@@ -320,6 +320,17 @@ build then links against it via CGO. Two things follow from this:
   [`native-deps.sha256`](../native-deps.sha256) and fails if it differs. The
   check is on the static archive rather than the downloaded tarball because
   that is the exact byte sequence the linker consumes.
+- **After verification, the build hides the archive's `office_*` exports.**
+  `pdf_oxide` compiles in its own copy of the `office_oxide` crate (v0.3.78
+  bundles office_oxide 0.1.9), and that copy's C API is exported from
+  `libpdf_oxide.a`. Because that archive is linked first, those exports used
+  to satisfy the relay's Office extraction instead of the pinned
+  `liboffice_oxide.a`, so the Office parser that shipped was not the one
+  `go.mod` names. The `Dockerfile` and CI now run
+  `objcopy --localize-symbol='office_*'` on the verified archive and fail if
+  any `office_*` export remains, which leaves `liboffice_oxide.a` as the only
+  provider. The digest pin still covers the archive exactly as upstream
+  published it.
 
 This is a deliberate trade-off: `pdf_oxide`'s Rust core provides panic-free,
 timeout-bounded PDF parsing that would be difficult to match with a pure-Go

@@ -172,6 +172,11 @@ jobs:
           ./verify-native-dep.sh \
             "pdf_oxide/${PDF_OXIDE_VERSION}/linux_amd64/libpdf_oxide.a" \
             "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
+          # pdf_oxide exports the C API of the office_oxide copy it bundles;
+          # localize it so liboffice_oxide.a is the only provider of office_*.
+          # Same step, and the full reasoning, in the Dockerfile.
+          objcopy -D --wildcard --localize-symbol='office_*' "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
+          [ -z "$(nm -g --defined-only "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/')" ]
           echo "PDF_OXIDE_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
 
       - name: Install office_oxide native library
