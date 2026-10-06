@@ -1,7 +1,8 @@
 # .github/workflows/pin-consistency.yml
 #
-# Guards a single invariant that Dependabot cannot maintain on its own: the Go
-# toolchain version must be the same in two places.
+# Guards the invariants that Dependabot cannot maintain on its own.
+#
+# INVARIANT 1 -- the Go toolchain version must be the same in two places.
 #
 #   1. The builder base image in the Dockerfile   (FROM docker.io/golang:X.Y.Z-...)
 #   2. The `go` directive in go.mod               (which `setup-go` reads via
@@ -22,8 +23,24 @@
 # sync-go-version.yml; this workflow remains the secret-free invariant guard
 # that catches any mismatch the auto-sync misses.
 #
-# This job reads two files and runs no third-party code; it needs no secrets and
-# only read access, so it is safe to run on pull_request from Dependabot.
+# INVARIANT 2 -- docs/supply-chain.md must name the versions go.mod pins.
+#
+# The dependency inventory in docs/supply-chain.md states a version per direct
+# dependency in prose. Dependabot bumps go.mod and has no idea that document
+# exists, so every bump widens a gap that nothing breaks on. It reached six of
+# ten rows and two build-step notes before anyone noticed, one of them trailing
+# the real pin by seventeen patch releases. A supply-chain document whose
+# numbers are visibly stale is one a reviewer stops checking against, and being
+# checkable is the entire point of it.
+#
+# The comparison lives in ./check-doc-pins.sh rather than inline here, so the
+# same check a contributor runs locally is the one CI runs, and `--fix` can
+# rewrite the numbers. See that script's header for what it does and does not
+# cover.
+#
+# These jobs read files in the repository and run no third-party code; they need
+# no secrets and only read access, so they are safe to run on pull_request from
+# Dependabot.
 
 name: Pin consistency
 
@@ -33,11 +50,15 @@ on:
     paths:
       - 'Dockerfile'
       - 'go.mod'
+      - 'docs/supply-chain.md'
+      - 'check-doc-pins.sh'
   push:
     branches: ['**']
     paths:
       - 'Dockerfile'
       - 'go.mod'
+      - 'docs/supply-chain.md'
+      - 'check-doc-pins.sh'
   workflow_dispatch:
 
 permissions:
@@ -103,3 +124,40 @@ jobs:
           fi
 
           echo "✅ Go versions match (${dockerfile_go})." >> "$GITHUB_STEP_SUMMARY"
+
+  doc-pins-match:
+    name: docs/supply-chain.md versions == go.mod
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compare documented versions against go.mod
+        # No setup-go step: check-doc-pins.sh parses go.mod directly rather
+        # than shelling out to the toolchain, so it needs no module cache and
+        # no network. That keeps this job fast and keeps it working on a
+        # Dependabot PR before any dependency has been fetched.
+        run: |
+          set -euo pipefail
+
+          if ./check-doc-pins.sh; then
+            echo "✅ docs/supply-chain.md agrees with go.mod." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "## ❌ Documented dependency versions are stale"
+            echo ""
+            echo "\`docs/supply-chain.md\` names versions that \`go.mod\` no longer pins."
+            echo "The per-row detail is in the job log and in the file annotations."
+            echo ""
+            echo "go.mod is authoritative. To resync:"
+            echo ""
+            echo '```'
+            echo "./check-doc-pins.sh --fix"
+            echo '```'
+            echo ""
+            echo "Then read the diff — a version bump often deserves a sentence about"
+            echo "what changed, not only a new number."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
