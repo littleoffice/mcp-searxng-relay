@@ -40,13 +40,13 @@ way you would treat a change to the tool schemas.
 Two layouts exist. They differ only in how the awareness preamble travels; the
 content fence, the canonical form and the signing input are identical in both,
 so a verifier implements one verification core and branches only on where it
-expects to find prose. Which one a relay emits is an operator choice
-(`FENCE_PREAMBLE`), announced in the `version` attribute on every fence and in
-the `version` field of `/fence/public-key`.
+expects to find prose. A relay emits 1.1 unless its operator sets
+`FENCE_PREAMBLE=prose`, and announces which in the `version` attribute on every
+fence and in the `version` field of `/fence/public-key`.
 
-**Accept both.** A verifier that requires 1.1 breaks against a default-configured
-relay; one that requires 1.0 breaks the moment an operator turns the newer
-layout on. Branch on the `version` attribute *after* the signature passes — it
+**Accept both.** A verifier that requires 1.0 breaks against a default-configured
+relay; one that requires 1.1 breaks against a relay an operator has kept on
+`prose` for an older gateway. Branch on the `version` attribute *after* the signature passes — it
 is inside the canonical form precisely so the branch cannot be steered.
 
 One property is common to both layouts:
@@ -58,8 +58,9 @@ One property is common to both layouts:
 
 ### 1.0 — prose preamble
 
-The original layout, and the default. A tool response is an awareness preamble,
-a blank line, then one fence element:
+The original layout, emitted only under `FENCE_PREAMBLE=prose` (the default
+was 1.0 until the signed preamble became the default). A tool response is an
+awareness preamble, a blank line, then one fence element:
 
 ```
 [Security fence protocol — arXiv:2511.19727]
@@ -82,7 +83,8 @@ Two further properties of this layout are load-bearing:
 
 ### 1.1 — fenced preamble
 
-The same preamble text, carried as the body of its own signed fence. A tool
+The default layout. The same preamble text, carried as the body of its own
+signed fence. A tool
 response is two sibling fences separated by a single newline, with no
 non-whitespace bytes outside either one:
 
@@ -419,8 +421,8 @@ Stated plainly, because a verifier that oversells itself is worse than none:
   `rating="trusted" type="instructions"` fence, which is what the paper
   prescribes for system instructions anyway. A verifier should still be able to
   report unsigned regions: against a 1.0 relay that is the whole preamble, and
-  the operator's remedy is `FENCE_PREAMBLE=fenced` rather than anything the
-  verifier can do.
+  the operator's remedy is to drop `FENCE_PREAMBLE=prose` (1.1 is the
+  default) rather than anything the verifier can do.
 - **A `rating="trusted"` fence means nothing to the model.** The 1.1 preamble
   fence is authenticated prose, not an enforcement mechanism: a model reading
   the response as text sees instruction prose wrapped in inert tokens, and
@@ -463,7 +465,7 @@ verifier implementation should at minimum cover:
 | 1.1 response, preamble fence stripped | detected by a `-require-all-fenced` policy, not by the content fence's signature |
 
 To generate vectors against the real implementation, call `wrapFence` and
-`wrapFenceCDATA` directly (set `FencePreamble` on the `Server`'s config to
-`fenced` for 1.1 output; the zero value emits 1.0) — `fence.go` depends only on the standard library and
+`wrapFenceCDATA` directly (the zero-valued `Server` config emits 1.1; set
+`FencePreamble` to `prose` for 1.0 output) — `fence.go` depends only on the standard library and
 two fields of `Server`, so it can be exercised without the native document
 extractors.

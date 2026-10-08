@@ -533,10 +533,20 @@ func TestWrapFence_NonceChangesPerCall(t *testing.T) {
 // newTestFenceServer returns a Server populated with just enough state for
 // fence-related tests — a fresh keypair, no HTTP clients, no cache.  Tests
 // that need other Server fields should construct their own.
+//
+// It pins the 1.0 prose layout explicitly.  The tests built on it examine
+// the single content fence — its attributes, encoding and signature, which
+// are identical in both layouts — and locate it by skipping the prose
+// preamble (fenceXMLPart).  The 1.1 default has its own tests in
+// fence_preamble_test.go, starting from newFencedPreambleServer.
 func newTestFenceServer(t *testing.T) *Server {
 	t.Helper()
 	pub, priv := generateFenceKeypair()
-	return &Server{fencePublicKey: pub, fenceSigningKey: priv}
+	return &Server{
+		fencePublicKey:  pub,
+		fenceSigningKey: priv,
+		config:          Config{FencePreamble: fencePreambleProse},
+	}
 }
 
 // fenceXMLPart strips the awareness preamble and returns just the XML

@@ -284,9 +284,6 @@ func newOriginServer(t *testing.T, cfg Config, contentType, body string) (*Serve
 	if cfg.HistoryEntries == 0 {
 		cfg.HistoryEntries = 10
 	}
-	if cfg.FencePreamble == "" {
-		cfg.FencePreamble = fencePreambleFenced
-	}
 	s := NewServer(cfg)
 	s.fetchClient = origin.Client()
 	return s, origin.URL + "/page", &hits
@@ -432,7 +429,7 @@ func TestSearch_InvisibleCharsStripped(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	s := NewServer(Config{SearxngURL: upstream.URL, CacheMaxEntries: 1, FencePreamble: fencePreambleFenced})
+	s := NewServer(Config{SearxngURL: upstream.URL, CacheMaxEntries: 1})
 	s.client = upstream.Client()
 
 	res, _, err := s.toolSearch(t.Context(), &mcp.CallToolRequest{}, searchInput{Query: "q"})

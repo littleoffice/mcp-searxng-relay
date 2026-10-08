@@ -10,13 +10,17 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
    openssl rand -hex 32
    ```
 
-2. Copy `secret.example.yaml` to `secret.yaml`, fill in real tokens, and apply it once:
+2. Copy `secret.example.yaml` to `secret.yaml`, fill in real tokens and the fence signing key, and apply it once:
 
    ```bash
    cp secret.example.yaml secret.yaml
-   # edit secret.yaml — replace each REPLACE_ME with a generated token
+   # edit secret.yaml — replace each REPLACE_ME with a generated token, and the
+   # fence-key placeholder with the PEM from:
+   openssl genpkey -algorithm ed25519
    kubectl apply -f secret.yaml
    ```
+
+   The fence key is what lets the verifying gateway in front of the relay pin a stable fingerprint; the relay refuses to start while the placeholder is still there.
 
    `secret.yaml` is intentionally **not** in `kustomization.yaml` so that future `apply -k .` runs cannot accidentally roll back to the placeholder values.
 
@@ -68,7 +72,7 @@ Set `MCP_STATELESS=true` and bump `replicas:` to 2+. Every request is treated as
 
 You lose the cross-request `session_id` join key. Audit correlation now relies on `identity` + timestamp + source IP — usable, but less precise than per-session attribution.
 
-One thing to watch if anything downstream verifies fence signatures: each pod generates its own fence signing key at startup, so a verifier behind the Service sees a different key depending on which pod answered, and a fresh set after every rollout. Pin a shared key via `FENCE_SIGNING_KEY_FILE` (commented entries in `deployment.yaml` and `secret.example.yaml` show the shape) so every replica signs identically. Irrelevant if nothing verifies the signatures.
+Fence signatures stay stable across replicas because `deployment.yaml` points every pod at the same `FENCE_SIGNING_KEY_FILE` from the `mcp-auth` Secret. Without it each pod would generate its own key at startup, and the verifying gateway behind the Service would see a different key depending on which pod answered, and a fresh set after every rollout.
 
 This is the right shape if "agents survive every redeploy" matters more than per-session audit precision.
 
