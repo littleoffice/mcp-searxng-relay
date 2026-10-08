@@ -744,6 +744,10 @@ func logConfig(server *Server, mode, port string) {
 		// agent.  Shown unconditionally: it changes what the model sees,
 		// so it belongs in the same at-a-glance view as the fetch policy.
 		row("link extraction", enabledLabel(cfg.ExtractLinks)),
+		// Whether invisible characters are stripped from fetched text.
+		// Shown unconditionally for the same reason: it changes what the
+		// model sees, and "disabled" means a hidden-text channel is open.
+		row("invisible chars", stripLabel(!cfg.KeepInvisibleChars)),
 		// Pre-extraction pruning changes which subtree is treated as the
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.
@@ -786,6 +790,14 @@ func logConfig(server *Server, mode, port string) {
 	sb.WriteString("\n")
 
 	_, _ = fmt.Fprint(os.Stderr, sb.String())
+}
+
+// stripLabel renders a fetched-text filter for the banner.
+func stripLabel(on bool) string {
+	if on {
+		return "stripped"
+	}
+	return "kept (filter disabled)"
 }
 
 // redactSecret returns "[set]" when s is non-empty and "[not set]" otherwise,

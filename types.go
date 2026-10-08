@@ -65,6 +65,13 @@ type cacheEntry struct {
 	// "there was more, but the server didn't extract it" only when the
 	// window actually reaches the end of what was kept.
 	truncated bool
+	// removed records what sanitisation stripped while building content and
+	// metadata, split by which of the two it came from, so a cache hit
+	// reports the same counts as the fetch that filled the entry.  Pagination
+	// offsets are computed on the cleaned text for the same reason: the
+	// entry is the single source of truth for both.
+	removedContent  removalCounts
+	removedMetadata removalCounts
 }
 
 // sessionInfo is the per-session metadata we track for audit correlation

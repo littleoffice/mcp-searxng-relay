@@ -208,6 +208,28 @@ func (s *Server) toolSearch(
 		}, nil, nil
 	}
 
+	// Titles and snippets are page-supplied text, relayed by SearXNG from
+	// whatever the result page said about itself, so they get the same
+	// invisible-character stripping as a fetched body.  URLs are left
+	// byte-exact.  One count for the whole response, since the response is
+	// one fence.
+	var removed removalCounts
+	if !s.config.KeepInvisibleChars {
+		for i := range results {
+			var n int
+			results[i].Title, n = stripInvisible(results[i].Title)
+			removed.InvisibleChars += n
+			results[i].Snippet, n = stripInvisible(results[i].Snippet)
+			removed.InvisibleChars += n
+		}
+		if removed.InvisibleChars > 0 {
+			s.metrics.InvisibleCharsRemoved.Add(int64(removed.InvisibleChars))
+			lg.Info("invisible characters removed from search results",
+				"query", in.Query,
+				"invisible_chars", removed.InvisibleChars)
+		}
+	}
+
 	var sb strings.Builder
 	for i, r := range results {
 		if i > 0 {
@@ -219,7 +241,7 @@ func (s *Server) toolSearch(
 		}
 	}
 
-	fenced, err := s.wrapFence(sb.String(), FenceTypeContent, FenceUntrusted, s.config.SearxngURL)
+	fenced, err := s.wrapFenceSanitised(sb.String(), FenceTypeContent, FenceUntrusted, s.config.SearxngURL, removed)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}

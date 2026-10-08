@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,6 +43,10 @@ type urlFetchResult struct {
 	finalURL  string
 	fetchedAt time.Time
 	fromCache bool
+	// removedContent / removedMetadata are what sanitisation stripped from
+	// text and metadata respectively; each tool reports the one it returns.
+	removedContent  removalCounts
+	removedMetadata removalCounts
 }
 
 func (r urlFetchResult) isImage() bool { return r.imageData != nil }
@@ -145,7 +150,7 @@ func (s *Server) toolReadURL(
 		return nil, nil, err
 	}
 
-	fenced, err := s.wrapFence(windowed, FenceTypeContent, FenceUntrusted, safeURL)
+	fenced, err := s.wrapFenceSanitised(windowed, FenceTypeContent, FenceUntrusted, safeURL, result.removedContent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
@@ -335,7 +340,7 @@ func (s *Server) toolURLMetadata(
 		return nil, nil, fmt.Errorf("failed to marshal metadata: %w", err)
 	}
 
-	fenced, err := s.wrapFence(string(jsonBytes), FenceTypeData, FenceUntrusted, safeURL)
+	fenced, err := s.wrapFenceSanitised(string(jsonBytes), FenceTypeData, FenceUntrusted, safeURL, result.removedMetadata)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to wrap fence: %w", err)
 	}
@@ -400,12 +405,14 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 				cacheOutcome = cacheOutcomeHit
 				s.metrics.CacheHits.Add(1)
 				return urlFetchResult{
-					text:      entry.content,
-					metadata:  entry.metadata,
-					truncated: entry.truncated,
-					finalURL:  entry.finalURL,
-					fetchedAt: entry.fetchedAt,
-					fromCache: true,
+					text:            entry.content,
+					metadata:        entry.metadata,
+					truncated:       entry.truncated,
+					finalURL:        entry.finalURL,
+					fetchedAt:       entry.fetchedAt,
+					fromCache:       true,
+					removedContent:  entry.removedContent,
+					removedMetadata: entry.removedMetadata,
 				}, nil
 			}
 			s.cache.Remove(targetURL)
@@ -579,6 +586,11 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		metadata = extractedMeta
 	}
 
+	// Sanitise before caching, so the cache holds exactly what the model is
+	// shown: pagination offsets are computed on the cleaned text, and a cache
+	// hit reports the same removal counts as this fetch.
+	removedContent, removedMetadata := s.sanitiseFetched(lg, safeTarget, &content, &metadata)
+
 	lg.Info("url fetched", "url", safeTarget,
 		"content_type", contentType,
 		"bytes_raw", len(body),
@@ -586,20 +598,46 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		"extraction_truncated", truncated)
 
 	s.cache.Add(targetURL, cacheEntry{
-		content:   content,
-		metadata:  metadata,
-		expiresAt: time.Now().Add(s.cacheTTL),
-		truncated: truncated,
-		finalURL:  finalURL,
-		fetchedAt: fetchedAt,
+		content:         content,
+		metadata:        metadata,
+		expiresAt:       time.Now().Add(s.cacheTTL),
+		truncated:       truncated,
+		finalURL:        finalURL,
+		fetchedAt:       fetchedAt,
+		removedContent:  removedContent,
+		removedMetadata: removedMetadata,
 	})
 	return urlFetchResult{
-		text:      content,
-		metadata:  metadata,
-		truncated: truncated,
-		finalURL:  finalURL,
-		fetchedAt: fetchedAt,
+		text:            content,
+		metadata:        metadata,
+		truncated:       truncated,
+		finalURL:        finalURL,
+		fetchedAt:       fetchedAt,
+		removedContent:  removedContent,
+		removedMetadata: removedMetadata,
 	}, nil
+}
+
+// sanitiseFetched strips invisible characters (see invisible.go) from the
+// extracted text and the page-supplied metadata fields, in place, and returns
+// what it removed from each.  URLs are never touched.
+//
+// Every removal is counted and logged; the log line carries counts only,
+// never the removed text or its surroundings.
+func (s *Server) sanitiseFetched(lg *slog.Logger, safeTarget string, content *string, meta *URLMetadata) (fromContent, fromMetadata removalCounts) {
+	if s.config.KeepInvisibleChars {
+		return
+	}
+	*content, fromContent.InvisibleChars = stripInvisible(*content)
+	fromMetadata.InvisibleChars = stripInvisibleMetadata(meta)
+	if n := fromContent.InvisibleChars + fromMetadata.InvisibleChars; n > 0 {
+		s.metrics.InvisibleCharsRemoved.Add(int64(n))
+		lg.Info("invisible characters removed from fetched text",
+			"url", safeTarget,
+			"content_chars", fromContent.InvisibleChars,
+			"metadata_chars", fromMetadata.InvisibleChars)
+	}
+	return
 }
 
 // ── Encoding detection ────────────────────────────────────────────────────────

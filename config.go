@@ -129,6 +129,14 @@ type Config struct {
 	// converter regardless of this switch.
 	ExtractLinks bool // EXTRACT_LINKS: default true
 
+	// KeepInvisibleChars switches off stripInvisible (invisible.go), which
+	// removes Unicode tag characters, zero-width characters and bidi controls
+	// from fetched text before it is fenced. Off by default, i.e. stripping
+	// is on: those characters are how a page hides instructions a reader
+	// never sees. Turning it on is for deployments that need fetched text
+	// byte-for-byte and accept that risk.
+	KeepInvisibleChars bool // FETCH_KEEP_INVISIBLE_CHARS: default false
+
 	// PruneSelector is a CSS selector whose matches are removed from the
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
@@ -281,6 +289,8 @@ func configFromEnv() Config {
 	// that turning this on also enables trafilatura's own relative →
 	// absolute href rewriting, which is gated behind the same option.
 	c.ExtractLinks = parseBoolDefault(os.Getenv("EXTRACT_LINKS"), true)
+	// Invisible-character stripping — on by default; see KeepInvisibleChars.
+	c.KeepInvisibleChars = parseBool(os.Getenv("FETCH_KEEP_INVISIBLE_CHARS"))
 	// Pre-extraction pruning.  The default targets "related"-flavoured
 	// containers, which is where news templates habitually park
 	// most-popular / you-might-also-like blocks.  It was chosen by
