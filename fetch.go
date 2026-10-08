@@ -520,6 +520,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// ── Text paths ────────────────────────────────────────────────────────────
 	var content string
 	var truncated bool
+	var hiddenElements int
 	metadata := URLMetadata{URL: targetURL}
 
 	switch {
@@ -566,8 +567,17 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		s.metrics.FetchHTML.Add(1)
 		body = toUTF8(body, contentType)
 
-		contentNode, extractedMeta, extractErr := extractHTMLDocument(
-			body, targetURL, s.config.ExtractLinks, s.config.PruneSelector)
+		contentNode, extractedMeta, hidden, extractErr := extractHTMLDocument(
+			body, targetURL, s.config.ExtractLinks, s.config.PruneSelector, !s.config.KeepHiddenText)
+		// Counted and logged here, at removal, rather than per response, so a
+		// cache hit does not count the same hidden element twice.  The log
+		// line carries the count only, never the removed text.
+		if hidden > 0 {
+			hiddenElements = hidden
+			s.metrics.HiddenElementsRemoved.Add(int64(hidden))
+			lg.Info("hidden elements removed from fetched page",
+				"url", safeTarget, "elements", hidden)
+		}
 		if extractErr != nil {
 			// Extraction failure is non-fatal: log and proceed with what
 			// we have.  The metadata at minimum carries the URL.
@@ -590,6 +600,7 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	// shown: pagination offsets are computed on the cleaned text, and a cache
 	// hit reports the same removal counts as this fetch.
 	removedContent, removedMetadata := s.sanitiseFetched(lg, safeTarget, &content, &metadata)
+	removedContent.HiddenElements = hiddenElements
 
 	lg.Info("url fetched", "url", safeTarget,
 		"content_type", contentType,

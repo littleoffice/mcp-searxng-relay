@@ -144,6 +144,13 @@ starting points:
   deliberately does not rewrite lookalike lines in page text, because
   silently mutating untrusted content (and any material an agent later
   quotes from it) is a worse failure mode than the spoof it would prevent.
+- **Hidden-text removal.** Text a reader cannot see is removed from fetched
+  content before it is fenced: invisible Unicode characters (tag characters,
+  zero-width characters, bidi controls) from all fetched text, and HTML
+  elements a browser would not render (`hidden`, `aria-hidden`, `<template>`,
+  hidden inputs, hiding inline styles) before extraction. Each removal is
+  counted, logged and noted in the response's awareness preamble. Hiding via
+  stylesheets or classes is out of scope; the README states the limits.
 - **Dependency hygiene** — a deliberately small dependency tree, a pinned build
   toolchain, and a minimal `scratch`-based runtime image. Detailed in
   [supply-chain.md](supply-chain.md).

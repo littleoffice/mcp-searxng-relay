@@ -137,6 +137,12 @@ type Config struct {
 	// byte-for-byte and accept that risk.
 	KeepInvisibleChars bool // FETCH_KEEP_INVISIBLE_CHARS: default false
 
+	// KeepHiddenText switches off stripHiddenElements (hidden.go), which
+	// removes HTML elements a browser would not render (hidden, aria-hidden,
+	// <template>, <input type=hidden>, hiding inline styles) before
+	// extraction. Off by default, i.e. removal is on.
+	KeepHiddenText bool // FETCH_KEEP_HIDDEN_TEXT: default false
+
 	// PruneSelector is a CSS selector whose matches are removed from the
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
@@ -291,6 +297,8 @@ func configFromEnv() Config {
 	c.ExtractLinks = parseBoolDefault(os.Getenv("EXTRACT_LINKS"), true)
 	// Invisible-character stripping — on by default; see KeepInvisibleChars.
 	c.KeepInvisibleChars = parseBool(os.Getenv("FETCH_KEEP_INVISIBLE_CHARS"))
+	// Hidden-element removal — on by default; see KeepHiddenText.
+	c.KeepHiddenText = parseBool(os.Getenv("FETCH_KEEP_HIDDEN_TEXT"))
 	// Pre-extraction pruning.  The default targets "related"-flavoured
 	// containers, which is where news templates habitually park
 	// most-popular / you-might-also-like blocks.  It was chosen by

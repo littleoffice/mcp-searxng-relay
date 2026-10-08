@@ -748,6 +748,7 @@ func logConfig(server *Server, mode, port string) {
 		// Shown unconditionally for the same reason: it changes what the
 		// model sees, and "disabled" means a hidden-text channel is open.
 		row("invisible chars", stripLabel(!cfg.KeepInvisibleChars)),
+		row("hidden html", stripLabel(!cfg.KeepHiddenText)),
 		// Pre-extraction pruning changes which subtree is treated as the
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.

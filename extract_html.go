@@ -3,6 +3,9 @@
 // Owns the path from a raw HTML body to (a) the structured Markdown returned
 // to the model and (b) the curated URLMetadata returned by the metadata tool.
 //
+//  0. stripHiddenElements (hidden.go) removes elements a browser would not
+//     render, so no extractor below can pick their text up.
+//
 //  1. extractHTMLDocument runs trafilatura: it locates the main article
 //     subtree, returns it as an *html.Node, and pulls structured metadata
 //     from <meta>, OpenGraph, and JSON-LD.  Replaces the previous in-tree
@@ -66,13 +69,28 @@ const maxRenderedChars = 100_000
 // sanitizeTree.  The same option also gates trafilatura's relative → absolute
 // href rewriting against OriginalURL, so with it false the URL below is used
 // for metadata only.
+//
+// stripHidden removes elements a browser would not render before any
+// extractor sees the document (see stripHiddenElements); the returned int is
+// how many it removed.  If that step fails, nothing is extracted: falling
+// back to the uncleaned body would hand the extractors exactly the text the
+// step exists to keep from them.
 func extractHTMLDocument(
-	body []byte, originalURL string, includeLinks bool, pruneSelector string,
-) (*html.Node, URLMetadata, error) {
+	body []byte, originalURL string, includeLinks bool, pruneSelector string, stripHidden bool,
+) (*html.Node, URLMetadata, int, error) {
 	// Parse the URL best-effort: trafilatura accepts a nil OriginalURL and
 	// the caller (readURL) has already validated the scheme, so a parse
 	// failure here is not worth aborting on.
 	parsedURL, _ := url.Parse(originalURL)
+
+	hidden := 0
+	if stripHidden {
+		cleaned, n, err := stripHiddenElements(body)
+		if err != nil {
+			return nil, URLMetadata{URL: originalURL}, 0, fmt.Errorf("extractor failed: %w", err)
+		}
+		body, hidden = cleaned, n
+	}
 
 	opts := trafilatura.Options{
 		OriginalURL:     parsedURL,
@@ -105,12 +123,12 @@ func extractHTMLDocument(
 		// metadata tool still has something well-formed to return.
 		meta := URLMetadata{URL: originalURL}
 		if err != nil {
-			return nil, meta, fmt.Errorf("extractor failed: %w", err)
+			return nil, meta, hidden, fmt.Errorf("extractor failed: %w", err)
 		}
-		return nil, meta, nil
+		return nil, meta, hidden, nil
 	}
 
-	return result.ContentNode, metadataFromTrafilatura(result.Metadata, originalURL), nil
+	return result.ContentNode, metadataFromTrafilatura(result.Metadata, originalURL), hidden, nil
 }
 
 // metadataFromTrafilatura projects trafilatura's Metadata onto our curated
