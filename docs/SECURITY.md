@@ -131,10 +131,12 @@ starting points:
   see the main `README.md` for the variables and tuning notes.
 - **Prompt fencing** of all tool output, implementing the scheme from
   arXiv:2511.19727, with an honest statement of what that does and does not
-  provide in the README. The Ed25519 signing key is per-process by default;
-  deployments that run an external verifier can pin a persistent key via
+  provide in the README. The awareness preamble is signed by default (format
+  1.1), so the verifying gateway the relay runs behind can fail closed on any
+  unsigned text. Deployments supply a persistent signing key via
   `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE`, moving the trust anchor to
-  the operator's own secret store.
+  the operator's own secret store; without one the key is per-process and
+  startup warns that a gateway cannot pin it.
 - **PDF page markers are advisory.** The `--- [PDF page N of M] ---` lines
   inserted between extracted PDF pages are server-generated, but they sit
   inside untrusted extracted content: a malicious PDF can embed lookalike
@@ -144,6 +146,13 @@ starting points:
   deliberately does not rewrite lookalike lines in page text, because
   silently mutating untrusted content (and any material an agent later
   quotes from it) is a worse failure mode than the spoof it would prevent.
+- **Hidden-text removal.** Text a reader cannot see is removed from fetched
+  content before it is fenced: invisible Unicode characters (tag characters,
+  zero-width characters, bidi controls) from all fetched text, and HTML
+  elements a browser would not render (`hidden`, `aria-hidden`, `<template>`,
+  hidden inputs, hiding inline styles) before extraction. Each removal is
+  counted, logged and noted in the response's awareness preamble. Hiding via
+  stylesheets or classes is out of scope; the README states the limits.
 - **Dependency hygiene** — a deliberately small dependency tree, a pinned build
   toolchain, and a minimal `scratch`-based runtime image. Detailed in
   [supply-chain.md](supply-chain.md).

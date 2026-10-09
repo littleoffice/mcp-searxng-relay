@@ -129,6 +129,20 @@ type Config struct {
 	// converter regardless of this switch.
 	ExtractLinks bool // EXTRACT_LINKS: default true
 
+	// KeepInvisibleChars switches off stripInvisible (invisible.go), which
+	// removes Unicode tag characters, zero-width characters and bidi controls
+	// from fetched text before it is fenced. Off by default, i.e. stripping
+	// is on: those characters are how a page hides instructions a reader
+	// never sees. Turning it on is for deployments that need fetched text
+	// byte-for-byte and accept that risk.
+	KeepInvisibleChars bool // FETCH_KEEP_INVISIBLE_CHARS: default false
+
+	// KeepHiddenText switches off stripHiddenElements (hidden.go), which
+	// removes HTML elements a browser would not render (hidden, aria-hidden,
+	// <template>, <input type=hidden>, hiding inline styles) before
+	// extraction. Off by default, i.e. removal is on.
+	KeepHiddenText bool // FETCH_KEEP_HIDDEN_TEXT: default false
+
 	// PruneSelector is a CSS selector whose matches are removed from the
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
@@ -147,9 +161,9 @@ type Config struct {
 	// silently degrading to an ephemeral key that a downstream verifier
 	// would then reject every fence from.
 	//
-	// Both unset — the default — preserves the original behaviour: a fresh
-	// keypair generated per process. See fence_key.go for the rationale and
-	// the accepted encodings.
+	// Both unset falls back to a fresh keypair generated per process, which a
+	// verifying gateway cannot pin; startup warns about it. See fence_key.go
+	// for the rationale and the accepted encodings.
 	FenceSigningKey     string             // FENCE_SIGNING_KEY: inline key material
 	FenceSigningKeyFile string             // FENCE_SIGNING_KEY_FILE: path to a file holding the same
 	FenceKey            ed25519.PrivateKey // parsed form; nil until main() validates, and nil means ephemeral
@@ -178,17 +192,18 @@ type Config struct {
 	TrustForwardedHeaders bool           // MCP_TRUST_FORWARDED_HEADERS
 	OAuth                 *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
 
-	// FencePreamble selects where the awareness preamble travels: as unsigned
-	// prose ahead of the content fence ("prose", format 1.0, the default) or
-	// inside its own signed trusted-instruction fence ("fenced", format 1.1).
+	// FencePreamble selects where the awareness preamble travels: inside its
+	// own signed trusted-instruction fence ("fenced", format 1.1, the default)
+	// or as unsigned prose ahead of the content fence ("prose", format 1.0,
+	// kept for gateways that predate 1.1).
 	//
 	// Raw value read here, normalised in main() via parseFencePreambleMode so
-	// a typo fails startup rather than silently leaving the preamble unsigned
-	// at a deployment whose gateway was configured to require otherwise. Only
-	// meaningful alongside a persistent signing key the verifier pins: fencing
-	// the preamble under an ephemeral, same-origin key buys integrity against
-	// in-transit tampering, not against relay impersonation.
-	FencePreamble string // FENCE_PREAMBLE: "prose" (default) | "fenced"
+	// a typo fails startup rather than silently picking a layout the gateway
+	// was not configured for. The signed preamble is worth exactly the key
+	// that signs it: under a per-process key it buys integrity against
+	// in-transit tampering, not against relay impersonation, which is why
+	// startup warns when no persistent key is configured.
+	FencePreamble string // FENCE_PREAMBLE: "fenced" (default) | "prose"
 
 	// In-process TLS for the HTTP transport (opt-in). Raw values are read
 	// here; the compiled, validated form is populated in main() via
@@ -281,6 +296,10 @@ func configFromEnv() Config {
 	// that turning this on also enables trafilatura's own relative →
 	// absolute href rewriting, which is gated behind the same option.
 	c.ExtractLinks = parseBoolDefault(os.Getenv("EXTRACT_LINKS"), true)
+	// Invisible-character stripping — on by default; see KeepInvisibleChars.
+	c.KeepInvisibleChars = parseBool(os.Getenv("FETCH_KEEP_INVISIBLE_CHARS"))
+	// Hidden-element removal — on by default; see KeepHiddenText.
+	c.KeepHiddenText = parseBool(os.Getenv("FETCH_KEEP_HIDDEN_TEXT"))
 	// Pre-extraction pruning.  The default targets "related"-flavoured
 	// containers, which is where news templates habitually park
 	// most-popular / you-might-also-like blocks.  It was chosen by
@@ -398,7 +417,7 @@ func configFromEnv() Config {
 	c.OAuthCARoots = strings.TrimSpace(os.Getenv("MCP_OAUTH_CA_ROOTS"))
 	c.TrustForwardedHeaders = parseBool(os.Getenv("MCP_TRUST_FORWARDED_HEADERS"))
 	// Fence preamble layout — raw here, normalised in main() via
-	// parseFencePreambleMode. Unset keeps the 1.0 prose preamble.
+	// parseFencePreambleMode. Unset means the signed 1.1 preamble.
 	c.FencePreamble = strings.TrimSpace(os.Getenv(fencePreambleEnvVar))
 	// In-process TLS — only the raw values are read here. Validation and the
 	// mutually-exclusive manual-vs-ACME decision happen in main() via

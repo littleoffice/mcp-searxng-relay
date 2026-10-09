@@ -33,6 +33,12 @@ The shipped [`envs/.mcp-searxng-relay.env`](./envs/.mcp-searxng-relay.env) is in
 echo "MCP_AUTH_TOKEN=$(openssl rand -hex 32)" >> envs/.mcp-searxng-relay.env
 ```
 
+Then the fence signing key, which lets the verifying gateway in front of the relay pin a stable fingerprint (the relay refuses to start while `FENCE_SIGNING_KEY` still says `CHANGEME`):
+
+```bash
+sed -i "s|^FENCE_SIGNING_KEY=CHANGEME|FENCE_SIGNING_KEY=$(openssl rand -base64 32)|" envs/.mcp-searxng-relay.env
+```
+
 For multi-tenant deployments (one token per agent / per user), see [Configuration](../../README.md#configuration) for `MCP_AUTH_TOKENS` and `MCP_AUTH_TOKEN_FILE`.
 
 Alternatively, if you already run an identity provider, the relay can verify **OAuth 2.0 / OIDC** bearer JWTs instead of (or alongside) static tokens — set `MCP_OAUTH_ISSUER` and `MCP_OAUTH_AUDIENCE` and the HTTP-mode auth requirement is satisfied without any `MCP_AUTH_TOKEN`. See [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc).

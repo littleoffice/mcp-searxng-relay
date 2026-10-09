@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -31,8 +33,8 @@ func TestParseFencePreambleMode(t *testing.T) {
 		in   string
 		want string
 	}{
-		{"", fencePreambleProse},
-		{"   ", fencePreambleProse},
+		{"", fencePreambleFenced},
+		{"   ", fencePreambleFenced},
 		{"prose", fencePreambleProse},
 		{"fenced", fencePreambleFenced},
 		{"FENCED", fencePreambleFenced},
@@ -302,13 +304,43 @@ func TestFencedPreamble_BoundaryEscapeAttack(t *testing.T) {
 	}
 }
 
-// The default must stay byte-compatible with 1.0: unsigned prose preamble,
-// one fence, version 1.0.  This is what keeps existing deployments (and any
-// verifier still expecting 1.0) working until the rollout flips.
-func TestProsePreamble_RemainsTheDefault(t *testing.T) {
+// The default is the signed 1.1 layout, both for an unset FENCE_PREAMBLE and
+// for a zero-valued Config, so nothing has to opt in to the property a
+// fail-closed gateway depends on.
+func TestFencedPreamble_IsTheDefault(t *testing.T) {
+	pub, priv := generateFenceKeypair()
+	s := &Server{fencePublicKey: pub, fenceSigningKey: priv}
+	if !s.preambleIsFenced() {
+		t.Fatal("a zero-valued Config must read as fenced mode")
+	}
+	if got := s.fenceVersion(); got != fenceFormatVersion {
+		t.Errorf("default fenceVersion = %q, want %q", got, fenceFormatVersion)
+	}
+	out, err := s.wrapFence("body", FenceTypeContent, FenceUntrusted, "")
+	if err != nil {
+		t.Fatalf("wrapFence: %v", err)
+	}
+	fences := parseFences(t, out)
+	if len(fences) != 2 {
+		t.Fatalf("default output must have 2 fences, got %d:\n%s", len(fences), out)
+	}
+	assertNoUnsignedRegions(t, out, fences)
+	if got := mustExtractAttr(t, fences[0].openTag, "source"); got != awarenessFenceSource {
+		t.Errorf("first fence source = %q, want the awareness preamble", got)
+	}
+
+	mode, err := parseFencePreambleMode("")
+	if err != nil || mode != fencePreambleFenced {
+		t.Errorf("unset FENCE_PREAMBLE = (%q, %v), want %q", mode, err, fencePreambleFenced)
+	}
+}
+
+// FENCE_PREAMBLE=prose stays byte-compatible with 1.0 for gateways that
+// predate 1.1: unsigned prose preamble, one fence, version 1.0.
+func TestProsePreamble_ExplicitSetting(t *testing.T) {
 	s := newTestFenceServer(t)
 	if s.preambleIsFenced() {
-		t.Fatal("a zero-valued Config must read as prose mode")
+		t.Fatal("FENCE_PREAMBLE=prose must read as prose mode")
 	}
 	out, err := s.wrapFence("body", FenceTypeContent, FenceUntrusted, "")
 	if err != nil {
@@ -328,6 +360,84 @@ func TestProsePreamble_RemainsTheDefault(t *testing.T) {
 	}
 	if got := mustExtractAttr(t, extractOpeningTag(t, out), "version"); got != fenceFormatVersionLegacy {
 		t.Errorf("prose mode version = %q, want %q", got, fenceFormatVersionLegacy)
+	}
+}
+
+// ── startup posture ───────────────────────────────────────────────────────────
+
+// What startup says for each layout × key combination.  Only the supported
+// deployment — fenced preamble, persistent key — is free of a warning about
+// what a gateway cannot rely on; the persistent key is still logged, as the
+// audit event it is.
+func TestLogFencePosture(t *testing.T) {
+	const fp = "3f9a1c7e2b4d8056"
+	for _, tc := range []struct {
+		name      string
+		mode      string
+		keySource string
+		want      []string
+		notWant   []string
+	}{
+		{
+			name:      "fenced, persistent key",
+			mode:      fencePreambleFenced,
+			keySource: "FENCE_SIGNING_KEY_FILE (PKCS#8 PEM)",
+			want:      []string{"fence signing key is persistent", "fingerprint=" + fp},
+			notWant:   []string{"changes on every restart", "unsigned prose"},
+		},
+		{
+			name:    "fenced, ephemeral key",
+			mode:    fencePreambleFenced,
+			want:    []string{"cannot pin a key that changes on every restart", "FENCE_SIGNING_KEY_FILE", "proves only that something answered"},
+			notWant: []string{"is persistent", "unsigned prose"},
+		},
+		{
+			name:      "prose, persistent key",
+			mode:      fencePreambleProse,
+			keySource: "FENCE_SIGNING_KEY (base64 seed)",
+			want:      []string{"fence signing key is persistent", "unsigned prose (format 1.0)", "cannot run fail-closed"},
+			notWant:   []string{"changes on every restart"},
+		},
+		{
+			name:    "prose, ephemeral key",
+			mode:    fencePreambleProse,
+			want:    []string{"cannot pin a key that changes on every restart", "unsigned prose (format 1.0)"},
+			notWant: []string{"is persistent", "proves only that something answered"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			lg := slog.New(slog.NewTextHandler(&buf, nil))
+			logFencePosture(lg, tc.mode, tc.keySource, fp)
+			out := buf.String()
+
+			// Every line is a warning: none of these is routine.
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if !strings.Contains(line, "level=WARN") {
+					t.Errorf("non-WARN line: %s", line)
+				}
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out, w) {
+					t.Errorf("log lacks %q:\n%s", w, out)
+				}
+			}
+			for _, w := range tc.notWant {
+				if strings.Contains(out, w) {
+					t.Errorf("log should not contain %q:\n%s", w, out)
+				}
+			}
+		})
+	}
+}
+
+// The banner names the layout, and the default reads as the signed one.
+func TestFencePreambleLabel(t *testing.T) {
+	if got := fencePreambleLabel(fencePreambleFenced); !strings.Contains(got, "format 1.1") || !strings.Contains(got, "signed") {
+		t.Errorf("fenced label = %q", got)
+	}
+	if got := fencePreambleLabel(fencePreambleProse); !strings.Contains(got, "format 1.0") || !strings.Contains(got, "unsigned") {
+		t.Errorf("prose label = %q", got)
 	}
 }
 

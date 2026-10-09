@@ -227,26 +227,15 @@ func main() {
 	}
 	cfg.OAuth = oauthSettings
 
-	// Normalise the fence preamble layout (FENCE_PREAMBLE). Same fail-loud
-	// stance: an operator who set this did so because a downstream verifier
-	// expects format 1.1 two-fence output, and starting in prose mode would
-	// leave every response carrying an unsigned span that verifier was
-	// configured to reject.
+	// Normalise the fence preamble layout (FENCE_PREAMBLE; unset means
+	// "fenced", format 1.1). Same fail-loud stance: a typo must not pick a
+	// layout the downstream verifier was not configured for.
 	fencePreamble, err := parseFencePreambleMode(cfg.FencePreamble)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 	cfg.FencePreamble = fencePreamble
-	// Fencing the preamble is worth exactly the key that signs it: against an
-	// ephemeral, per-process key a verified trusted-instruction fence proves
-	// "whoever answered on this address produced it", not "the relay we
-	// provisioned produced it" — the verifier has no stable fingerprint to pin.
-	if fencePreamble == fencePreambleFenced && fenceKey == nil {
-		slog.Warn("fenced awareness preamble is signed by a per-process key",
-			"hint", "set FENCE_SIGNING_KEY or FENCE_SIGNING_KEY_FILE and pin the fingerprint downstream, "+
-				"or the trusted-instruction fence proves only that something answered on this address")
-	}
 
 	// Compile the in-process TLS configuration (MCP_TLS_CERT/MCP_TLS_KEY or the
 	// MCP_TLS_ACME_* family). Same fail-loud stance as the controls above: a
@@ -267,19 +256,12 @@ func main() {
 
 	server := NewServer(cfg)
 
-	// Leave an audit line when the signing key outlives the process. This
-	// reverses a deliberate default, and it changes the blast radius of a
-	// key leak from one process lifetime to "until the operator rotates" —
-	// so it belongs in the logs, not merely inferable from the environment.
-	// Logged after NewServer so the fingerprint comes from the public key the
-	// server will actually publish at /fence/public-key, not from a
-	// separately derived copy that could drift from it.
-	if fenceKey != nil {
-		slog.Warn("fence signing key is persistent, not per-process",
-			"source", fenceKeySource,
-			"fingerprint", fenceKeyFingerprint(server.fencePublicKey),
-			"hint", "fences stay verifiable across restarts; rotate this key on the same cadence as your other signing material")
-	}
+	// State what a verifying gateway can rely on: whether the key can be
+	// pinned, and whether the preamble is signed. Logged after NewServer so
+	// the fingerprint comes from the public key the server will actually
+	// publish at /fence/public-key, not from a separately derived copy that
+	// could drift from it.
+	logFencePosture(slog.Default(), fencePreamble, fenceKeySource, fenceKeyFingerprint(server.fencePublicKey))
 
 	if port := os.Getenv("MCP_PORT"); port != "" {
 		runHTTP(cfg, server, port)
@@ -744,6 +726,11 @@ func logConfig(server *Server, mode, port string) {
 		// agent.  Shown unconditionally: it changes what the model sees,
 		// so it belongs in the same at-a-glance view as the fetch policy.
 		row("link extraction", enabledLabel(cfg.ExtractLinks)),
+		// Whether invisible characters are stripped from fetched text.
+		// Shown unconditionally for the same reason: it changes what the
+		// model sees, and "disabled" means a hidden-text channel is open.
+		row("invisible chars", stripLabel(!cfg.KeepInvisibleChars)),
+		row("hidden html", stripLabel(!cfg.KeepHiddenText)),
 		// Pre-extraction pruning changes which subtree is treated as the
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.
@@ -786,6 +773,14 @@ func logConfig(server *Server, mode, port string) {
 	sb.WriteString("\n")
 
 	_, _ = fmt.Fprint(os.Stderr, sb.String())
+}
+
+// stripLabel renders a fetched-text filter for the banner.
+func stripLabel(on bool) string {
+	if on {
+		return "stripped"
+	}
+	return "kept (filter disabled)"
 }
 
 // redactSecret returns "[set]" when s is non-empty and "[not set]" otherwise,

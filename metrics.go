@@ -322,6 +322,18 @@ type Metrics struct {
 	// so no per-remote label here.
 	AuthFailures [len(authFailureEndpoints)]atomic.Int64
 
+	// InvisibleCharsRemoved counts runes stripInvisible removed from fetched
+	// text (page bodies, metadata fields, search titles and snippets).  It is
+	// counted when the text is cleaned, not when it is served, so a cache
+	// hit does not count the same removal twice.  A page that suddenly
+	// contributes thousands is a page hiding a payload.
+	InvisibleCharsRemoved atomic.Int64
+
+	// HiddenElementsRemoved counts HTML elements stripHiddenElements removed
+	// before extraction (one per hidden subtree, not per descendant).  Same
+	// counted-when-cleaned rule as above.
+	HiddenElementsRemoved atomic.Int64
+
 	// Degraded-search accounting (SearchesDegraded) and the per-engine
 	// failure breakdown live in the "SearXNG backend engine health" section
 	// above.
@@ -596,6 +608,14 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 		_, _ = fmt.Fprintf(w, "mcp_auth_failures_total{endpoint=\"%s\"} %d\n", endpoint, m.AuthFailures[i].Load())
 	}
 	_, _ = fmt.Fprintln(w)
+
+	// Guardrails: fetched-text sanitisation.
+	writeCounter("mcp_invisible_chars_removed_total",
+		"Total invisible characters (Unicode tags, zero-width, bidi controls) removed from fetched text before fencing.",
+		&m.InvisibleCharsRemoved)
+	writeCounter("mcp_hidden_elements_removed_total",
+		"Total HTML elements a browser would not render (hidden, aria-hidden, template, hidden inputs, hiding inline styles) removed before extraction.",
+		&m.HiddenElementsRemoved)
 
 	// SearXNG backend engine health.
 	//
