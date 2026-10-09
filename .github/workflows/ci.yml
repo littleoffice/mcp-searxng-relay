@@ -103,7 +103,12 @@ jobs:
           # go.mod `go` directive (now go 1.27.0) -- v2.12.2 was built with Go
           # 1.26 and errors out with "the Go language version (go1.26) ... is
           # lower than the targeted Go version (1.27.0)".
-          version: v2.13.2
+          #
+          # v2.14.0: Go 1.27.2's compiler writes stdlib export data version 5,
+          # which v2.13.2 cannot read -- every stdlib import fails typecheck
+          # with "export data version 5 is greater than maximum supported
+          # version 4". Bump this again if a later Go patch does the same.
+          version: v2.14.0
           # --timeout because the WASM-backed transitive deps make first-run
           # analysis a bit slow on cold cache. Tune downward later if you want.
           args: --timeout=5m
