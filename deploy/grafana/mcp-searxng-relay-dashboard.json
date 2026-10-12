@@ -2240,8 +2240,8 @@
     {
       "id": 27,
       "type": "table",
-      "title": "Top domains by fetch rate",
-      "description": "Busiest destination hosts (success + error). domain=\"__overflow__\" aggregates hosts beyond the 512 tracked.",
+      "title": "Top domains by fetches (cumulative)",
+      "description": "Busiest destination hosts (success + error), cumulative counts since the relay started. Populates as soon as the first fetch is recorded (unlike a rate(), which needs sustained traffic). domain=\"__overflow__\" aggregates hosts beyond the 512 tracked.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2284,11 +2284,11 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "reqps"
+                "value": "short"
               },
               {
                 "id": "displayName",
-                "value": "fetch/s"
+                "value": "fetches"
               },
               {
                 "id": "custom.cellOptions",
@@ -2299,7 +2299,7 @@
               },
               {
                 "id": "decimals",
-                "value": 3
+                "value": 0
               }
             ]
           }
@@ -2313,7 +2313,7 @@
         },
         "sortBy": [
           {
-            "displayName": "fetch/s",
+            "displayName": "fetches",
             "desc": true
           }
         ]
@@ -2325,7 +2325,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(15, sum by (domain) (rate(mcp_fetches_by_domain_total{job=\"$job\", instance=\"$instance\"}[$__rate_interval])))",
+          "expr": "topk(15, sum by (domain) (mcp_fetches_by_domain_total{job=\"$job\", instance=\"$instance\", domain!=\"__overflow__\"}))",
           "instant": true,
           "range": false,
           "refId": "A",
@@ -2353,8 +2353,8 @@
     {
       "id": 28,
       "type": "table",
-      "title": "Top domains by error rate",
-      "description": "Destination hosts producing fetch failures \u2014 the per-domain health signal for deciding what to drop from config.",
+      "title": "Top domains by fetch errors (cumulative)",
+      "description": "Destination hosts producing fetch failures \u2014 the per-domain health signal for deciding what to drop from config. Cumulative counts since the relay started, so a failing host shows up on its first error rather than needing a sustained rate().",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -2397,11 +2397,11 @@
             "properties": [
               {
                 "id": "unit",
-                "value": "reqps"
+                "value": "short"
               },
               {
                 "id": "displayName",
-                "value": "errors/s"
+                "value": "errors"
               },
               {
                 "id": "custom.cellOptions",
@@ -2412,7 +2412,7 @@
               },
               {
                 "id": "decimals",
-                "value": 3
+                "value": 0
               }
             ]
           }
@@ -2426,7 +2426,7 @@
         },
         "sortBy": [
           {
-            "displayName": "errors/s",
+            "displayName": "errors",
             "desc": true
           }
         ]
@@ -2438,7 +2438,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "topk(15, sum by (domain) (rate(mcp_fetches_by_domain_total{job=\"$job\", instance=\"$instance\", outcome=\"error\"}[$__rate_interval])))",
+          "expr": "topk(15, sum by (domain) (mcp_fetches_by_domain_total{job=\"$job\", instance=\"$instance\", outcome=\"error\", domain!=\"__overflow__\"}))",
           "instant": true,
           "range": false,
           "refId": "A",
@@ -3140,6 +3140,94 @@
           "refId": "A"
         }
       ]
+    },
+    {
+      "id": 46,
+      "type": "row",
+      "title": "Activity (logs) - requires Loki datasource",
+      "collapsed": false,
+      "gridPos": { "x": 0, "y": 93, "w": 24, "h": 1 }
+    },
+    {
+      "id": 47,
+      "type": "logs",
+      "title": "Recent searches",
+      "description": "Actual search-query text per searxng_web_search call. Sourced from the relay's JSON logs via Loki - NOT available in Prometheus metrics. Needs LOG_FORMAT=json and the Loki datasource (see deploy/podman/monitoring/).",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "x": 0, "y": 94, "w": 12, "h": 9 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "editorMode": "code",
+          "expr": "{container=\"mcp-searxng-relay\"} | json | msg = `search completed` | line_format \"[{{.session_id}}] {{.query}}\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 48,
+      "type": "logs",
+      "title": "Recent URLs fetched",
+      "description": "Actual URLs fetched (searxng_read_url + searxng_url_metadata), from the relay's JSON logs via Loki. NOT in Prometheus metrics (only the hostname is, as mcp_fetches_by_domain_total). Needs LOG_FORMAT=json and the Loki datasource.",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "x": 12, "y": 94, "w": 12, "h": 9 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "editorMode": "code",
+          "expr": "{container=\"mcp-searxng-relay\"} | json | msg =~ `fetch completed|metadata fetch completed` | line_format \"[{{.session_id}}] {{.url}}\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 49,
+      "type": "logs",
+      "title": "Search & fetch failures",
+      "description": "Error-path log lines for searches and fetches, from the relay's JSON logs via Loki. Correlate with a session by filtering on session_id.",
+      "datasource": { "type": "loki", "uid": "${loki}" },
+      "gridPos": { "x": 0, "y": 103, "w": 24, "h": 8 },
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "${loki}" },
+          "editorMode": "code",
+          "expr": "{container=\"mcp-searxng-relay\"} | json | msg =~ `fetch failed|search failed`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ]
     }
   ],
   "refresh": "30s",
@@ -3160,6 +3248,20 @@
         "name": "datasource",
         "options": [],
         "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Loki (logs)",
+        "multi": false,
+        "name": "loki",
+        "options": [],
+        "query": "loki",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
