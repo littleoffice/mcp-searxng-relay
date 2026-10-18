@@ -1,0 +1,157 @@
+# .github/workflows/sync-doc-pins.yml
+#
+# Auto-companion to pin-consistency.yml, sibling to sync-go-version.yml. When
+# Dependabot's `gomod` ecosystem bumps a direct dependency, this workflow runs
+# `check-doc-pins.sh --fix` to rewrite the version numbers docs/supply-chain.md
+# states for that dependency, and pushes that commit onto the same PR branch.
+# pin-consistency.yml's doc-pins job then flips green.
+#
+# This closes the SAFE half of what Dependabot leaves stale on a gomod bump: the
+# supply-chain.md version prose is bookkeeping with no security weight, so it is
+# fine to regenerate mechanically. It deliberately does NOT touch
+# native-deps.sha256 (the SHA-256 pins for the statically linked native Rust
+# cores): re-pinning those is a human checkpoint by design — a machine cannot
+# tell a legitimate re-release from a tampered one, and the file's own header
+# says regenerating blindly "pins the compromise." So an office_oxide/pdf_oxide
+# bump still requires a person to run `verify-native-dep.sh --print` after
+# reading the release notes, and stays red until they do.
+#
+# This does NOT replace pin-consistency.yml. That workflow stays as the
+# secret-free invariant guard that blocks merge on ANY drift, so if this
+# auto-sync is ever skipped or fails, the drift is still caught (failure mode is
+# "back to a manual `check-doc-pins.sh --fix`", never "silently merged").
+#
+# ---------------------------------------------------------------------------
+# Why a token other than GITHUB_TOKEN is required
+# ---------------------------------------------------------------------------
+# A commit pushed with the built-in GITHUB_TOKEN never re-triggers workflows
+# (GitHub's loop-prevention), so pin-consistency.yml and the ci.yml matrix would
+# NOT re-run against the fixed doc. We therefore push with GO_SYNC_TOKEN (the
+# same Dependabot-only PAT/App token sync-go-version.yml already uses), which
+# does re-trigger CI. No new secret is introduced.
+#
+# ---------------------------------------------------------------------------
+# Security model (deliberately uses `pull_request`, NOT pull_request_target)
+# ---------------------------------------------------------------------------
+# Identical posture to sync-go-version.yml — see that file's header for the full
+# reasoning. In short:
+#
+#   * `pull_request` (not pull_request_target) so untrusted PR code is never
+#     checked out in a privileged, secret-bearing context.
+#   * On `pull_request`, secrets are withheld from fork PRs entirely, so an
+#     external PR can never reach GO_SYNC_TOKEN.
+#   * Three layered controls, none of them the forgeable branch name:
+#       1. github.actor == 'dependabot[bot]' (an unforgeable, GitHub-set
+#          identity) — cheap first gate.
+#       2. dependabot/fetch-metadata confirms a genuine Dependabot update in the
+#          `gomod` ecosystem.
+#       3. THE REAL BACKSTOP: GO_SYNC_TOKEN exists ONLY as a *Dependabot* secret,
+#          which GitHub injects solely into dependabot[bot] runs — so the push
+#          cannot authenticate anywhere else even if the gates above were
+#          removed. Do NOT also add it as an Actions secret.
+#
+# This job runs `check-doc-pins.sh`, a first-party script in this repo that only
+# reads go.mod and rewrites version tokens in docs/supply-chain.md — it builds
+# and executes nothing from the PR under test (same "reads files, runs no
+# third-party code" posture as pin-consistency.yml).
+#
+# ---------------------------------------------------------------------------
+# One-time setup required for this to do anything
+# ---------------------------------------------------------------------------
+# Reuses the GO_SYNC_TOKEN Dependabot secret documented in sync-go-version.yml.
+# If it is not set, this workflow is inert (the push step warns and exits 0) and
+# pin-consistency.yml simply keeps failing the PR as before — failure mode is
+# "back to manual", never "silently merged".
+
+name: Sync doc pins to go.mod versions
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+    paths:
+      - 'go.mod'
+
+# The default job token stays minimal; the push uses GO_SYNC_TOKEN instead.
+# pull-requests: read is what dependabot/fetch-metadata needs to inspect the PR.
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: sync-doc-pins-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    name: Rewrite docs/supply-chain.md version pins to match go.mod
+    runs-on: ubuntu-latest
+    # Layer 1: unforgeable actor identity. (head_ref is intentionally not used.)
+    if: github.actor == 'dependabot[bot]'
+    steps:
+      # Layer 2: confirm this is a real Dependabot update in the gomod ecosystem.
+      - name: Fetch Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+
+      - name: Checkout PR head
+        if: steps.meta.outputs.package-ecosystem == 'go_modules'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Check out the PR branch tip (same repo -- Dependabot pushes here, not
+          # from a fork) so we can add a commit to it. Authenticate with the
+          # Dependabot-only PAT so the later push both succeeds AND re-triggers
+          # pin-consistency.yml + ci.yml; persist-credentials keeps it for that
+          # push. On a non-Dependabot run this secret is empty and the push step
+          # below fails closed.
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ secrets.GO_SYNC_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Sync docs/supply-chain.md version pins
+        if: steps.meta.outputs.package-ecosystem == 'go_modules'
+        env:
+          GO_SYNC_TOKEN: ${{ secrets.GO_SYNC_TOKEN }}
+          # Passed via env, never interpolated into the script text: a branch
+          # name is attacker-influenceable and git permits shell metacharacters
+          # in it, so `${{ ... }}` inline would be a script-injection vector.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GO_SYNC_TOKEN}" ]; then
+            echo "::warning::GO_SYNC_TOKEN is not set as a Dependabot secret;" \
+              "cannot push the doc-pin sync. pin-consistency.yml will keep this" \
+              "PR red until docs/supply-chain.md is updated. See" \
+              "sync-doc-pins.yml header."
+            exit 0
+          fi
+
+          # Rewrite the stale version numbers in docs/supply-chain.md to match
+          # go.mod. --fix exits 0 when the document agrees with go.mod (whether
+          # it rewrote anything or was already correct) and non-zero only when a
+          # drift it CANNOT auto-fix remains (a missing row, or the dependency
+          # count sentence) -- exactly the cases a human must handle, which this
+          # job must not paper over. So let a non-zero exit fail the job.
+          ./check-doc-pins.sh --fix
+
+          if git diff --quiet -- docs/supply-chain.md; then
+            echo "✅ docs/supply-chain.md already in sync; nothing to push." \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git config user.name  'dependabot[bot]'
+          git config user.email '49699333+dependabot[bot]@users.noreply.github.com'
+          git add docs/supply-chain.md
+          git commit -m "build(deps): sync docs/supply-chain.md pins to go.mod"
+          git push origin "HEAD:${HEAD_REF}"
+
+          {
+            echo "## ✅ Synced docs/supply-chain.md to go.mod"
+            echo ""
+            echo "The dependency-inventory version pins were rewritten to match"
+            echo "\`go.mod\` and pushed to this PR. pin-consistency.yml and the"
+            echo "ci.yml matrix will re-run against it."
+          } >> "$GITHUB_STEP_SUMMARY"
