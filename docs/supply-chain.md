@@ -81,7 +81,7 @@ about what changed.
 | `golang.org/x/net` | The `golang.org/x/net/html` parser used by the Markdown renderer, and `golang.org/x/net/html/charset` for non-UTF-8 charset detection. Maintained by the Go team. Pinned at v0.61.0. |
 | `golang.org/x/crypto` | `golang.org/x/crypto/acme` and `.../acme/autocert` for the optional in-process ACME TLS mode (`MCP_TLS_ACME_DOMAINS`). Only reached when that mode is enabled; the default plain-HTTP and manual-cert paths use the standard library alone. Maintained by the Go team. Pinned at v0.58.0. |
 | `github.com/coreos/go-oidc/v3` | OpenID Connect Resource-Server verification for the optional OAuth path (`MCP_OAUTH_*`): OIDC discovery, the auto-rotating remote JWKS cache, and JWT signature/claims validation. Reachable only when `MCP_OAUTH_ISSUER` is set; unused in the default static-token configuration. Widely used, maintained under the CoreOS/Red Hat umbrella. Pinned at v3.21.0. |
-| `github.com/go-jose/go-jose/v4` | JOSE primitives (JWS parsing and signature verification, JWKS types) underneath `go-oidc`, and used directly by the relay to verify against a static `MCP_OAUTH_JWKS_FILE`. The actively maintained successor to `square/go-jose`. Pinned at v4.1.5. |
+| `github.com/go-jose/go-jose/v4` | JOSE primitives (JWS parsing and signature verification, JWKS types) underneath `go-oidc`, and used directly by the relay to verify against a static `MCP_OAUTH_JWKS_FILE`. The actively maintained successor to `square/go-jose`. Pinned at v4.1.6. |
 
 ### Transitive dependencies
 
