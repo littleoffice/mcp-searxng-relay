@@ -68,17 +68,17 @@
 # linker consumes. Checking the linked object is a stronger anchor than checking
 # an archive that something else unpacked.
 
-# ── office_oxide v0.1.14 ──────────────────────────────────────────────────────
-# https://github.com/yfedoseev/office_oxide/releases/download/v0.1.14/
-office_oxide/v0.1.14/native-linux-x86_64.tar.gz=3c39ebc78c31509049e57978e40b3b35ed345764894f9b32f4cd531a997aea16
-office_oxide/v0.1.14/native-linux-aarch64.tar.gz=e17a1825b72885c04e85825c00028549027eb33b46a2676cab2bbca27e9b5395
+# ── office_oxide v0.1.13 ──────────────────────────────────────────────────────
+# https://github.com/yfedoseev/office_oxide/releases/download/v0.1.13/
+office_oxide/v0.1.13/native-linux-x86_64.tar.gz=6b4093279a72c1ab266c557c5e02e9c875ae663cd500d82c7596b3edb6206339
+office_oxide/v0.1.13/native-linux-aarch64.tar.gz=cd0053ec3f2411710c39c792236936d68eec7aefaf088c9ce2a3185ab571b8de
 
 # The cgo typecheck in the lint job needs only the header, so it fetches that
 # one file from the repository rather than the ~13 MB release archive. Byte
 # identical to the copy inside both release archives above, verified at the time
 # these digests were recorded.
-# https://raw.githubusercontent.com/yfedoseev/office_oxide/v0.1.14/include/office_oxide_c/office_oxide.h
-office_oxide/v0.1.14/office_oxide.h=5333f6168a24779b58b2e6852495068fee2ff935b1331e2287f95eb2658c8b02
+# https://raw.githubusercontent.com/yfedoseev/office_oxide/v0.1.13/include/office_oxide_c/office_oxide.h
+office_oxide/v0.1.13/office_oxide.h=5333f6168a24779b58b2e6852495068fee2ff935b1331e2287f95eb2658c8b02
 
 # ── pdf_oxide v0.3.78 ─────────────────────────────────────────────────────────
 # Digests of libpdf_oxide.a as extracted by
