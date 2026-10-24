@@ -60,7 +60,7 @@ WORKDIR /app
 # ARG, so the builder does not need .git in the context to stamp the binary.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        ca-certificates=20250419 \
+        ca-certificates=20250419+deb13u1 \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
