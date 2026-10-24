@@ -6,7 +6,7 @@ document rather than against a reading of `fence.go`.
 
 The audience is whoever builds or maintains a verifier: the paper's "security
 gateway" (arXiv:2511.19727 §4.5), a fence-verifying MCP client, or a CI check
-over captured tool output. [promptfence-gateway](https://github.com/littleoffice/promptfence-gateway)
+over captured tool output. [fence-gateway](https://github.com/littleoffice/fence-gateway)
 is the reference implementation.
 
 This document is part of the relay's interface. A change to the wire format

@@ -1,6 +1,6 @@
 module mcp-searxng-relay
 
-go 1.27.2
+go 1.27.3
 
 require (
 	github.com/andybalholm/cascadia v1.3.5
