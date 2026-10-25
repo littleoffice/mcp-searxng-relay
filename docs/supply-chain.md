@@ -203,8 +203,9 @@ foundation.
 The `Dockerfile` produces the runtime artifact, and its build is structured so
 that the result is auditable and reproducible:
 
-- **Pinned build toolchain by digest.** The builder stage pins
-  `golang:1.26.6-trixie` by content digest (`sha256:…`), not by tag. Tags are
+- **Pinned build toolchain by digest.** The builder stage pins its `golang`
+  image by content digest (`sha256:…`), not by tag; the `FROM` line in the
+  `Dockerfile` names the current version. Tags are
   mutable; digests are immutable. The pin is bumped deliberately as new patch
   releases land, with the reason recorded in the `Dockerfile` comment — and it
   is checked against the `go` directive in `go.mod` by the pin-consistency
