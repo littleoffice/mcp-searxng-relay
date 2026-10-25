@@ -5,7 +5,8 @@
 #
 # What it does:
 #   - lint:    golangci-lint over the Go code; actionlint over the workflow
-#              files themselves (catches YAML / Action-syntax bugs locally).
+#              files themselves (catches YAML / Action-syntax bugs locally);
+#              check-doc-links.py over the Markdown links and #anchors.
 #   - test:    go test with -race, -count=1 (no caching), and govulncheck.
 #   - build:   builds the container image to confirm the Dockerfile is still
 #              healthy. Does NOT push and does NOT attest -- those only happen
@@ -143,6 +144,14 @@ jobs:
             /tmp/download-actionlint.bash
           bash /tmp/download-actionlint.bash "${ACTIONLINT_VERSION}"
           ./actionlint -color
+
+      - name: Markdown links
+        # Every relative link and #anchor across README.md, docs/ and deploy/
+        # must resolve. A moved section or renamed heading otherwise leaves
+        # links that silently land at the top of the wrong page; the script
+        # header has the full reasoning. Standard-library Python, run on the
+        # runner's own python3, so it adds no dependency.
+        run: ./check-doc-links.py
 
   test:
     name: Test

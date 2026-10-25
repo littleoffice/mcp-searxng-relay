@@ -473,7 +473,8 @@ func runHTTP(cfg Config, server *Server, port string) {
 	// session.  Useful for personal-use deployments where you want the
 	// server to survive restarts without forcing the agent to reconnect.
 	// At the cost of losing the cross-request session-ID join key for
-	// audit logs — the README discusses the trade-off in detail.
+	// audit logs — "Session modes" in docs/configuration.md discusses the
+	// trade-off in detail.
 	mcpHandler := mcp.NewStreamableHTTPHandler(
 		func(*http.Request) *mcp.Server { return server.mcpServer },
 		&mcp.StreamableHTTPOptions{Stateless: cfg.Stateless},

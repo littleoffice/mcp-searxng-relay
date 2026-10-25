@@ -2,8 +2,7 @@
 
 [`mcp-searxng-relay-dashboard.json`](mcp-searxng-relay-dashboard.json) is a
 Grafana dashboard for a **single** `mcp-searxng-relay` instance. It visualises
-every series exposed at `GET /metrics` (see the [Metrics](../../README.md#metrics)
-section of the main README) and is organised so the panels an operator looks at
+every series exposed at `GET /metrics` (see [Metrics](../../docs/observability.md#metrics)) and is organised so the panels an operator looks at
 first — traffic, errors, latency, cache — are at the top.
 
 ## Prerequisites

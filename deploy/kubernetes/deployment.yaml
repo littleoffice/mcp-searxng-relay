@@ -78,8 +78,8 @@ spec:
             # gateway can pin one fingerprint instead of re-reading it after
             # every rollout, and all replicas sign with the same key rather
             # than one each.  The path is inside the existing mcp-auth
-            # mount, so no extra volume is needed.  See README "Fence
-            # signing key".
+            # mount, so no extra volume is needed.  See "Fence signing key" in
+            # docs/prompt-fencing.md.
             - name: FENCE_SIGNING_KEY_FILE
               value: /etc/mcp-auth/fence-key
             # The awareness preamble is signed by default (FENCE_PREAMBLE
@@ -93,7 +93,8 @@ spec:
             # you run the relay by itself in a namespace with no Ingress, it
             # can serve HTTPS directly. Uncomment ONE of the two modes below,
             # plus the acme-cache volume/mount and the 443 port further down.
-            # See the main README "TLS" section for all MCP_TLS_* variables.
+            # See "TLS" in docs/operations.md and docs/configuration.md for all
+            # MCP_TLS_* variables.
             #
             # Manual cert/key (e.g. a cert-manager Certificate mounted as a
             # Secret at /etc/mcp-tls). Hot-reloaded on renewal, no restart:

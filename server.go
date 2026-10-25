@@ -317,7 +317,7 @@ func sessionIDOf(ctx context.Context, req *mcp.CallToolRequest) string {
 // with an empty identity.
 //
 // Client name/version from InitializeRequest.Params would be a useful
-// addition — see the README's known-limitations section. Not done in this
+// addition. Not done in this
 // pass because the exact field path in the v1.4.1 SDK was not verified
 // against a running build; adding it is a one-line change once confirmed.
 func (s *Server) handleInitialized(ctx context.Context, req *mcp.InitializedRequest) {
@@ -349,7 +349,7 @@ func (s *Server) handleInitialized(ctx context.Context, req *mcp.InitializedRequ
 //
 // Both values come from configFromEnv (MCP_SESSION_MAX_AGE and
 // MCP_SESSION_JANITOR_INTERVAL) with safe defaults that should fit most
-// deployments — see the README's "Tuning the session janitor" section
+// deployments — see "Tuning the session janitor" in docs/configuration.md
 // for when to deviate.  We read them once at goroutine start; a config
 // reload would require restarting the process.
 //
