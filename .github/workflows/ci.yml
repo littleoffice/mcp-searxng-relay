@@ -5,24 +5,32 @@
 #
 # What it does:
 #   - lint:    golangci-lint over the Go code; actionlint over the workflow
-#              files themselves (catches YAML / Action-syntax bugs locally);
-#              check-doc-links.py over the Markdown links and #anchors.
+#              files themselves (catches YAML / Action-syntax bugs locally).
 #   - test:    go test with -race, -count=1 (no caching), and govulncheck.
 #   - build:   builds the container image to confirm the Dockerfile is still
 #              healthy. Does NOT push and does NOT attest -- those only happen
 #              on tagged release builds (see release.yml).
 #
-# Triggers are intentionally conservative: skip-ci on documentation-only pushes
-# would be nice-to-have but is omitted here so doc-impacting changes (link
-# anchors, example commands) still get the build sanity check.
+# A push or pull request that changes only Markdown or SVG files skips this
+# workflow: none of those files reaches the linter, the tests or the image, so
+# the run would re-prove the previous commit at the cost of a full Go build.
+# Documentation is checked by docs.yml instead, which runs on every change.
+# One mixed change (code plus docs) still runs everything. The daily schedule
+# is unaffected.
 
 name: CI
 
 on:
   push:
     branches: ['**']
+    paths-ignore:
+      - '**.md'
+      - '**.svg'
   pull_request:
     branches: [main]
+    paths-ignore:
+      - '**.md'
+      - '**.svg'
   schedule:
     # Daily at 05:37 UTC. The govulncheck step in the test job is only as
     # fresh as the last run: a stdlib advisory published during a quiet week
@@ -144,14 +152,6 @@ jobs:
             /tmp/download-actionlint.bash
           bash /tmp/download-actionlint.bash "${ACTIONLINT_VERSION}"
           ./actionlint -color
-
-      - name: Markdown links
-        # Every relative link and #anchor across README.md, docs/ and deploy/
-        # must resolve. A moved section or renamed heading otherwise leaves
-        # links that silently land at the top of the wrong page; the script
-        # header has the full reasoning. Standard-library Python, run on the
-        # runner's own python3, so it adds no dependency.
-        run: ./check-doc-links.py
 
   test:
     name: Test
