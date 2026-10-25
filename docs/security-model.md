@@ -18,7 +18,7 @@ The threats the relay is built against and the controls that answer them. Signed
 
 ## Prompt injection
 
-Both tools return content sourced from the open web — titles, snippets, and page bodies written by third parties. A malicious site can embed instructions in that content (including in invisible or hidden elements) in an attempt to hijack the agent's behaviour, cause unexpected tool calls, or exfiltrate conversation context. This is the primary runtime risk when using this server with an LLM agent.
+The tools return content sourced from the open web — titles, snippets, and page bodies written by third parties. A malicious site can embed instructions in that content (including in invisible or hidden elements) in an attempt to hijack the agent's behaviour, cause unexpected tool calls, or exfiltrate conversation context. This is the primary runtime risk when using this server with an LLM agent.
 
 For high-risk deployments, consider restricting the tools to a known allowlist of domains, running the agent with a minimal permission scope, and auditing tool call sequences in your application layer.
 
