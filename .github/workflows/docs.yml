@@ -1,0 +1,46 @@
+# .github/workflows/docs.yml
+#
+# Documentation checks. Runs on every push to any branch and on every pull
+# request targeting main -- including the Markdown- and SVG-only changes that
+# ci.yml skips, since those are exactly the changes that break a link.
+#
+# What it does:
+#   - links:   check-doc-links.py over every relative Markdown link and
+#              #anchor in the repository (README.md, docs/, deploy/).
+#
+# No path filter, deliberately. A code change can break a doc link too:
+# renaming or deleting a file the docs link to (the Dockerfile, a manifest
+# under deploy/) leaves the link dangling without touching a single .md file.
+# The job is a checkout and one standard-library Python script on the
+# runner's own python3 -- seconds, no Go toolchain, no native libraries -- so
+# running it everywhere costs less than deciding where it can be skipped.
+
+name: Docs
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Same cancellation policy as ci.yml: a newer push supersedes the old run.
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  links:
+    name: Markdown links
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Check relative links and #anchors
+        # A moved section or renamed heading otherwise leaves links that
+        # silently land at the top of the wrong page; the script header has
+        # the full reasoning.
+        run: ./check-doc-links.py
