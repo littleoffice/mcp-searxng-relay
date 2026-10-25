@@ -23,7 +23,7 @@ The shipped [`Caddyfile`](./Caddyfile) points at an internal ACME directory, whi
 - **Self-signed, local-only** — replace it with `tls internal`. The client will need the Caddy root in its trust store.
 - **Bring your own cert** — `tls /path/to/cert.pem /path/to/key.pem`, plus a bind-mount in [`docker-compose.yaml`](./docker-compose.yaml).
 
-Caddy also fronts SearXNG here, so this stack keeps it. If you only need the relay and would rather not run a reverse proxy, the relay can terminate TLS itself via `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME_DOMAINS` (including against a private step-ca) — see [TLS](../../README.md#tls) in the main README.
+Caddy also fronts SearXNG here, so this stack keeps it. If you only need the relay and would rather not run a reverse proxy, the relay can terminate TLS itself via `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME_DOMAINS` (including against a private step-ca) — see [TLS](../../docs/operations.md#tls).
 
 ## 3. Set the relay auth token
 
@@ -39,9 +39,9 @@ Then the fence signing key, which lets the verifying gateway in front of the rel
 sed -i "s|^FENCE_SIGNING_KEY=CHANGEME|FENCE_SIGNING_KEY=$(openssl rand -base64 32)|" envs/.mcp-searxng-relay.env
 ```
 
-For multi-tenant deployments (one token per agent / per user), see [Configuration](../../README.md#configuration) for `MCP_AUTH_TOKENS` and `MCP_AUTH_TOKEN_FILE`.
+For multi-tenant deployments (one token per agent / per user), see [Configuration](../../docs/configuration.md#environment-variables) for `MCP_AUTH_TOKENS` and `MCP_AUTH_TOKEN_FILE`.
 
-Alternatively, if you already run an identity provider, the relay can verify **OAuth 2.0 / OIDC** bearer JWTs instead of (or alongside) static tokens — set `MCP_OAUTH_ISSUER` and `MCP_OAUTH_AUDIENCE` and the HTTP-mode auth requirement is satisfied without any `MCP_AUTH_TOKEN`. See [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc).
+Alternatively, if you already run an identity provider, the relay can verify **OAuth 2.0 / OIDC** bearer JWTs instead of (or alongside) static tokens — set `MCP_OAUTH_ISSUER` and `MCP_OAUTH_AUDIENCE` and the HTTP-mode auth requirement is satisfied without any `MCP_AUTH_TOKEN`. See [OAuth 2.0 / OIDC](../../docs/configuration.md#oauth-20--oidc).
 
 ## 4. Bring it up
 

@@ -83,7 +83,7 @@ func identityFromContext(ctx context.Context) string {
 //
 // It is deliberately NOT consulted in stateful mode.  There the SDK issues a
 // real, validated ID, and the "true sessionless" configuration documented in
-// the README (ServerOptions.GetSessionID returning "") is an operator asking
+// docs/configuration.md (ServerOptions.GetSessionID returning "") is an operator asking
 // for no session IDs in their logs at all — a fallback that reinstated
 // client-supplied ones would quietly overturn that request.
 
@@ -325,7 +325,8 @@ func requireSharedSecret(
 // When no health token is configured the endpoint is open — the historical
 // behaviour, preserved so existing deployments keep working. Operators are
 // encouraged to set MCP_HEALTH_TOKEN whenever /health is reachable beyond the
-// local host; see the README for the load-balancer / Kubernetes caveat.
+// local host; see "Health endpoint" in docs/operations.md for the
+// load-balancer / Kubernetes caveat.
 func (s *Server) requireHealthAuth(next http.Handler) http.Handler {
 	if len(s.config.HealthToken) == 0 {
 		return next

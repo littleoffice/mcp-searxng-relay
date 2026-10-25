@@ -6,7 +6,7 @@ components — and two of them are not really caches at all, which matters when
 you are tuning them.
 
 This document is for operators sizing a deployment or diagnosing one. The
-per-variable reference is in the [README configuration table](../README.md#configuration).
+per-variable reference is in the [configuration reference](configuration.md#environment-variables).
 
 ## Contents
 

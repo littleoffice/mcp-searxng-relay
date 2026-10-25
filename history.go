@@ -326,7 +326,7 @@ func (h *fetchHistory) list() (records []fetchRecord, total, evicted int) {
 // half is whatever the client asserted — since go-sdk v1.7.0 the SDK does not
 // read Mcp-Session-Id at all in that mode, so the value comes from this
 // relay's own transport middleware (see clientSessionCtxKey) and is empty for
-// any client that sends no header.  The README documents a further
+// any client that sends no header.  docs/configuration.md documents a further
 // configuration in which it is empty for every request.  In all of those
 // cases several callers would collapse onto one key and a caller could be
 // handed another caller's fetched URLs — a cross-tenant leak in exactly the

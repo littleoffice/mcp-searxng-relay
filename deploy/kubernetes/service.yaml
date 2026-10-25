@@ -6,8 +6,8 @@ metadata:
     app: mcp-searxng
 spec:
   # ClusterIP because TLS termination is expected at the Ingress / gateway
-  # layer.  The MCP server itself speaks plain HTTP — see the main README
-  # "Security notes" section.  If you must expose the service outside the
+  # layer.  The MCP server itself speaks plain HTTP — see "TLS" in
+  # docs/operations.md.  If you must expose the service outside the
   # cluster without an Ingress, change this to LoadBalancer or NodePort
   # AND put a TLS-terminating reverse proxy in front of it.
   type: ClusterIP

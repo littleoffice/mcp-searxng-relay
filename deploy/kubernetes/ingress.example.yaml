@@ -1,7 +1,7 @@
 # Example Ingress that terminates TLS in front of the relay using cert-manager.
 #
 # This is the recommended way to expose the relay outside the cluster: the pod
-# keeps speaking plain HTTP (see the main README "Security notes"), and TLS is
+# keeps speaking plain HTTP (see "TLS" in docs/operations.md), and TLS is
 # terminated here with a certificate cert-manager obtains and renews for you.
 #
 # Like secret.example.yaml, this file is deliberately NOT listed in

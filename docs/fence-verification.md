@@ -124,8 +124,8 @@ What changes for a verifier:
 - **There is no meta-preamble in front of the trusted fence.** That regress is
   infinite and would reintroduce the unsigned span the layout exists to remove.
 - **The preamble wording is not fixed.** When the relay removed hidden text
-  from a response (invisible characters; see the README's *Hidden-text
-  removal*), the preamble gains one fixed, relay-authored sentence saying so,
+  from a response (invisible characters; see [Hidden-text
+  removal](security-model.md#hidden-text-removal)), the preamble gains one fixed, relay-authored sentence saying so,
   in both layouts. Do not compare the preamble against a stored string. The
   structural contract is unchanged: the body names exactly one `nonce="…"`,
   and it is the content fence's. Relay-authored notes never go inside the

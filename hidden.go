@@ -36,7 +36,7 @@ import (
 //     opacity:0 or font-size:0, parsed tolerantly (see inlineStyleHides).
 //
 // Hiding done through a stylesheet or a class name cannot be detected without
-// a full CSS engine and is out of scope; the README says so.
+// a full CSS engine and is out of scope; docs/security-model.md says so.
 //
 // FETCH_KEEP_HIDDEN_TEXT=true turns it off.
 

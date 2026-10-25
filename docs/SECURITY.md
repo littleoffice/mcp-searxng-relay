@@ -110,15 +110,15 @@ starting points:
 
 - **SSRF protection** for the URL-fetch tool — private and reserved IP ranges
   are rejected at TCP-dial time, and redirect chains are re-validated at every
-  hop. See the "Security notes" section of the main `README.md`.
+  hop. See [SSRF protection](security-model.md#ssrf-protection).
 - **Bearer-token authentication** with a multi-token table and per-identity
   audit logging, or **OAuth 2.0 / OIDC** JWT verification against an external
   identity provider (`MCP_OAUTH_ISSUER`) — the relay acts only as a Resource
   Server (it verifies tokens, never issues them), accepts only asymmetric
   signing algorithms (closing the RS256→HS256 key-confusion class), and derives
   the audit identity from a token claim. The two mechanisms can run side by
-  side. See the "Security notes" and "OAuth 2.0 / OIDC" sections of the main
-  `README.md`.
+  side. See [Authentication](security-model.md#authentication) and
+  [OAuth 2.0 / OIDC](configuration.md#oauth-20--oidc).
 - **Cross-origin / CSRF protection** on the HTTP transport, applied by the
   go-sdk wrapper introduced as the fix for CVE-2026-33252. Browser-originated
   POSTs with cross-origin `Sec-Fetch-Site` / `Origin` headers, and POSTs
@@ -128,10 +128,10 @@ starting points:
 - **Per-caller rate limiting** on the HTTP transport, keyed by identity when
   authenticated and falling back to source IP otherwise. Defends against
   runaway agents and brute-force token guessing. Configurable per deployment;
-  see the main `README.md` for the variables and tuning notes.
+  see [Rate limiting](configuration.md#rate-limiting) for the variables and tuning notes.
 - **Prompt fencing** of all tool output, implementing the scheme from
   arXiv:2511.19727, with an honest statement of what that does and does not
-  provide in the README. The awareness preamble is signed by default (format
+  provide in [Prompt fencing](prompt-fencing.md). The awareness preamble is signed by default (format
   1.1), so the verifying gateway the relay runs behind can fail closed on any
   unsigned text. Deployments supply a persistent signing key via
   `FENCE_SIGNING_KEY` / `FENCE_SIGNING_KEY_FILE`, moving the trust anchor to
@@ -152,7 +152,7 @@ starting points:
   elements a browser would not render (`hidden`, `aria-hidden`, `<template>`,
   hidden inputs, hiding inline styles) before extraction. Each removal is
   counted, logged and noted in the response's awareness preamble. Hiding via
-  stylesheets or classes is out of scope; the README states the limits.
+  stylesheets or classes is out of scope; [Hidden-text removal](security-model.md#hidden-text-removal) states the limits.
 - **Dependency hygiene** — a deliberately small dependency tree, a pinned build
   toolchain, and a minimal `scratch`-based runtime image. Detailed in
   [supply-chain.md](supply-chain.md).

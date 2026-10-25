@@ -147,8 +147,9 @@ type Config struct {
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
 	// finds attractive can have that container selected instead of the
-	// article — silently, with no error and plausible-looking text. See the
-	// README for the default and how it was derived.
+	// article — silently, with no error and plausible-looking text. See
+	// PRUNE_SELECTOR in docs/configuration.md for the default and how it was
+	// derived.
 	//
 	// PRUNE_SELECTOR overrides it; setting it to the empty string disables
 	// pruning entirely (unset and empty are distinguished via os.LookupEnv).
@@ -483,7 +484,7 @@ func parseBoolDefault(s string, defaultVal bool) bool {
 //
 // Note: time.ParseDuration's unit set is ns/us/µs/ms/s/m/h.  "d" and "w"
 // are NOT supported, despite being the units operators naturally reach
-// for.  The README explicitly tells them to write "168h" for a week;
+// for.  docs/configuration.md explicitly tells them to write "168h" for a week;
 // this helper does no translation of its own to keep the format stable
 // with anything else that reads the same env var.
 func parseGoDuration(s string, defaultVal time.Duration) time.Duration {

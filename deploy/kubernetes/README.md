@@ -44,7 +44,7 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
 > the HTTP-mode auth requirement is met without `MCP_AUTH_TOKEN_FILE`. For a
 > private in-cluster issuer whose CA is not publicly trusted, mount its roots
 > and point `MCP_OAUTH_CA_ROOTS` at them. See
-> [OAuth 2.0 / OIDC](../../README.md#oauth-20--oidc) in the main README.
+> [OAuth 2.0 / OIDC](../../docs/configuration.md#oauth-20--oidc) in the configuration reference.
 
 ## What's in here
 
@@ -58,11 +58,11 @@ Manifests for running `mcp-searxng-relay` in a Kubernetes cluster.
 
 ## Deployment shapes
 
-The main repo README discusses stateful vs stateless modes at length. The K8s-specific implications:
+[Session modes](../../docs/configuration.md#session-modes) discusses stateful vs stateless modes at length. The K8s-specific implications:
 
 ### Single replica, stateful — *the default in these manifests*
 
-Audit correlation works as designed: each agent gets one session ID for its lifetime, every tool-call log line carries `session_id` and `identity`, joining them post-hoc is trivial. The trade-off is that any rollout — image bump, env change, secret rotation — drops all sessions briefly. Agents have to re-`initialize`, and many MCP clients handle that badly (the main README documents which ones).
+Audit correlation works as designed: each agent gets one session ID for its lifetime, every tool-call log line carries `session_id` and `identity`, joining them post-hoc is trivial. The trade-off is that any rollout — image bump, env change, secret rotation — drops all sessions briefly. Agents have to re-`initialize`, and many MCP clients handle that badly (see [Session modes](../../docs/configuration.md#session-modes)).
 
 If audit correlation is the reason you're running this in K8s at all, this is the right starting point.
 
@@ -113,7 +113,7 @@ Two supported shapes:
 
 - **Terminate at an Ingress (recommended).** The pod stays on plain HTTP and cert-manager obtains/renews the certificate. `ingress.example.yaml` is a ready-to-edit template with the `cert-manager.io/cluster-issuer` annotation, a `tls:` block, and a commented Let's Encrypt `ClusterIssuer` (point it at a private ACME CA — e.g. step-ca — by changing `spec.acme.server` and, if its cert is not publicly trusted, `spec.acme.caBundle`). It is not in `kustomization.yaml`; copy it to `ingress.yaml`, edit the host/class, and apply.
 
-- **In-pod TLS.** If you run the relay by itself with no Ingress, it can serve HTTPS directly via the `MCP_TLS_*` variables (see the main README "TLS" section). `deployment.yaml` carries commented entries for both the manual-cert and ACME modes, plus the `443` port, the cert Secret mount, and the writable `emptyDir` ACME cache (which keeps `readOnlyRootFilesystem: true`). For manual certs, a cert-manager `Certificate` resource writing to a Secret pairs well — the relay hot-reloads the pair on renewal without a restart.
+- **In-pod TLS.** If you run the relay by itself with no Ingress, it can serve HTTPS directly via the `MCP_TLS_*` variables (see [TLS](../../docs/operations.md#tls)). `deployment.yaml` carries commented entries for both the manual-cert and ACME modes, plus the `443` port, the cert Secret mount, and the writable `emptyDir` ACME cache (which keeps `readOnlyRootFilesystem: true`). For manual certs, a cert-manager `Certificate` resource writing to a Secret pairs well — the relay hot-reloads the pair on renewal without a restart.
 
 ## Things deliberately omitted
 
@@ -124,10 +124,10 @@ Two supported shapes:
 
 ## Rate limiting and multi-replica deployments
 
-The server ships with per-caller rate limiting enabled by default (5 rps sustained, burst 10, see the main README for `MCP_RATE_LIMIT_*` variables). Two K8s-specific notes worth being aware of:
+The server ships with per-caller rate limiting enabled by default (5 rps sustained, burst 10, see [Rate limiting](../../docs/configuration.md#rate-limiting) for the `MCP_RATE_LIMIT_*` variables). Two K8s-specific notes worth being aware of:
 
 - **Buckets are in-process, not shared across pods.** Each replica maintains its own token-bucket store. In a multi-replica deployment a caller's effective rate is `(replicas × MCP_RATE_LIMIT_RPS)` if traffic is round-robined, with the floor being `MCP_RATE_LIMIT_RPS` when sticky-session routing pins them to one pod. This is usually what you want — the limit scales with the cluster — but if you need a globally-enforced budget, terminate the limit at the Ingress layer instead and set `MCP_RATE_LIMIT_RPS=0` on the pods.
-- **Exempt your monitoring scraper.** Prometheus's `/metrics` polling itself is not rate-limited (see the main README's "Rate limiting" section), but any other identity you use for monitoring or CI that hits `/` should be added to `MCP_RATE_LIMIT_EXEMPT`. Example: set `MCP_RATE_LIMIT_EXEMPT=ci,uptime-monitor` in the Deployment's env so those identities skip the limiter entirely.
+- **Exempt your monitoring scraper.** Prometheus's `/metrics` polling itself is not rate-limited (see [Rate limiting](../../docs/configuration.md#rate-limiting)), but any other identity you use for monitoring or CI that hits `/` should be added to `MCP_RATE_LIMIT_EXEMPT`. Example: set `MCP_RATE_LIMIT_EXEMPT=ci,uptime-monitor` in the Deployment's env so those identities skip the limiter entirely.
 
 ## External secret stores
 
