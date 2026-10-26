@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,24 @@ func TestTokenBucket_RetryAtLeastOneSecond(t *testing.T) {
 	_, retry := b.allow(1000.0, 1)
 	if retry < time.Second {
 		t.Errorf("retry should be clamped to >= 1s, got %s", retry)
+	}
+}
+
+// peek reports what allow would decide without spending: a bucket's last
+// token is still there after any number of peeks, and an empty bucket peeks
+// as denied with a retry hint.
+func TestTokenBucket_PeekDoesNotSpend(t *testing.T) {
+	b := &tokenBucket{}
+	for i := 0; i < 5; i++ {
+		if ok, _ := b.peek(1.0, 1); !ok {
+			t.Fatalf("peek %d on a full bucket was denied", i+1)
+		}
+	}
+	if ok, _ := b.allow(1.0, 1); !ok {
+		t.Fatal("the token peeked at should still be there")
+	}
+	if ok, retry := b.peek(1.0, 1); ok || retry <= 0 {
+		t.Errorf("peek on an empty bucket: ok=%v retry=%s, want denied with a retry", ok, retry)
 	}
 }
 
@@ -418,5 +437,125 @@ func TestRateLimitMiddleware_PerIPIsolation(t *testing.T) {
 	}
 	if got := hit("10.0.0.2:1"); got != http.StatusOK {
 		t.Errorf("ip B should have a fresh bucket: got %d", got)
+	}
+}
+
+// ── OAuth callers ─────────────────────────────────────────────────────────────
+
+// oauthLimitedServer builds a Server with OAuth on (static JWKS file, no
+// network) and the given limiter, plus a function that mints a token for a
+// subject. The returned handler is the MCP root's admission chain.
+func oauthLimitedServer(t *testing.T, rate float64, burst int, exempt []string) (*Server, http.Handler, func(sub string) string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "jwks.json")
+	priv, pub := oauthTestKey(t, "k1")
+	oauthWriteJWKS(t, path, pub)
+	s := &Server{
+		config:      Config{OAuth: fileModeSettings(t, path, nil)},
+		rateLimiter: newRateLimiter(rate, burst, exempt),
+	}
+	h := s.authGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	token := func(sub string) string {
+		c := oauthBaseClaims()
+		c["sub"] = sub
+		return oauthSignToken(t, priv, "k1", c)
+	}
+	return s, h, token
+}
+
+func hitWithToken(h http.Handler, remote, token string) int {
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.RemoteAddr = remote
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	return w.Code
+}
+
+// OAuth callers arriving from one address — every caller behind a gateway, a
+// reverse proxy or a NAT — each get a bucket of their own. They used to share
+// the address's bucket, because the limiter runs before the JWT is verified
+// and only recognised static tokens: one caller could spend everyone's budget,
+// and see from its own 429s when the others were busy.
+func TestRateLimit_OAuthCallersBehindOneAddressGetTheirOwnBuckets(t *testing.T) {
+	_, h, token := oauthLimitedServer(t, 1.0, 1, nil)
+	const gateway = "10.9.9.9:4000"
+	a, b := token("user-a"), token("user-b")
+
+	if got := hitWithToken(h, gateway, a); got != http.StatusOK {
+		t.Fatalf("user-a first call: got %d, want 200", got)
+	}
+	if got := hitWithToken(h, gateway, a); got != http.StatusTooManyRequests {
+		t.Fatalf("user-a past its burst: got %d, want 429", got)
+	}
+	if got := hitWithToken(h, gateway, b); got != http.StatusOK {
+		t.Errorf("user-b from the same address: got %d, want 200 (its own bucket)", got)
+	}
+}
+
+// MCP_RATE_LIMIT_EXEMPT names identities, and an OAuth subject is one.
+func TestRateLimit_OAuthIdentityCanBeExempt(t *testing.T) {
+	_, h, token := oauthLimitedServer(t, 1.0, 1, []string{"monitor"})
+	tok := token("monitor")
+	for i := 0; i < 10; i++ {
+		if got := hitWithToken(h, "10.9.9.9:4000", tok); got != http.StatusOK {
+			t.Fatalf("exempt OAuth identity, call %d: got %d, want 200", i+1, got)
+		}
+	}
+}
+
+// Tokens that fail verification are billed to their source address, and once
+// that budget is spent the address is refused before any JWT is verified —
+// valid tokens from it included, so a guessing flood cannot hide behind them.
+// Another address is unaffected.
+func TestRateLimit_FailedOAuthTokensChargeTheSourceAddress(t *testing.T) {
+	s, h, token := oauthLimitedServer(t, 1.0, 2, nil)
+	const attacker = "10.6.6.6:4000"
+
+	for i := 0; i < 2; i++ {
+		if got := hitWithToken(h, attacker, "not-a-jwt"); got != http.StatusUnauthorized {
+			t.Fatalf("bad token %d: got %d, want 401", i+1, got)
+		}
+	}
+	if got := hitWithToken(h, attacker, "not-a-jwt"); got != http.StatusTooManyRequests {
+		t.Errorf("bad token past the address's budget: got %d, want 429", got)
+	}
+	if got := hitWithToken(h, attacker, token("user-a")); got != http.StatusTooManyRequests {
+		t.Errorf("valid token from the exhausted address: got %d, want 429", got)
+	}
+	if got := hitWithToken(h, "10.1.1.1:4000", token("user-a")); got != http.StatusOK {
+		t.Errorf("valid token from another address: got %d, want 200", got)
+	}
+	if got := authCount(&s.metrics, "mcp"); got != 2 {
+		t.Errorf("mcp_auth_failures_total = %d, want 2: refused requests never reach the token check", got)
+	}
+}
+
+// A static token is billed to its identity before authentication, as it always
+// was; turning OAuth on beside it changes nothing for it.
+func TestRateLimit_StaticTokenUnchangedWithOAuthOn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "jwks.json")
+	_, pub := oauthTestKey(t, "k1")
+	oauthWriteJWKS(t, path, pub)
+	staticTok := "0123456789abcdef0123456789abcdef"
+	s := &Server{
+		config: Config{
+			AuthTokens: map[tokenDigest]string{sha256.Sum256([]byte("Bearer " + staticTok)): "alice"},
+			OAuth:      fileModeSettings(t, path, nil),
+		},
+		rateLimiter: newRateLimiter(1.0, 1, nil),
+	}
+	h := s.authGate(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	if got := hitWithToken(h, "10.0.0.1:1", staticTok); got != http.StatusOK {
+		t.Fatalf("static token first call: got %d, want 200", got)
+	}
+	if got := hitWithToken(h, "10.0.0.2:1", staticTok); got != http.StatusTooManyRequests {
+		t.Errorf("static token from another address shares its identity's bucket: got %d, want 429", got)
 	}
 }

@@ -481,15 +481,17 @@ func runHTTP(cfg Config, server *Server, port string) {
 	)
 
 	mux := http.NewServeMux()
-	// MCP root: per-caller rate limit → bearer auth → conversation ID → soft
-	// session cap → SDK handler.
+	// MCP root: authGate (per-caller rate limit → bearer auth → rate limit
+	// for OAuth callers) → conversation ID → soft session cap → SDK handler.
 	//
 	// Rate limit sits on the OUTSIDE so unauthenticated brute-force traffic
 	// from a single IP gets throttled at the network edge instead of
 	// burning unbounded auth-check cycles.  callerKey() does its own
-	// Authorization-header hash lookup (mirroring requireAuth), so authed
-	// callers still get per-identity buckets; unauthed and wrong-token
-	// callers fall back to per-IP buckets.  See rate_limit.go.
+	// Authorization-header hash lookup (mirroring requireAuth), so static-
+	// token callers still get per-identity buckets; unauthed and wrong-token
+	// callers fall back to per-IP buckets.  An OAuth caller's identity is
+	// known only after requireAuth, so it is billed there, by
+	// rateLimitVerified.  See rate_limit.go.
 	//
 	// Cost of this ordering: authed requests hash the Authorization header
 	// twice (once in callerKey, once in requireAuth).  Two SHA-256s of a
@@ -499,7 +501,7 @@ func runHTTP(cfg Config, server *Server, port string) {
 	// mode: it attaches the client-asserted conversation ID that the SDK
 	// stopped reading in go-sdk v1.7.0, so audit lines and the per-caller
 	// source ledger can still tell two conversations under one token apart.
-	mux.Handle("/", server.rateLimit(server.requireAuth(server.trackClientSession(server.limitSessions(mcpHandler)))))
+	mux.Handle("/", server.authGate(server.trackClientSession(server.limitSessions(mcpHandler))))
 	// /health is open by default for load balancers, and intentionally NOT
 	// rate-limited so a polling LB never gets 429. requireHealthAuth gates it
 	// behind MCP_HEALTH_TOKEN when that is set (a no-op wrapper otherwise);

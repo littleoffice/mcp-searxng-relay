@@ -126,7 +126,8 @@ starting points:
   MCP handler. Non-browser API clients (curl, Go `http.Client`, AI-agent
   traffic) are unaffected.
 - **Per-caller rate limiting** on the HTTP transport, keyed by identity when
-  authenticated and falling back to source IP otherwise. Defends against
+  authenticated (static token or OAuth subject) and falling back to source IP
+  otherwise. Defends against
   runaway agents and brute-force token guessing. Configurable per deployment;
   see [Rate limiting](configuration.md#rate-limiting) for the variables and tuning notes.
 - **Prompt fencing** of all tool output, implementing the scheme from

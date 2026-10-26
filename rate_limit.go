@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
@@ -16,12 +17,26 @@ import (
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 //
-// Per-caller token-bucket throttle applied to the MCP root and /metrics.
-// Two scopes: when the request carries a recognised bearer token the bucket
-// is keyed by identity ("id:<name>"), and otherwise by the remote IP
-// ("ip:<addr>").  This gives authenticated callers a usage budget that is
-// shared across all sources presenting the same token, and gives a brute-
-// force defence against unauthenticated POST floods from a single IP.
+// Per-caller token-bucket throttle applied to the MCP root.  Two scopes:
+// authenticated requests are billed to their identity ("id:<name>"), and
+// everything else to the remote IP ("ip:<addr>").  This gives authenticated
+// callers a usage budget that is shared across all sources presenting the
+// same credential, and gives a brute-force defence against unauthenticated
+// POST floods from a single IP.
+//
+// Two stages, because a static token and an OAuth JWT are identified at
+// different points.  rateLimit runs before requireAuth and bills a static
+// token to its identity there, by the same digest lookup requireAuth uses.
+// A JWT's identity is known only once requireAuth has verified it, so a
+// bearer token the static table does not know is let through uncharged when
+// OAuth is on, and billed afterwards: by rateLimitVerified to the identity
+// requireAuth found, or by requireAuth to the source IP when verification
+// fails.  Billing such tokens to the source IP up front put every OAuth
+// caller behind one gateway, reverse proxy or NAT into one bucket: one caller
+// could spend everyone's budget, and tell from its own 429s when the others
+// were busy.  The IP bucket still guards the verification itself: rateLimit
+// checks it without charging it, so an address whose bad tokens have spent
+// its budget is refused before any signature is checked.
 //
 // Why stdlib only: a token bucket is small (~30 lines of arithmetic), and
 // the project explicitly treats its dependency tree as a security property
@@ -30,10 +45,11 @@ import (
 // more dependency to track.
 //
 // Bucket storage is an LRU keyed by the scope string above, capped at
-// rateBucketCacheSize.  Identities are bounded by the auth-token table so
-// they all fit comfortably; the cap exists to bound IP-keyed entries when
-// an attacker rotates source addresses.  Eviction of an idle bucket has
-// no semantic effect — the next request just refills a fresh bucket.
+// rateBucketCacheSize.  Static identities are bounded by the auth-token
+// table and OAuth identities by the users of one identity provider, so they
+// fit comfortably; the cap exists to bound IP-keyed entries when an attacker
+// rotates source addresses.  Eviction of an idle bucket has no semantic
+// effect — the next request just refills a fresh bucket.
 
 // rateBucketCacheSize caps the number of distinct caller buckets we hold
 // in memory.  With ~40 bytes per bucket, 10k entries is ~400 KiB, which
@@ -68,6 +84,18 @@ type tokenBucket struct {
 // and Since uses it.  Negative elapsed (clock-fiddling, very rare) is
 // clamped to zero rather than withdrawing tokens.
 func (b *tokenBucket) allow(rate float64, burst int) (bool, time.Duration) {
+	return b.take(rate, burst, true)
+}
+
+// peek reports what allow would decide, without spending a token.
+func (b *tokenBucket) peek(rate float64, burst int) (bool, time.Duration) {
+	return b.take(rate, burst, false)
+}
+
+// take refills the bucket and, when a token is available, spends it if
+// consume is set.  The refill is applied either way: it is a function of
+// elapsed time, not of the decision.
+func (b *tokenBucket) take(rate float64, burst int, consume bool) (bool, time.Duration) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -86,7 +114,9 @@ func (b *tokenBucket) allow(rate float64, burst int) (bool, time.Duration) {
 	b.last = now
 
 	if b.tokens >= 1 {
-		b.tokens -= 1
+		if consume {
+			b.tokens -= 1
+		}
 		return true, 0
 	}
 
@@ -187,6 +217,47 @@ func (rl *rateLimiter) allow(key string) (bool, time.Duration) {
 	return rl.bucketFor(key).allow(rl.rate, rl.burst)
 }
 
+// peek reports whether key's bucket would admit a request, without spending
+// a token.
+func (rl *rateLimiter) peek(key string) (bool, time.Duration) {
+	if !rl.enabled() {
+		return true, 0
+	}
+	return rl.bucketFor(key).peek(rl.rate, rl.burst)
+}
+
+// exempted reports whether identity bypasses the limiter.
+func (rl *rateLimiter) exempted(identity string) bool {
+	_, ok := rl.exempt[identity]
+	return identity != "" && ok
+}
+
+// deferredKeyCtxKey carries, from rateLimit to requireAuth and
+// rateLimitVerified, the IP bucket key of a request whose billing waits for
+// authentication.  Its presence is the marker: the request has not been
+// charged yet.
+type deferredKeyCtxKey struct{}
+
+func withDeferredKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, deferredKeyCtxKey{}, key)
+}
+
+// deferredKey returns the IP bucket key rateLimit left uncharged, or "" when
+// the request was billed before authentication.
+func deferredKey(ctx context.Context) string {
+	key, _ := ctx.Value(deferredKeyCtxKey{}).(string)
+	return key
+}
+
+// chargeFailedAuth bills a request whose billing was deferred and whose
+// credential then failed: to its source IP, which is all that is known about
+// it.  A no-op for requests rateLimit already charged.
+func (s *Server) chargeFailedAuth(r *http.Request) {
+	if key := deferredKey(r.Context()); key != "" {
+		s.rateLimiter.allow(key)
+	}
+}
+
 // callerKey returns the bucket key for a request, plus the identity (or
 // "" if the caller is unauthenticated or its token is unrecognised) for
 // logging.  Identity matching mirrors requireAuth: hash the Authorization
@@ -232,27 +303,71 @@ func (s *Server) rateLimit(next http.Handler) http.Handler {
 		// Exempt identities bypass the limiter entirely.  We don't
 		// bother creating a bucket for them; the exempt list is
 		// typically a handful of names (monitoring scrapers, CI).
-		if identity != "" {
-			if _, ok := s.rateLimiter.exempt[identity]; ok {
-				next.ServeHTTP(w, r)
+		if s.rateLimiter.exempted(identity) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// A bearer token the static table does not know may be an OAuth
+		// JWT, whose identity requireAuth has yet to establish.  Check the
+		// source IP's bucket without charging it, and leave the billing to
+		// rateLimitVerified, or to requireAuth if the token fails.
+		if identity == "" && s.config.OAuth.enabled() && bearerToken(r.Header.Get("Authorization")) != "" {
+			if ok, retry := s.rateLimiter.peek(key); !ok {
+				s.rejectRateLimited(w, r, identity, retry)
 				return
 			}
+			next.ServeHTTP(w, r.WithContext(withDeferredKey(r.Context(), key)))
+			return
 		}
-		ok, retry := s.rateLimiter.allow(key)
-		if !ok {
-			s.metrics.RateLimitRejections.Add(1)
-			slog.Warn("rate limit exceeded",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"remote", r.RemoteAddr,
-				"identity", identity,
-				"retry_after", retry.String())
-			w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
-			http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		if ok, retry := s.rateLimiter.allow(key); !ok {
+			s.rejectRateLimited(w, r, identity, retry)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// rateLimitVerified bills a request whose billing rateLimit deferred to the
+// identity requireAuth verified, and passes every other request through.  It
+// sits directly after requireAuth.
+func (s *Server) rateLimitVerified(next http.Handler) http.Handler {
+	if !s.rateLimiter.enabled() {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		key := deferredKey(r.Context())
+		if key == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		identity := identityFromContext(r.Context())
+		if s.rateLimiter.exempted(identity) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if identity != "" {
+			key = "id:" + identity
+		}
+		if ok, retry := s.rateLimiter.allow(key); !ok {
+			s.rejectRateLimited(w, r, identity, retry)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// rejectRateLimited answers 429 with Retry-After, counts the rejection, and
+// logs it with the fields requireAuth uses.
+func (s *Server) rejectRateLimited(w http.ResponseWriter, r *http.Request, identity string, retry time.Duration) {
+	s.metrics.RateLimitRejections.Add(1)
+	slog.Warn("rate limit exceeded",
+		"method", r.Method,
+		"path", r.URL.Path,
+		"remote", r.RemoteAddr,
+		"identity", identity,
+		"retry_after", retry.String())
+	w.Header().Set("Retry-After", strconv.Itoa(int(retry.Seconds())))
+	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 }
 
 // rateLimitDescription renders a human-readable limiter summary for the
