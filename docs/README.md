@@ -14,5 +14,5 @@ Reference documentation for mcp-searxng-relay. The project overview, features an
 | [Logging and metrics](observability.md) | Startup banner, log fields, Prometheus series |
 | [Caches](caching.md) | Inventory of every cache and bounded store, and how to size them |
 | [Fence verification contract](fence-verification.md) | Normative wire format and verification procedure for verifiers |
-| [Supply-chain statement](supply-chain.md) | Dependencies, build provenance, reproducibility, known gaps |
+| [Supply-chain statement](supply-chain.md) | How the code was written, dependencies, build provenance, reproducibility, known gaps |
 | [Security policy](SECURITY.md) | Supported versions and how to report a vulnerability |

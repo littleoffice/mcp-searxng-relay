@@ -175,6 +175,8 @@ Every variable, with its default: [docs/configuration.md](docs/configuration.md)
 
 None of these makes a model ignore instructions written in content it reads; a signature proves where bytes came from, not that they are safe to act on. See [Prompt injection](docs/security-model.md#prompt-injection).
 
+**How the code was written.** The project is entirely AI-generated: an AI assistant (Claude) wrote the code, the documentation, and the build and deployment files. One maintainer directs the work, decides which changes are merged, and builds and tests every release. What that means for a reviewer is in the [development process](docs/supply-chain.md#development-process).
+
 Report vulnerabilities privately: [docs/SECURITY.md](docs/SECURITY.md). Build provenance: [docs/supply-chain.md](docs/supply-chain.md).
 
 ---
@@ -193,7 +195,7 @@ Report vulnerabilities privately: [docs/SECURITY.md](docs/SECURITY.md). Build pr
 | [Logging and metrics](docs/observability.md) | Startup banner, log fields, Prometheus series |
 | [Caches](docs/caching.md) | Inventory of every cache and bounded store, and how to size them |
 | [Fence verification contract](docs/fence-verification.md) | Normative wire format and verification procedure for verifiers |
-| [Supply-chain statement](docs/supply-chain.md) | Dependencies, build provenance, reproducibility, known gaps |
+| [Supply-chain statement](docs/supply-chain.md) | How the code was written, dependencies, build provenance, reproducibility, known gaps |
 | [Security policy](docs/SECURITY.md) | Supported versions and how to report a vulnerability |
 
 ---
@@ -207,4 +209,8 @@ Report vulnerabilities privately: [docs/SECURITY.md](docs/SECURITY.md). Build pr
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE).
+Copyright (C) 2026 littleoffice
+
+Licensed under the GNU Affero General Public License, version 3; see [LICENSE](LICENSE).
+
+In plain words: you may use, change, and build commercial services on this software. If you distribute it, or let other people use a modified version over a network, you must offer them its complete source under the same license. This summary is a reading aid; the license text is what applies.

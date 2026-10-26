@@ -7,7 +7,7 @@ question — see [supply-chain.md](supply-chain.md).
 
 This project is maintained by a single individual: the holder of the GitHub
 account with admin rights on the repository. References to "the maintainer"
-below mean that person. The codebase is primarily AI-generated and
+below mean that person. The codebase is entirely AI-generated and
 human-reviewed; [supply-chain.md](supply-chain.md#development-process) describes
 that process in full, and it is relevant context for how security reports are
 handled — every fix, like every other change, is reviewed, built, and tested by
