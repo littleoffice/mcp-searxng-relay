@@ -140,4 +140,4 @@ PDF extraction uses `pdf_oxide` and Office extraction (DOCX/XLSX/PPTX + legacy D
 
 ## Reporting and provenance
 
-Security issues should be reported privately — see [`SECURITY.md`](SECURITY.md) for the disclosure process and scope. The codebase is primarily AI-generated and reviewed, built, and tested by a single human maintainer before release; [`supply-chain.md`](supply-chain.md) is the full dependency, build-provenance, and development-process statement, written for reviewers evaluating the project for a controlled environment.
+Security issues should be reported privately — see [`SECURITY.md`](SECURITY.md) for the disclosure process and scope. The codebase is entirely AI-generated and reviewed, built, and tested by a single human maintainer before release; [`supply-chain.md`](supply-chain.md) is the full dependency, build-provenance, and development-process statement, written for reviewers evaluating the project for a controlled environment.
