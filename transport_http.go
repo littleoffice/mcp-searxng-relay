@@ -222,6 +222,9 @@ func elapsedMillis(start time.Time) int64 {
 // downstream handlers to log.  On failure: 401 with WWW-Authenticate per
 // RFC 6750 §3, and a warn-level log including the remote address (but
 // never the offered Authorization header — that would leak guesses).
+//
+// The MCP root reaches it through authGate, which puts the rate limit on
+// both sides of it.
 func (s *Server) requireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		staticOn := len(s.config.AuthTokens) > 0
@@ -267,6 +270,10 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		// surface, and splitting it by mechanism would let a caller move the
 		// needle between series by choosing a header format.
 		s.metrics.recordAuthFailure("mcp")
+		// rateLimit let this request through uncharged if it carried a token
+		// that might have been a JWT; it was not one that verifies, so bill
+		// its source address.
+		s.chargeFailedAuth(r)
 
 		// Point OAuth clients at the metadata document (RFC 9728 §5.1) so they
 		// can discover where to authenticate; the raw Authorization header is
@@ -281,6 +288,14 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 			"method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr)
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	})
+}
+
+// authGate is the MCP root's admission: the rate limit that runs before
+// authentication, requireAuth, and the rate limit for callers only
+// authentication can identify (see rate_limit.go).  The order is the
+// mechanism, so main.go and the tests both build it here.
+func (s *Server) authGate(next http.Handler) http.Handler {
+	return s.rateLimit(s.requireAuth(s.rateLimitVerified(next)))
 }
 
 // requireSharedSecret wraps next with a check against a single-shared-secret
