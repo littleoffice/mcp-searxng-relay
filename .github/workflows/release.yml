@@ -1,7 +1,8 @@
 # .github/workflows/release.yml
 #
 # Release workflow. Triggered by pushing a tag matching v* (e.g. v1.0.0,
-# v1.0.0-rc1). Builds the container image reproducibly, pushes it to GHCR,
+# v1.0.0-rc1). First runs the full CI pipeline (ci.yml) on the tagged
+# revision; only if that passes, builds the container image reproducibly, pushes it to GHCR,
 # generates SLSA build provenance and SBOM attestations using GitHub's
 # native attestation actions, and creates a GitHub Release with the
 # attestation digests in the body.
@@ -38,8 +39,18 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # The full CI pipeline (lint, go vet, go test, govulncheck, container
+  # sanity build) on the tagged revision. Nothing is pushed, signed or
+  # released unless it passes.
+  ci:
+    name: CI
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   release:
     name: Build, push, attest, release
+    needs: ci
     runs-on: ubuntu-latest
     outputs:
       image-digest: ${{ steps.build.outputs.digest }}
