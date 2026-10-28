@@ -12,7 +12,7 @@ require (
 	github.com/yfedoseev/office_oxide/go v0.1.13
 	github.com/yfedoseev/pdf_oxide/go v0.3.78
 	golang.org/x/crypto v0.58.0
-	golang.org/x/net v0.61.0
+	golang.org/x/net v0.62.0
 )
 
 require (
