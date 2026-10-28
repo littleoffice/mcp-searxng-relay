@@ -1,7 +1,8 @@
 # .github/workflows/ci.yml
 #
 # Continuous-integration workflow. Runs on every push to any branch and on
-# every pull request targeting main.
+# every pull request targeting main, and as the first job of every tagged
+# release (release.yml calls it and builds nothing unless it passes).
 #
 # What it does:
 #   - lint:    golangci-lint over the Go code; actionlint over the workflow
@@ -38,6 +39,9 @@ on:
     # daily re-asks the question against the current vulnerability database.
     # Off-the-hour minute to avoid GitHub's scheduler thundering herd.
     - cron: '37 5 * * *'
+  # release.yml calls this workflow so a tag is never built from a revision
+  # that fails lint, tests or govulncheck.
+  workflow_call:
 
 permissions:
   contents: read

@@ -245,6 +245,10 @@ that the result is auditable and reproducible:
   the build produces a byte-identical image. Two operators running the
   canonical invocation on the same tagged commit should get matching
   `podman save <image> | sha256sum` digests.
+- **Releases gated on CI.** A tagged release first runs the full CI pipeline
+  (`.github/workflows/ci.yml`: lint, tests, govulncheck, container build) on
+  the tagged revision; the release job waits on it, so a tag whose revision
+  fails any check builds and publishes nothing.
 - **Signed and attested releases.** Tagged releases (`.github/workflows/release.yml`)
   build the image reproducibly, push it to GHCR, and attach a chain of
   cryptographic attestations bound to the workflow's GitHub OIDC identity —
