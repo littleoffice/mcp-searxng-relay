@@ -88,6 +88,11 @@ func (s *Server) toolReadURL(
 	// fetch needs them; safeURL is the copy everything observable uses.
 	safeURL := redactURLCredentials(in.URL)
 
+	if err := s.checkURLProvenance(ctx, req, "searxng_read_url", in.URL); err != nil {
+		s.recordProvenanceRefusal(ctx, "searxng_read_url", safeURL, err)
+		return nil, nil, err
+	}
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.FetchErrors.Add(1)
@@ -127,6 +132,7 @@ func (s *Server) toolReadURL(
 			Read:      readDepthImage,
 			FromCache: result.fromCache,
 		})
+		s.rememberURLs(ctx, in.URL, result.finalURL)
 		lg.Info("fetch completed",
 			"url", safeURL, "domain", domain,
 			"tool", "searxng_read_url", "kind", "image",
@@ -174,6 +180,10 @@ func (s *Server) toolReadURL(
 		TotalChars: len(result.text),
 		FromCache:  result.fromCache,
 	})
+	// Only the window returned counts as shown: links further down the
+	// document become fetchable once the model has paged to them.
+	s.rememberURLs(ctx, in.URL, result.finalURL)
+	s.rememberText(ctx, windowed)
 	lg.Info("fetch completed",
 		"url", safeURL, "domain", domain,
 		"tool", "searxng_read_url", "kind", "text",
@@ -306,6 +316,11 @@ func (s *Server) toolURLMetadata(
 	domain := domainOf(in.URL)
 	safeURL := redactURLCredentials(in.URL)
 
+	if err := s.checkURLProvenance(ctx, req, "searxng_url_metadata", in.URL); err != nil {
+		s.recordProvenanceRefusal(ctx, "searxng_url_metadata", safeURL, err)
+		return nil, nil, err
+	}
+
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
 	if err != nil {
 		s.metrics.MetadataErrors.Add(1)
@@ -358,6 +373,8 @@ func (s *Server) toolURLMetadata(
 		Read:      readDepthMetadata,
 		FromCache: result.fromCache,
 	})
+	s.rememberURLs(ctx, in.URL, result.finalURL, payload.URL, payload.Image)
+	s.rememberText(ctx, payload.Description)
 	lg.Info("metadata fetch completed",
 		"url", safeURL, "domain", domain, "tool", "searxng_url_metadata",
 		"duration_ms", elapsedMillis(callStart),
@@ -443,7 +460,11 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 		return urlFetchResult{}, fmt.Errorf("failed to build request: %w", err)
 	}
 	req.Header.Set("User-Agent", s.config.UserAgent)
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/*;q=0.8,*/*;q=0.7")
+	accept := "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.7"
+	if s.config.AllowImages {
+		accept = "text/html,application/xhtml+xml,application/xml;q=0.9,image/*;q=0.8,*/*;q=0.7"
+	}
+	req.Header.Set("Accept", accept)
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	req.Header.Set("DNT", "1")
 	req.Header.Set("Upgrade-Insecure-Requests", "1")
@@ -473,6 +494,11 @@ func (s *Server) readURL(ctx context.Context, targetURL string, forceRefresh boo
 	}
 
 	contentType := resp.Header.Get("Content-Type")
+
+	// Refused before the body is read, so a disabled image costs no download.
+	if !s.config.AllowImages && isImage(contentType, targetURL) {
+		return urlFetchResult{}, errImageDisabled
+	}
 
 	// Choose the body size limit based on content type.
 	// Images get their own cap (MaxImageBytes) — large enough for high-res

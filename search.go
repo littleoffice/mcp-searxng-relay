@@ -142,6 +142,14 @@ func (s *Server) toolSearch(
 	if in.Query == "" {
 		return nil, nil, fmt.Errorf("query argument is required")
 	}
+	// A query is a way out for data too, if a weaker one: it reaches the
+	// search engines SearXNG asks, not a host the attacker picked.  So a
+	// query that looks like it carries a token is counted and logged, never
+	// refused (provenance.go).
+	if queryCarriesData(in.Query) {
+		s.metrics.SearchQueriesFlagged.Add(1)
+		lg.Warn("search query looks like it carries data", "query_chars", len(in.Query))
+	}
 
 	numResults := in.NumResults
 	if numResults < 1 {
@@ -240,6 +248,10 @@ func (s *Server) toolSearch(
 			_, _ = fmt.Fprintf(&sb, "Engines: %s\n", strings.Join(r.Engines, ", "))
 		}
 	}
+
+	// Every result URL, and any address in a title or snippet, is now shown
+	// to this caller and may be fetched (provenance.go).
+	s.rememberText(ctx, sb.String())
 
 	fenced, err := s.wrapFenceSanitised(sb.String(), FenceTypeContent, FenceUntrusted, s.config.SearxngURL, removed)
 	if err != nil {

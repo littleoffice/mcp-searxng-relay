@@ -66,6 +66,19 @@ func ssrfReasonIndex(reason string) int {
 	return -1
 }
 
+// provenanceOutcomes is the fixed set of label values for
+// mcp_url_provenance_total{outcome=...}: what the URL provenance check
+// (provenance.go) decided for one read or metadata request.
+var provenanceOutcomes = [...]string{
+	"seen",
+	"trusted_host",
+	"unseen_plain",
+	"would_block",
+	"confirmed",
+	"declined",
+	"blocked",
+}
+
 // authFailureEndpoints is the fixed set of label values for
 // mcp_auth_failures_total{endpoint=...}: the three independently-gated HTTP
 // surfaces. Closed set, same cardinality rationale as ssrfBlockReasons.
@@ -334,6 +347,15 @@ type Metrics struct {
 	// counted-when-cleaned rule as above.
 	HiddenElementsRemoved atomic.Int64
 
+	// Provenance counts URL-tool requests by what the provenance check
+	// decided (provenanceOutcomes).  "blocked" and "declined" are fetches
+	// that did not happen; "would_block" is what log mode let through.
+	Provenance [len(provenanceOutcomes)]atomic.Int64
+
+	// SearchQueriesFlagged counts searches whose query held an
+	// encoded-looking token (queryCarriesData).  Logged, never refused.
+	SearchQueriesFlagged atomic.Int64
+
 	// Degraded-search accounting (SearchesDegraded) and the per-engine
 	// failure breakdown live in the "SearXNG backend engine health" section
 	// above.
@@ -346,6 +368,17 @@ type Metrics struct {
 func (m *Metrics) recordSSRFBlock(reason string) {
 	if i := ssrfReasonIndex(reason); i >= 0 {
 		m.SSRFBlocked[i].Add(1)
+	}
+}
+
+// recordProvenance bumps the provenance counter for one outcome; an unknown
+// outcome is dropped rather than minting a series.
+func (m *Metrics) recordProvenance(outcome string) {
+	for i, o := range provenanceOutcomes {
+		if o == outcome {
+			m.Provenance[i].Add(1)
+			return
+		}
 	}
 }
 
@@ -616,6 +649,17 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeCounter("mcp_hidden_elements_removed_total",
 		"Total HTML elements a browser would not render (hidden, aria-hidden, template, hidden inputs, hiding inline styles) removed before extraction.",
 		&m.HiddenElementsRemoved)
+
+	// Guardrails: URL provenance (provenance.go).
+	_, _ = fmt.Fprintf(w, "# HELP mcp_url_provenance_total URL-tool requests by what the provenance check decided.\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_url_provenance_total counter\n")
+	for i, outcome := range provenanceOutcomes {
+		_, _ = fmt.Fprintf(w, "mcp_url_provenance_total{outcome=\"%s\"} %d\n", outcome, m.Provenance[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
+	writeCounter("mcp_search_queries_flagged_total",
+		"Total searches whose query held an encoded-looking token, as data leaving through a search would. Logged, never refused.",
+		&m.SearchQueriesFlagged)
 
 	// SearXNG backend engine health.
 	//
