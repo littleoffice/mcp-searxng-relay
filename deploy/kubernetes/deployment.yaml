@@ -87,6 +87,17 @@ spec:
             # gateway in front of this relay predates format 1.1:
             # - name: FENCE_PREAMBLE
             #   value: prose
+            # Fetching an address the relay never showed the caller: unset is
+            # "enforce" (one carrying data needs the user's confirmation, or
+            # is refused), "strict" asks about every unseen address, "log"
+            # only logs.  Trusted hosts skip the check, e.g. internal wikis:
+            # - name: FETCH_URL_PROVENANCE
+            #   value: enforce
+            # - name: FETCH_PROVENANCE_TRUSTED_HOSTS
+            #   value: wiki.example.com,*.corp.example
+            # Images reach a vision model without a fence; off unless set:
+            # - name: FETCH_ALLOW_IMAGES
+            #   value: "true"
             # ── In-pod TLS (optional) ──────────────────────────────────────
             # The recommended shape terminates TLS at an Ingress (see
             # ingress.example.yaml) and leaves this pod on plain HTTP. But if
