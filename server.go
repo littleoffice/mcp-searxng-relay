@@ -72,6 +72,10 @@ type Server struct {
 	// metadata, and that's exactly what audit correlation needs.
 	sessionsMu sync.Mutex
 	sessions   map[string]*sessionInfo
+
+	// confirms signs the state of a fetch that asks the user first, so the
+	// answer is honoured only for the call it was asked about (confirm.go).
+	confirms confirmations
 }
 
 func NewServer(cfg Config) *Server {

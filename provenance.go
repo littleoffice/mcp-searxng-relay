@@ -9,7 +9,6 @@ import (
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -34,7 +33,8 @@ import (
 //     the host or path): fetched and logged — the user typed it, or the model
 //     knows a docs page from memory;
 //   - not seen and carrying data: the user is asked through MCP elicitation
-//     when the client supports it, and otherwise the fetch is refused.
+//     when the client supports it (confirm.go), and otherwise the fetch is
+//     refused.
 //
 // The check runs inside the relay on every call, so a model that has been
 // taken over cannot skip it the way it can skip searxng_session_sources.
@@ -62,9 +62,6 @@ const (
 	// A page that floods the set with links only pushes out earlier
 	// allowances, which makes the check stricter, never looser.
 	maxSeenURLs = 2000
-
-	// elicitTimeout bounds how long a fetch waits for the user to answer.
-	elicitTimeout = 2 * time.Minute
 
 	// maxPlainPart and minEncodedRun decide whether one host label or path
 	// segment looks like it carries data: very long, or holding a run of
@@ -326,31 +323,32 @@ func trustedHost(host string, trusted []string) bool {
 // ── The check ─────────────────────────────────────────────────────────────────
 
 // checkURLProvenance decides whether a URL tool may fetch rawURL for this
-// caller.  It returns nil to go ahead, or errURLNotShown.
+// caller.  It returns (nil, nil) to go ahead, an input-required result to ask
+// the user first (the tool returns it as is), or errURLNotShown.
 //
 // A Server built directly in tests carries a zero Config, whose empty mode
 // reads as off; main() always sets one, defaulting to enforce.
-func (s *Server) checkURLProvenance(ctx context.Context, req *mcp.CallToolRequest, tool, rawURL string) error {
+func (s *Server) checkURLProvenance(ctx context.Context, req *mcp.CallToolRequest, tool, rawURL string) (*mcp.CallToolResult, error) {
 	mode := s.config.URLProvenance
 	if mode == "" || mode == provenanceOff {
-		return nil
+		return nil, nil
 	}
 	lg := callerLogger(ctx)
 	safeURL := redactURLCredentials(rawURL)
 
 	if h := s.historyFor(ctx); h != nil && h.seen.has(rawURL) {
 		s.metrics.recordProvenance("seen")
-		return nil
+		return nil, nil
 	}
 	if u, err := url.Parse(rawURL); err == nil && trustedHost(u.Hostname(), s.config.ProvenanceTrustedHosts) {
 		s.metrics.recordProvenance("trusted_host")
-		return nil
+		return nil, nil
 	}
 	reason := carriesData(rawURL)
 	if reason == "" && mode != provenanceStrict {
 		s.metrics.recordProvenance("unseen_plain")
 		lg.Info("fetching an address not shown first", "tool", tool, "url", safeURL, "outcome", "unseen_plain")
-		return nil
+		return nil, nil
 	}
 	if reason == "" {
 		reason = "not shown first"
@@ -359,55 +357,46 @@ func (s *Server) checkURLProvenance(ctx context.Context, req *mcp.CallToolReques
 		s.metrics.recordProvenance("would_block")
 		lg.Warn("address not shown first would be refused", "tool", tool, "url", safeURL,
 			"reason", reason, "outcome", "would_block")
-		return nil
+		return nil, nil
 	}
 
-	if confirmed, asked := s.askToFetch(ctx, req, safeURL, reason); confirmed {
+	// What a confirmation covers: this caller, this tool, this exact URL.
+	binding := historyKey(ctx) + "\x00" + tool + "\x00" + rawURL
+	switch {
+	case isConfirmationRetry(req):
+		if !s.confirms.redeem(req.Params.RequestState, binding) {
+			s.metrics.recordProvenance("blocked")
+			lg.Warn("confirmation for an address not shown first did not match the call", "tool", tool,
+				"url", safeURL, "reason", reason, "outcome", "blocked")
+			return nil, errURLNotShown
+		}
+		if accepted, _ := confirmationAnswer(req); !accepted {
+			s.metrics.recordProvenance("declined")
+			lg.Warn("user declined an address not shown first", "tool", tool, "url", safeURL,
+				"reason", reason, "outcome", "declined")
+			return nil, errURLNotShown
+		}
 		s.metrics.recordProvenance("confirmed")
 		s.rememberURLs(ctx, rawURL)
 		lg.Info("user confirmed an address not shown first", "tool", tool, "url", safeURL,
 			"reason", reason, "outcome", "confirmed")
-		return nil
-	} else if asked {
-		s.metrics.recordProvenance("declined")
-		lg.Warn("user declined an address not shown first", "tool", tool, "url", safeURL,
-			"reason", reason, "outcome", "declined")
-		return errURLNotShown
-	}
-	s.metrics.recordProvenance("blocked")
-	lg.Warn("address not shown first refused", "tool", tool, "url", safeURL,
-		"reason", reason, "outcome", "blocked")
-	return errURLNotShown
-}
-
-// askToFetch asks the user through MCP elicitation whether to fetch safeURL.
-// asked is false when the client cannot be asked: it declared no elicitation
-// support, the transport is stateless, or the request failed.
-func (s *Server) askToFetch(ctx context.Context, req *mcp.CallToolRequest, safeURL, reason string) (confirmed, asked bool) {
-	if req == nil || req.Session == nil {
-		return false, false
-	}
-	p := req.Session.InitializeParams()
-	if p == nil || p.Capabilities == nil || p.Capabilities.Elicitation == nil {
-		return false, false
-	}
-	shown := safeURL
-	if len(shown) > 500 {
-		shown = shown[:500] + "…"
-	}
-	ectx, cancel := context.WithTimeout(ctx, elicitTimeout)
-	defer cancel()
-	res, err := req.Session.Elicit(ectx, &mcp.ElicitParams{
-		Message: "The AI wants to fetch an address that did not appear in any search result or page in " +
-			"this conversation (" + reason + "):\n\n" + shown + "\n\n" +
+		return nil, nil
+	case canElicit(req):
+		s.metrics.recordProvenance("asked")
+		shown := safeURL
+		if len(shown) > 500 {
+			shown = shown[:500] + "…"
+		}
+		return askResult("The AI wants to fetch an address that did not appear in any search result or page in "+
+			"this conversation ("+reason+"):\n\n"+shown+"\n\n"+
 			"If you did not give it this address, fetching it could send your data to that site. Fetch it?",
-		RequestedSchema: map[string]any{"type": "object", "properties": map[string]any{}},
-	})
-	if err != nil {
-		callerLogger(ctx).Debug("elicitation failed", "error", err)
-		return false, false
+			nil, s.confirms.issue(binding)), nil
+	default:
+		s.metrics.recordProvenance("blocked")
+		lg.Warn("address not shown first refused", "tool", tool, "url", safeURL,
+			"reason", reason, "outcome", "blocked")
+		return nil, errURLNotShown
 	}
-	return res.Action == "accept", true
 }
 
 // recordProvenanceRefusal puts a refused fetch in the caller's history, so

@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // The URL provenance check (provenance.go) lets the URL tools fetch what the
@@ -383,5 +386,103 @@ func TestQueryCarriesData(t *testing.T) {
 		if got := queryCarriesData(q); got != want {
 			t.Errorf("queryCarriesData(%q) = %v, want %v", q, got, want)
 		}
+	}
+}
+
+// connectProvenanceClient connects an MCP client to s, answering any
+// elicitation with answer (or declaring no elicitation support when answer is
+// nil), and counts the questions it was asked.
+func connectProvenanceClient(t *testing.T, s *Server, answer *mcp.ElicitResult) (*mcp.ClientSession, *atomic.Int64) {
+	t.Helper()
+	ctx := context.Background()
+	st, ct := mcp.NewInMemoryTransports()
+	ss, err := s.mcpServer.Connect(ctx, st, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ss.Close() })
+	asked := &atomic.Int64{}
+	var opts *mcp.ClientOptions
+	if answer != nil {
+		opts = &mcp.ClientOptions{ElicitationHandler: func(context.Context, *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			asked.Add(1)
+			return answer, nil
+		}}
+	}
+	cs, err := mcp.NewClient(&mcp.Implementation{Name: "client", Version: "test"}, opts).Connect(ctx, ct, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs, asked
+}
+
+func readOverMCP(t *testing.T, cs *mcp.ClientSession, u string) (string, bool) {
+	t.Helper()
+	res, err := cs.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "searxng_read_url", Arguments: map[string]any{"url": u},
+	})
+	if err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	var sb strings.Builder
+	for _, c := range res.Content {
+		if tc, ok := c.(*mcp.TextContent); ok {
+			sb.WriteString(tc.Text)
+		}
+	}
+	return sb.String(), res.IsError
+}
+
+func TestReadURL_AsksUserAndHonoursAnswer(t *testing.T) {
+	s := newProvenanceServer(provenanceEnforce)
+	cs, asked := connectProvenanceClient(t, s, &mcp.ElicitResult{Action: "accept", Content: map[string]any{}})
+	txt, isErr := readOverMCP(t, cs, unshownPage)
+	if isErr || !strings.Contains(txt, "Collected.") || asked.Load() != 1 {
+		t.Fatalf("accepted fetch: isErr=%t asked=%d text=%q", isErr, asked.Load(), txt)
+	}
+	// Confirmed once, the address is now shown: no second question.
+	if _, isErr := readOverMCP(t, cs, unshownPage); isErr || asked.Load() != 1 {
+		t.Fatalf("second fetch: isErr=%t asked=%d", isErr, asked.Load())
+	}
+
+	s = newProvenanceServer(provenanceEnforce)
+	cs, asked = connectProvenanceClient(t, s, &mcp.ElicitResult{Action: "decline"})
+	if txt, isErr := readOverMCP(t, cs, unshownPage); !isErr || strings.Contains(txt, "Collected.") || asked.Load() != 1 {
+		t.Fatalf("declined fetch: isErr=%t asked=%d text=%q", isErr, asked.Load(), txt)
+	}
+
+	// A client that cannot be asked gets the refusal.
+	s = newProvenanceServer(provenanceEnforce)
+	cs, _ = connectProvenanceClient(t, s, nil)
+	if txt, isErr := readOverMCP(t, cs, unshownPage); !isErr || strings.Contains(txt, "Collected.") {
+		t.Fatalf("client without elicitation: isErr=%t text=%q", isErr, txt)
+	}
+}
+
+func TestConfirmations_BoundSingleUse(t *testing.T) {
+	var c confirmations
+	state := c.issue("alice\x00searxng_read_url\x00https://a.example/?d=1")
+	if c.redeem(state, "alice\x00searxng_read_url\x00https://a.example/?d=2") {
+		t.Error("a confirmation for one URL redeemed for another")
+	}
+	if c.redeem(state, "bob\x00searxng_read_url\x00https://a.example/?d=1") {
+		t.Error("a confirmation for one caller redeemed for another")
+	}
+	if !c.redeem(state, "alice\x00searxng_read_url\x00https://a.example/?d=1") {
+		t.Fatal("a valid confirmation was refused")
+	}
+	if c.redeem(state, "alice\x00searxng_read_url\x00https://a.example/?d=1") {
+		t.Error("a confirmation redeemed twice")
+	}
+	for _, bad := range []string{"", "x", "a.b", state[:len(state)-2] + "AA"} {
+		if c.redeem(bad, "alice\x00searxng_read_url\x00https://a.example/?d=1") {
+			t.Errorf("malformed state %q redeemed", bad)
+		}
+	}
+	// Another process (another key) cannot redeem it either.
+	var other confirmations
+	if other.redeem(c.issue("b"), "b") {
+		t.Error("a state redeemed under a different key")
 	}
 }

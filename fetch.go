@@ -88,9 +88,11 @@ func (s *Server) toolReadURL(
 	// fetch needs them; safeURL is the copy everything observable uses.
 	safeURL := redactURLCredentials(in.URL)
 
-	if err := s.checkURLProvenance(ctx, req, "searxng_read_url", in.URL); err != nil {
+	if ask, err := s.checkURLProvenance(ctx, req, "searxng_read_url", in.URL); err != nil {
 		s.recordProvenanceRefusal(ctx, "searxng_read_url", safeURL, err)
 		return nil, nil, err
+	} else if ask != nil {
+		return ask, nil, nil
 	}
 
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)
@@ -316,9 +318,11 @@ func (s *Server) toolURLMetadata(
 	domain := domainOf(in.URL)
 	safeURL := redactURLCredentials(in.URL)
 
-	if err := s.checkURLProvenance(ctx, req, "searxng_url_metadata", in.URL); err != nil {
+	if ask, err := s.checkURLProvenance(ctx, req, "searxng_url_metadata", in.URL); err != nil {
 		s.recordProvenanceRefusal(ctx, "searxng_url_metadata", safeURL, err)
 		return nil, nil, err
+	} else if ask != nil {
+		return ask, nil, nil
 	}
 
 	result, err := s.readURL(ctx, in.URL, in.ForceRefresh)

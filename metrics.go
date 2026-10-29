@@ -74,6 +74,7 @@ var provenanceOutcomes = [...]string{
 	"trusted_host",
 	"unseen_plain",
 	"would_block",
+	"asked",
 	"confirmed",
 	"declined",
 	"blocked",
