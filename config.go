@@ -143,6 +143,24 @@ type Config struct {
 	// extraction. Off by default, i.e. removal is on.
 	KeepHiddenText bool // FETCH_KEEP_HIDDEN_TEXT: default false
 
+	// URLProvenance decides what the URL tools do with an address the relay
+	// never showed the caller (provenance.go): "enforce" (the default) asks
+	// the user, or refuses, when such an address carries data; "strict" does
+	// so for every unseen address; "log" only logs; "off" skips the check.
+	// Raw value read here and normalised in main() via parseProvenanceMode,
+	// so a typo fails startup. Empty, as in a Config built by tests, is off.
+	URLProvenance string // FETCH_URL_PROVENANCE: default "enforce"
+	// ProvenanceTrustedHosts are hosts the provenance check always lets
+	// through ("wiki.example.com", "*.example.com"): the way out for clients
+	// that cannot ask the user. Validated in main() via parseTrustedHosts.
+	ProvenanceTrustedHosts []string // FETCH_PROVENANCE_TRUSTED_HOSTS
+
+	// AllowImages lets searxng_read_url return image URLs as image blocks.
+	// Off by default: an image reaches the model without a fence, and a
+	// vision model reads instructions written inside a picture as readily
+	// as text. Turn it on for agents that need to look at images.
+	AllowImages bool // FETCH_ALLOW_IMAGES: default false
+
 	// PruneSelector is a CSS selector whose matches are removed from the
 	// document BEFORE trafilatura chooses which subtree is the article.
 	// Without it, sites that wrap boilerplate in a container the extractor
@@ -301,6 +319,12 @@ func configFromEnv() Config {
 	c.KeepInvisibleChars = parseBool(os.Getenv("FETCH_KEEP_INVISIBLE_CHARS"))
 	// Hidden-element removal — on by default; see KeepHiddenText.
 	c.KeepHiddenText = parseBool(os.Getenv("FETCH_KEEP_HIDDEN_TEXT"))
+	// URL provenance — raw here, normalised in main() via parseProvenanceMode
+	// and parseTrustedHosts. Unset means enforce with no trusted hosts.
+	c.URLProvenance = strings.TrimSpace(os.Getenv(provenanceEnvVar))
+	c.ProvenanceTrustedHosts = parseCSV(os.Getenv(provenanceTrustedHostsEnvVar))
+	// Image content — off by default; see AllowImages.
+	c.AllowImages = parseBool(os.Getenv("FETCH_ALLOW_IMAGES"))
 	// Pre-extraction pruning.  The default targets "related"-flavoured
 	// containers, which is where news templates habitually park
 	// most-popular / you-might-also-like blocks.  It was chosen by

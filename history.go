@@ -150,6 +150,10 @@ type fetchHistory struct {
 	index   map[string]int // citable URL -> slot in entries
 	total   int            // fetches ever appended; source of Seq
 	evicted int            // distinct sources dropped to make room
+
+	// seen is every address the relay has shown this caller, for the URL
+	// provenance check (provenance.go).  It has its own lock.
+	seen seenURLs
 }
 
 // newFetchHistory returns a history retaining n sources, falling back to the

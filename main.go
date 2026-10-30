@@ -237,6 +237,27 @@ func main() {
 	}
 	cfg.FencePreamble = fencePreamble
 
+	// Normalise the URL provenance check (FETCH_URL_PROVENANCE, unset means
+	// enforce) and its trusted hosts. Same fail-loud stance: a typo must not
+	// switch a security control off.
+	provenance, err := parseProvenanceMode(cfg.URLProvenance)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.URLProvenance = provenance
+	trustedHosts, err := parseTrustedHosts(cfg.ProvenanceTrustedHosts)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.ProvenanceTrustedHosts = trustedHosts
+	if provenance != provenanceOff && cfg.Stateless {
+		slog.Warn("URL provenance runs per caller in stateless mode: every conversation of one identity "+
+			"shares one set of shown addresses, and callers without a token share one between them",
+			"mode", provenance)
+	}
+
 	// Compile the in-process TLS configuration (MCP_TLS_CERT/MCP_TLS_KEY or the
 	// MCP_TLS_ACME_* family). Same fail-loud stance as the controls above: a
 	// half-configured pair, a manual+ACME conflict, an unwritable ACME cache,
@@ -734,6 +755,13 @@ func logConfig(server *Server, mode, port string) {
 		// model sees, and "disabled" means a hidden-text channel is open.
 		row("invisible chars", stripLabel(!cfg.KeepInvisibleChars)),
 		row("hidden html", stripLabel(!cfg.KeepHiddenText)),
+		// What the URL tools do with addresses the relay never showed the
+		// caller. "disabled" means a page can make the model send data out
+		// through searxng_read_url.
+		row("url provenance", provenanceLabel(cfg.URLProvenance, cfg.ProvenanceTrustedHosts)),
+		// Images reach a vision model without a fence, so whether they are
+		// returned at all belongs next to the other fetched-content filters.
+		row("images", enabledLabel(cfg.AllowImages)),
 		// Pre-extraction pruning changes which subtree is treated as the
 		// article, so an operator debugging odd extraction output needs to
 		// see the active selector, not just whether it is on.

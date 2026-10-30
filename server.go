@@ -72,6 +72,10 @@ type Server struct {
 	// metadata, and that's exactly what audit correlation needs.
 	sessionsMu sync.Mutex
 	sessions   map[string]*sessionInfo
+
+	// confirms signs the state of a fetch that asks the user first, so the
+	// answer is honoured only for the call it was asked about (confirm.go).
+	confirms confirmations
 }
 
 func NewServer(cfg Config) *Server {
@@ -240,16 +244,8 @@ func (s *Server) buildMCPServer() *mcp.Server {
 	}, s.toolSearch)
 
 	mcp.AddTool(server, &mcp.Tool{
-		Name: "searxng_read_url",
-		Description: "Fetch a URL and return its content as structured markdown. " +
-			"Use when you've decided to read specific URLs in full; to triage " +
-			"several candidates first, use searxng_url_metadata (far cheaper). " +
-			"Handles HTML and PDF including very large documents; image URLs " +
-			"(jpeg/png/gif/webp) return as image blocks for vision models. PDF " +
-			"text carries '--- [PDF page N of M] ---' markers so you can cite " +
-			"pages. Long content is paginated via start_index (see that field); " +
-			"follow-up pages are served from cache, so paging costs one upstream " +
-			"fetch. Cached; use force_refresh to bypass.",
+		Name:        "searxng_read_url",
+		Description: buildReadURLDescription(s.config.AllowImages, s.config.URLProvenance),
 	}, s.toolReadURL)
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -276,6 +272,31 @@ func (s *Server) buildMCPServer() *mcp.Server {
 	}, s.toolSessionSources)
 
 	return server
+}
+
+// buildReadURLDescription composes the searxng_read_url description. Image
+// support is mentioned only where it is on, so a model on a relay without it
+// is not invited to fetch images it will be refused; the provenance rule only
+// where the check can refuse something.
+func buildReadURLDescription(allowImages bool, provenance string) string {
+	images := "Image URLs are not supported on this relay. "
+	if allowImages {
+		images = "Image URLs (jpeg/png/gif/webp) return as image blocks for vision models. "
+	}
+	d := "Fetch a URL and return its content as structured markdown. " +
+		"Use when you've decided to read specific URLs in full; to triage " +
+		"several candidates first, use searxng_url_metadata (far cheaper). " +
+		"Handles HTML and PDF including very large documents. " + images +
+		"PDF text carries '--- [PDF page N of M] ---' markers so you can cite " +
+		"pages. Long content is paginated via start_index (see that field); " +
+		"follow-up pages are served from cache, so paging costs one upstream " +
+		"fetch. Cached; use force_refresh to bypass."
+	if provenance == provenanceEnforce || provenance == provenanceStrict {
+		d += " URLs that appeared in a search result or a page you read are " +
+			"fetched; one that was not shown to you first and carries data (a " +
+			"query string, say) needs the user's confirmation."
+	}
+	return d
 }
 
 // sessionIDOf returns the session ID for a CallToolRequest, or "" when

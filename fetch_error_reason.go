@@ -37,6 +37,9 @@ var (
 	// errExtractFailed is a document the relay fetched but could not turn
 	// into text — a corrupt PDF, an Office file it cannot parse.
 	errExtractFailed = errors.New("content extraction failed")
+	// errImageDisabled is an image response on a relay that does not
+	// return images (FETCH_ALLOW_IMAGES unset).
+	errImageDisabled = errors.New("image content is disabled on this relay")
 )
 
 // fetchErrorReasons is the closed label set for
@@ -52,6 +55,7 @@ var fetchErrorReasons = [...]string{
 	"refused",
 	"http_status",
 	"extract_failed",
+	"image_disabled",
 	"other",
 }
 
@@ -77,6 +81,8 @@ func classifyFetchError(err error) string {
 		return "http_status"
 	case errors.Is(err, errExtractFailed):
 		return "extract_failed"
+	case errors.Is(err, errImageDisabled):
+		return "image_disabled"
 	}
 
 	// The relay's own refusal to dial a non-public address, which reaches
