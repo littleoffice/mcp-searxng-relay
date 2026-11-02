@@ -1,0 +1,59 @@
+# Optional observability overlay: Loki (log store) + Promtail (log shipper).
+#
+# This is deliberately SEPARATE from the app stack (../docker-compose.yaml),
+# which ships no Grafana/Prometheus — you bring your own. Run it alongside the
+# app and point your existing Grafana at Loki as a datasource. See README.md.
+#
+#   podman compose -f docker-compose.monitoring.yaml up -d
+#
+# Prerequisite: the Podman API socket must be running so Promtail can discover
+# and read the relay's logs (rootless: `systemctl --user enable --now
+# podman.socket`). Set PODMAN_SOCKET if yours is not at the rootless default.
+services:
+  loki:
+    image: docker.io/grafana/loki:3.5.1
+    container_name: loki
+    command: -config.file=/etc/loki/config.yaml
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    ports:
+      # Published on loopback so your existing Grafana (on this host) can add it
+      # as a datasource at http://127.0.0.1:3100. Change/remove if Grafana runs
+      # elsewhere and reaches Loki over the monitoring network instead.
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki-config.yaml:/etc/loki/config.yaml:ro
+      - loki_data:/loki:rw
+    tmpfs:
+      - /tmp
+    networks: [monitoring]
+    logging: &log { driver: json-file, options: { max-size: 1m, max-file: "1" } }
+    restart: unless-stopped
+
+  promtail:
+    image: docker.io/grafana/promtail:3.5.1
+    container_name: promtail
+    command: -config.file=/etc/promtail/config.yaml
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    volumes:
+      - ./promtail-config.yaml:/etc/promtail/config.yaml:ro
+      # Podman's Docker-compatible API socket, mounted where Promtail's
+      # docker_sd_configs expects it. Rootless default shown; override with
+      # PODMAN_SOCKET (e.g. /run/podman/podman.sock for rootful).
+      - ${PODMAN_SOCKET:-/run/user/1000/podman/podman.sock}:/var/run/docker.sock:ro
+    tmpfs:
+      - /tmp
+    depends_on: [loki]
+    networks: [monitoring]
+    logging: *log
+    restart: unless-stopped
+
+networks:
+  monitoring:
+    driver: bridge
+
+volumes:
+  loki_data:
