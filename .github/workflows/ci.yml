@@ -192,9 +192,11 @@ jobs:
             "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
           # pdf_oxide exports the C API of the office_oxide copy it bundles;
           # localize it so liboffice_oxide.a is the only provider of office_*.
+          # rust_eh_personality likewise, so the two archives' copies of Rust
+          # std do not collide when they were built with different rustc.
           # Same step, and the full reasoning, in the Dockerfile.
-          objcopy -D --wildcard --localize-symbol='office_*' "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
-          [ -z "$(nm -g --defined-only "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/')" ]
+          objcopy -D --wildcard --localize-symbol='office_*' --localize-symbol=rust_eh_personality "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a"
+          [ -z "$(nm -g --defined-only "${INSTALL_DIR}/lib/linux_amd64/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/ || $3 == "rust_eh_personality"')" ]
           echo "PDF_OXIDE_INSTALL_DIR=${INSTALL_DIR}" >> "$GITHUB_ENV"
 
       - name: Install office_oxide native library
