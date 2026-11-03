@@ -8,6 +8,7 @@ Reference documentation for mcp-searxng-relay. The project overview, features an
 | [Configuration](configuration.md) | Every environment variable; tokens, OAuth, session modes, rate limiting, engine scoping |
 | [MCP tools](tools.md) | Parameters, output shapes and examples for each tool |
 | [Architecture](architecture.md) | One search-then-read turn, step by step |
+| [Per-user tokens](user-tokens.md) | Searching permission-aware backends as the calling user: token exchange, the SearXNG engine, deployment rules |
 | [Security model](security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening |
 | [Prompt fencing](prompt-fencing.md) | Fence layout, the signed preamble, the signing key |
 | [Operations](operations.md) | Caches, health checks, graceful shutdown, HTTP timeouts, TLS |

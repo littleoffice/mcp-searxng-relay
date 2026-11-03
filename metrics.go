@@ -357,6 +357,11 @@ type Metrics struct {
 	// encoded-looking token (queryCarriesData).  Logged, never refused.
 	SearchQueriesFlagged atomic.Int64
 
+	// UserToken counts searches by what happened to the per-user SearXNG
+	// token (userTokenOutcomes, searxng_user_token.go).  Only incremented
+	// when SEARXNG_USER_TOKEN_MODE=exchange.
+	UserToken [len(userTokenOutcomes)]atomic.Int64
+
 	// Degraded-search accounting (SearchesDegraded) and the per-engine
 	// failure breakdown live in the "SearXNG backend engine health" section
 	// above.
@@ -661,6 +666,15 @@ func (s *Server) ServeMetrics(w http.ResponseWriter, _ *http.Request) {
 	writeCounter("mcp_search_queries_flagged_total",
 		"Total searches whose query held an encoded-looking token, as data leaving through a search would. Logged, never refused.",
 		&m.SearchQueriesFlagged)
+
+	// Per-user SearXNG tokens (searxng_user_token.go). "failed" searches were
+	// refused; "no_user_token" ran without a user token (static-token callers).
+	_, _ = fmt.Fprintf(w, "# HELP mcp_searxng_user_token_total Searches by what happened to the per-user SearXNG token: exchanged, served from cache, no OAuth user to exchange for, or exchange failed (search refused).\n")
+	_, _ = fmt.Fprintf(w, "# TYPE mcp_searxng_user_token_total counter\n")
+	for i, outcome := range userTokenOutcomes {
+		_, _ = fmt.Fprintf(w, "mcp_searxng_user_token_total{outcome=\"%s\"} %d\n", outcome, m.UserToken[i].Load())
+	}
+	_, _ = fmt.Fprintln(w)
 
 	// SearXNG backend engine health.
 	//

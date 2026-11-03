@@ -42,6 +42,7 @@ The relay speaks both MCP transports: **stdio** for local clients such as Claude
 - **[Hidden-text removal](docs/security-model.md#hidden-text-removal)** — invisible Unicode characters and HTML elements a browser would not render are removed before fencing, counted, and noted to the model.
 - **[SSRF protection](docs/security-model.md#ssrf-protection)** — non-public addresses blocked at TCP-dial time and re-checked on every redirect hop; internal hosts reachable only through explicit, port-scoped allow-lists.
 - **[Authentication](docs/security-model.md#authentication)** — static bearer tokens with per-identity audit logging, or [OAuth 2.0 / OIDC](docs/configuration.md#oauth-20--oidc) JWT verification against your own identity provider; the two can run side by side.
+- **[Per-user tokens for SearXNG engines](docs/user-tokens.md)** — opt-in: each search carries an OAuth token for the calling user, exchanged for one issued to your search backend (RFC 8693), so a custom engine can search a permission-aware system as that user.
 - **[Per-caller rate limiting](docs/configuration.md#rate-limiting)** — a token bucket per caller, default 5 requests per second with a burst of 10.
 - **[Response caching](docs/caching.md)** with a configurable TTL and per-request bypass.
 - **[Metrics](docs/observability.md#metrics)** — Prometheus series for traffic, errors, latency, the cache, the SSRF guard and per-domain fetches (bounded cardinality), behind a token of their own.
@@ -189,6 +190,7 @@ Report vulnerabilities privately: [docs/SECURITY.md](docs/SECURITY.md). Build pr
 | [Configuration](docs/configuration.md) | Every environment variable; tokens, OAuth, session modes, rate limiting, engine scoping |
 | [MCP tools](docs/tools.md) | Parameters, output shapes and examples for each tool |
 | [Architecture](docs/architecture.md) | One search-then-read turn, step by step |
+| [Per-user tokens](docs/user-tokens.md) | Searching permission-aware backends as the calling user: token exchange, the SearXNG engine, deployment rules |
 | [Security model](docs/security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening |
 | [Prompt fencing](docs/prompt-fencing.md) | Fence layout, the signed preamble, the signing key |
 | [Operations](docs/operations.md) | Caches, health checks, graceful shutdown, HTTP timeouts, TLS |

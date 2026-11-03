@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -137,6 +138,9 @@ func (s *Server) toolSearch(
 	// Bind the session ID into the context once, so the search pipeline
 	// below inherits full caller attribution without taking the request.
 	ctx = withSessionID(ctx, sessionIDOf(ctx, req))
+	// The verified OAuth token of *this* request, for the per-user SearXNG
+	// token (searxng_user_token.go). Always bound, "" included.
+	ctx = withVerifiedOAuthToken(ctx, oauthTokenFromRequest(req))
 	lg := callerLogger(ctx)
 
 	if in.Query == "" {
@@ -304,13 +308,27 @@ func (s *Server) search(
 	}
 	u.RawQuery = q.Encode()
 
+	// Per-user token for SearXNG engines (searxng_user_token.go). A caller
+	// without a verified OAuth token searches without one; a failed exchange
+	// fails the search rather than quietly dropping the user's identity.
+	userToken, err := s.userTokenForSearch(ctx)
+	if err != nil && !errors.Is(err, errNoUserToken) {
+		return nil, err
+	}
+
 	req, err := s.newSearxRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build request: %w", err)
 	}
 	req = req.WithContext(ctx)
 
-	resp, err := s.client.Do(req)
+	client := s.client
+	if userToken != "" {
+		req.Header.Set(userTokenHeader, userToken)
+		client = s.userTokenClient
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)
 	}

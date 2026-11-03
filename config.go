@@ -211,6 +211,19 @@ type Config struct {
 	TrustForwardedHeaders bool           // MCP_TRUST_FORWARDED_HEADERS
 	OAuth                 *oauthSettings // compiled form; nil until main() validates, and nil means static-token-only
 
+	// Per-user tokens for SearXNG engines (opt-in, RFC 8693 token exchange).
+	// Raw values read here; validated and compiled in main() via
+	// newUserTokenExchanger, which refuses half-configurations and exchange
+	// mode without OAuth verification. See searxng_user_token.go.
+	UserTokenMode             string              // SEARXNG_USER_TOKEN_MODE: "off" (default) | "exchange"
+	UserTokenURL              string              // SEARXNG_USER_TOKEN_URL: the identity provider's token endpoint
+	UserTokenClientID         string              // SEARXNG_USER_TOKEN_CLIENT_ID: the relay's client at the provider
+	UserTokenClientSecret     string              // SEARXNG_USER_TOKEN_CLIENT_SECRET
+	UserTokenClientSecretFile string              // SEARXNG_USER_TOKEN_CLIENT_SECRET_FILE
+	UserTokenAudience         string              // SEARXNG_USER_TOKEN_AUDIENCE: optional RFC 8693 audience (the backend's client)
+	UserTokenAllowPlaintext   bool                // SEARXNG_USER_TOKEN_ALLOW_PLAINTEXT: permit a non-loopback http:// SEARXNG_URL
+	UserTokenExchange         *userTokenExchanger // compiled form; nil means off
+
 	// FencePreamble selects where the awareness preamble travels: inside its
 	// own signed trusted-instruction fence ("fenced", format 1.1, the default)
 	// or as unsigned prose ahead of the content fence ("prose", format 1.0,
@@ -441,6 +454,15 @@ func configFromEnv() Config {
 	c.OAuthRequiredScope = strings.TrimSpace(os.Getenv("MCP_OAUTH_REQUIRED_SCOPE"))
 	c.OAuthCARoots = strings.TrimSpace(os.Getenv("MCP_OAUTH_CA_ROOTS"))
 	c.TrustForwardedHeaders = parseBool(os.Getenv("MCP_TRUST_FORWARDED_HEADERS"))
+	// Per-user SearXNG tokens — raw here, validated in main() via
+	// newUserTokenExchanger. Unset keeps the feature off.
+	c.UserTokenMode = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_MODE"))
+	c.UserTokenURL = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_URL"))
+	c.UserTokenClientID = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_CLIENT_ID"))
+	c.UserTokenClientSecret = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_CLIENT_SECRET"))
+	c.UserTokenClientSecretFile = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_CLIENT_SECRET_FILE"))
+	c.UserTokenAudience = strings.TrimSpace(os.Getenv("SEARXNG_USER_TOKEN_AUDIENCE"))
+	c.UserTokenAllowPlaintext = parseBool(os.Getenv("SEARXNG_USER_TOKEN_ALLOW_PLAINTEXT"))
 	// Fence preamble layout — raw here, normalised in main() via
 	// parseFencePreambleMode. Unset means the signed 1.1 preamble.
 	c.FencePreamble = strings.TrimSpace(os.Getenv(fencePreambleEnvVar))

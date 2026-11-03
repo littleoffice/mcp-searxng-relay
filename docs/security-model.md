@@ -11,6 +11,7 @@ The threats the relay is built against and the controls that answer them. Signed
   - [Reaching resources through an egress proxy (opt-in)](#reaching-resources-through-an-egress-proxy-opt-in)
 - [Authentication](#authentication)
 - [OAuth 2.0 verification](#oauth-20-verification)
+- [Per-user tokens for SearXNG engines](#per-user-tokens-for-searxng-engines)
 - [Cross-origin protection](#cross-origin-protection)
 - [Container hardening](#container-hardening)
 - [PDF and Office safety](#pdf-and-office-safety)
@@ -125,6 +126,10 @@ Incoming `Authorization` headers are run through SHA-256 once and looked up in a
 ## OAuth 2.0 verification
 
 When `MCP_OAUTH_ISSUER` is set, a presented `Bearer` JWT that misses the static digest table is verified against the configured issuer instead: the signature is checked against the issuer's JWKS (fetched and rotated automatically, or hot-reloaded from `MCP_OAUTH_JWKS_FILE`), and the `iss` / `aud` / `exp` / `nbf` claims — plus an optional required scope — are validated before the identity claim is attached to the request context in exactly the same way a static token's identity is. Only asymmetric signing algorithms are accepted (RS/PS/ES families); the HMAC families and `alg=none` are refused by construction, which closes the RS256→HS256 key-confusion class of forgery. The relay never issues, stores, or refreshes tokens — it is a Resource Server that only verifies them. Verification failures are logged without the offered token, and a `401` advertises the RFC 9728 metadata document so a compliant client can discover where to authenticate. See [OAuth 2.0 / OIDC](configuration.md#oauth-20--oidc).
+
+## Per-user tokens for SearXNG engines
+
+With `SEARXNG_USER_TOKEN_MODE=exchange`, an OAuth caller's verified token is exchanged at the identity provider (RFC 8693) for a token issued to the search backend, for the same user, and sent to SearXNG in `X-Relay-User-Token` for a custom engine to present. The caller's own token is never forwarded; static-token callers get no user token; a failed exchange fails the search; token-bearing requests never follow a redirect; tokens never reach logs, metrics or the model. Turning the mode on also binds each MCP session to the OAuth user who created it: a request on that session from anyone else gets `403`. Details, the engine, and the deployment rules it depends on: [Per-user tokens for SearXNG engines](user-tokens.md).
 
 ## Cross-origin protection
 

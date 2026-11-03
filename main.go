@@ -227,6 +227,29 @@ func main() {
 	}
 	cfg.OAuth = oauthSettings
 
+	// Per-user SearXNG tokens (SEARXNG_USER_TOKEN_*; searxng_user_token.go).
+	// Same fail-loud stance: a half-configuration, exchange without OAuth
+	// verification, a non-https token endpoint or a plaintext SEARXNG_URL
+	// without the explicit opt-in stop the server. The token endpoint usually
+	// lives at the same provider as MCP_OAUTH_ISSUER, so it shares the
+	// MCP_OAUTH_CA_ROOTS trust store when one is configured.
+	var tokenEndpointClient *http.Client
+	if cfg.OAuthCARoots != "" && cfg.UserTokenMode != "" {
+		c, cerr := oauthHTTPClientWithRoots(cfg.OAuthCARoots)
+		if cerr != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "Error: MCP_OAUTH_CA_ROOTS %q: %v\n", cfg.OAuthCARoots, cerr)
+			os.Exit(1)
+		}
+		c.Timeout = 15 * time.Second
+		tokenEndpointClient = c
+	}
+	userTokenExchange, err := newUserTokenExchanger(cfg, cfg.OAuth.enabled(), tokenEndpointClient)
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	cfg.UserTokenExchange = userTokenExchange
+
 	// Normalise the fence preamble layout (FENCE_PREAMBLE; unset means
 	// "fenced", format 1.1). Same fail-loud stance: a typo must not pick a
 	// layout the downstream verifier was not configured for.
@@ -665,6 +688,9 @@ func logConfig(server *Server, mode, port string) {
 	// failure of an empty or whitespace-only value being silently accepted.
 	if n := len(cfg.SearxngTokens); n > 0 {
 		rows = append(rows, row("searxng tokens", fmt.Sprintf("%d configured", n)))
+	}
+	if cfg.UserTokenExchange.enabled() {
+		rows = append(rows, row("searxng user token", cfg.UserTokenExchange.describe()))
 	}
 	if cfg.AuthUsername != "" {
 		rows = append(rows, row("username", cfg.AuthUsername))
