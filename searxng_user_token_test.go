@@ -658,12 +658,14 @@ func TestUserToken_EndToEndOverStreamableHTTP(t *testing.T) {
 	}
 }
 
-// TestUserToken_SessionBoundToUser pins the session binding withSDKTokenInfo
-// buys: a session an OAuth user created cannot be driven by another OAuth user
-// or by a static-token caller, even with the right Mcp-Session-Id. Without it,
-// learning a session ID would be enough to search under its creator's
-// identity, with their backend permissions.
-func TestUserToken_SessionBoundToUser(t *testing.T) {
+// TestUserToken_SharedSessionUsesEachCallersToken pins what matters on a
+// stateful session that several callers use, which is how fence-gateway works:
+// it opens each relay session under its own credential (a client-credentials
+// OAuth token, or a static token) and sends every user's token on the tool
+// calls. Each search must carry the exchanged token of *its* caller, never the
+// session opener's, and a static-token caller on an OAuth user's session must
+// get none.
+func TestUserToken_SharedSessionUsesEachCallersToken(t *testing.T) {
 	idp, sx := newFakeIDP(t), newFakeSearxng(t)
 	s, mint := userTokenServer(t, idp, sx, true)
 	handler := mcp.NewStreamableHTTPHandler(
@@ -687,27 +689,31 @@ func TestUserToken_SessionBoundToUser(t *testing.T) {
 		t.Cleanup(func() { _ = resp.Body.Close() })
 		return resp
 	}
+	const initialize = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`
+	const call = `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"searxng_web_search","arguments":{"query":"q"}}}`
 
-	alice := "Bearer " + mint("alice")
-	resp := post(alice, "", `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}`)
-	session := resp.Header.Get("Mcp-Session-Id")
-	if resp.StatusCode != http.StatusOK || session == "" {
-		t.Fatalf("initialize: status %d, session %q", resp.StatusCode, session)
-	}
-	call := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"searxng_web_search","arguments":{"query":"q"}}}`
-
-	for name, authz := range map[string]string{
-		"another OAuth user": "Bearer " + mint("bob"),
-		"a static token":     "Bearer static-secret-0123456789abcdef",
+	for opener, openerAuthz := range map[string]string{
+		"gateway OAuth service token": "Bearer " + mint("gateway-service"),
+		"gateway static token":        "Bearer static-secret-0123456789abcdef",
 	} {
-		if r := post(authz, session, call); r.StatusCode != http.StatusForbidden {
-			t.Errorf("%s on alice's session: status %d, want 403", name, r.StatusCode)
-		}
-	}
-	if n := sx.calls.Load(); n != 0 {
-		t.Fatalf("a hijacked session reached SearXNG %d times", n)
-	}
-	if r := post("Bearer "+mint("alice"), session, call); r.StatusCode != http.StatusOK {
-		t.Errorf("alice with a refreshed token on her own session: status %d, want 200", r.StatusCode)
+		t.Run(opener, func(t *testing.T) {
+			resp := post(openerAuthz, "", initialize)
+			session := resp.Header.Get("Mcp-Session-Id")
+			if resp.StatusCode != http.StatusOK || session == "" {
+				t.Fatalf("initialize: status %d, session %q", resp.StatusCode, session)
+			}
+			alice, bob := mint("alice"), mint("bob")
+			before := len(sx.seen())
+			for _, authz := range []string{"Bearer " + alice, "Bearer " + bob, "Bearer static-secret-0123456789abcdef"} {
+				if r := post(authz, session, call); r.StatusCode != http.StatusOK {
+					t.Fatalf("tools/call on a shared session: status %d", r.StatusCode)
+				}
+			}
+			got := sx.seen()[before:]
+			want := []string{backendTokenFor(alice), backendTokenFor(bob), ""}
+			if len(got) != 3 || got[0] != want[0] || got[1] != want[1] || got[2] != want[2] {
+				t.Fatalf("SearXNG saw %q, want each caller's own (alice, bob, none)", got)
+			}
+		})
 	}
 }

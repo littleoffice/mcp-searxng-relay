@@ -258,13 +258,12 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 				identity, expiry, err := s.config.OAuth.verifyWithExpiry(r.Context(), tok)
 				if err == nil {
 					r = r.WithContext(withIdentity(r.Context(), identity))
-					// Per-user SearXNG tokens need the verified token on
-					// *this* request, and the session bound to its user;
-					// both come from handing the SDK a TokenInfo
-					// (searxng_user_token.go). Static-token secrets never
-					// take this path.
+					// Per-user SearXNG tokens need the verified token of
+					// *this* request, which the SDK only carries per
+					// request as TokenInfo (searxng_user_token.go).
+					// Static-token secrets never take this path.
 					if s.config.UserTokenExchange.enabled() {
-						withSDKTokenInfo(identity, expiry, tok, next).ServeHTTP(w, r)
+						withSDKTokenInfo(expiry, tok, next).ServeHTTP(w, r)
 						return
 					}
 					next.ServeHTTP(w, r)

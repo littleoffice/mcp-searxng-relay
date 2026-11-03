@@ -129,7 +129,7 @@ When `MCP_OAUTH_ISSUER` is set, a presented `Bearer` JWT that misses the static 
 
 ## Per-user tokens for SearXNG engines
 
-With `SEARXNG_USER_TOKEN_MODE=exchange`, an OAuth caller's verified token is exchanged at the identity provider (RFC 8693) for a token issued to the search backend, for the same user, and sent to SearXNG in `X-Relay-User-Token` for a custom engine to present. The caller's own token is never forwarded; static-token callers get no user token; a failed exchange fails the search; token-bearing requests never follow a redirect; tokens never reach logs, metrics or the model. Turning the mode on also binds each MCP session to the OAuth user who created it: a request on that session from anyone else gets `403`. Details, the engine, and the deployment rules it depends on: [Per-user tokens for SearXNG engines](user-tokens.md).
+With `SEARXNG_USER_TOKEN_MODE=exchange`, an OAuth caller's verified token is exchanged at the identity provider (RFC 8693) for a token issued to the search backend, for the same user, and sent to SearXNG in `X-Relay-User-Token` for a custom engine to present. The caller's own token is never forwarded; static-token callers get no user token; a failed exchange fails the search; token-bearing requests never follow a redirect; tokens never reach logs, metrics or the model. The token always comes from the HTTP request carrying the tool call, never from the MCP session, so a refreshed token is used mid-session and a caller on a shared session searches as themselves. Details, the engine, and the deployment rules it depends on: [Per-user tokens for SearXNG engines](user-tokens.md).
 
 ## Cross-origin protection
 

@@ -11,8 +11,8 @@
 // token for the *calling user*:
 //
 //  1. requireAuth verifies the caller's OAuth bearer token (aud = this relay)
-//     and hands it to the MCP SDK as per-request TokenInfo, which also binds
-//     the MCP session to that user.
+//     and hands it to the MCP SDK as per-request TokenInfo, so the search
+//     uses the token of the request it serves.
 //  2. On each searxng_web_search, the relay trades that token at the identity
 //     provider (RFC 8693) for one issued to the search backend, for the same
 //     user, and caches it until shortly before it expires.
@@ -132,19 +132,21 @@ var errUserTokenUnavailable = errors.New("search unavailable: could not obtain a
 // in stateful mode. The MCP SDK runs a session's tool calls under a context
 // derived from the request that *created* the session, so a handler would see
 // the first token of the session forever: a refreshed token would be ignored,
-// the original would expire and every later search would fail, and anyone who
-// learned the session ID could search under the creator's identity.
+// the original would expire and every later search would fail, and every
+// caller on a shared session would search as whoever opened it.
 //
 // What the SDK does carry per HTTP request is RequestExtra.TokenInfo, set by
 // its auth.RequireBearerToken middleware. So once requireAuth has verified an
-// OAuth token, withSDKTokenInfo hands the SDK a TokenInfo holding the identity,
-// the expiry and the raw token. That buys two things:
+// OAuth token, withSDKTokenInfo hands the SDK a TokenInfo holding the expiry
+// and the raw token, and the tool handler reads the token of the request it is
+// serving (oauthTokenFromRequest), never one remembered from the session.
 //
-//   - the tool handler reads the token of the request it is serving
-//     (oauthTokenFromRequest), never one remembered from the session; and
-//   - the SDK records TokenInfo.UserID when a session is created and answers
-//     403 "session user mismatch" to any later request on that session from
-//     another user, or from a caller with no OAuth identity at all.
+// TokenInfo.UserID is deliberately left empty. Set, the SDK binds a session to
+// the user who opened it and answers 403 to anyone else on it. fence-gateway
+// opens its relay sessions under its own credential and sends each user's
+// token on the tool calls, so binding would refuse every gateway user. It is
+// also not needed here: the user token always comes from the request itself,
+// so a caller on someone else's session still searches with their own.
 
 // sdkTokenExtraKey is the TokenInfo.Extra key holding the raw verified token.
 const sdkTokenExtraKey = "mcp-searxng-relay/verified-oauth-token"
@@ -153,9 +155,9 @@ const sdkTokenExtraKey = "mcp-searxng-relay/verified-oauth-token"
 // that returns what requireAuth has already verified. The SDK re-reads the
 // same Authorization header and checks the expiry once more; it does not
 // verify the signature again, which requireAuth has just done.
-func withSDKTokenInfo(identity string, expiry time.Time, token string, next http.Handler) http.Handler {
+func withSDKTokenInfo(expiry time.Time, token string, next http.Handler) http.Handler {
 	info := &auth.TokenInfo{
-		UserID:     identity,
+		// No UserID: see above.
 		Expiration: expiry,
 		Extra:      map[string]any{sdkTokenExtraKey: token},
 	}

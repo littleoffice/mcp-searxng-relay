@@ -53,7 +53,7 @@ sequenceDiagram
     G->>R: tools/call<br/>Authorization: Bearer B
 
     Note over R,B: This feature
-    R->>R: verify B (signature, iss, aud = relay, exp)<br/>bind the MCP session to alice
+    R->>R: verify B (signature, iss, aud = relay, exp)<br/>use B for this call only, not for the session
     R->>IdP: token exchange B → backend<br/>(cached until 30 s before expiry, at most 10 min)
     IdP-->>R: token C (aud = backend, sub = alice)
     R->>S: GET /search?q=…&format=json<br/>Authorization: Basic (the relay's own account, if set)<br/>X-Relay-User-Token: C
@@ -257,7 +257,7 @@ Each of these is pinned by a test in
 | Static-token callers get no user token | They have no user identity; their searches run without the header and the private engine returns nothing |
 | A failed exchange fails the search | The caller sees a generic error and the reason goes to the log; nothing is sent under no identity or another one |
 | Each request uses its own token | The token comes from the HTTP request carrying the tool call, so a refreshed token is used mid-session |
-| Sessions are bound to their user | Once a user creates an MCP session, a request on it from another user, or from a static-token caller, gets `403 session user mismatch` |
+| Shared sessions stay per-caller | On a stateful session several callers use (fence-gateway opens its relay sessions under its own credential), each search carries the exchanged token of its own caller, never the session opener's |
 | The token never follows a redirect | Token-bearing searches and token-endpoint calls refuse every redirect; Go would otherwise forward the header to whatever host a redirect names |
 | Tokens never reach logs, metrics or the model | Not even at debug level; the cache is keyed by a SHA-256 of the caller's token |
 | Exchanged tokens are reused for at most 10 minutes | A user removed at the provider stops reaching the backend within that window, whatever lifetime the provider issues |
