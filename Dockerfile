@@ -109,14 +109,26 @@ COPY native-deps.sha256 verify-native-dep.sh ./
 # through mangled Rust symbols, which are untouched, and nothing in the archive
 # refers to office_* by name. -D keeps the rewritten archive deterministic, and
 # the nm check fails the build if any office_* export survives.
+#
+# rust_eh_personality is localized for a related reason. Each Rust staticlib
+# carries its own copy of the standard library, and std defines the unwinder's
+# personality routine under that one unmangled name. While both archives were
+# built with the same rustc, their std members were identical and the linker
+# pulled in only one; once they differ (office_oxide v0.1.16 against pdf_oxide
+# v0.3.78), both are pulled in and the link fails on a duplicate definition.
+# Localized here, liboffice_oxide.a's std provides the one global routine. That
+# is safe: the routine only interprets the LLVM-emitted LSDA tables, which both
+# compilers produce in the same format, and no unwind crosses between the two
+# libraries: they meet only through extern "C" functions, out of which Rust
+# aborts rather than unwinds.
 RUN PDF_OXIDE_VERSION="$(go list -m -f '{{.Version}}' github.com/yfedoseev/pdf_oxide/go)" && \
     GOARCH="$(go env GOARCH)" && \
     go run "github.com/yfedoseev/pdf_oxide/go/cmd/install@${PDF_OXIDE_VERSION}" -dir /pdf_oxide_lib && \
     ./verify-native-dep.sh \
         "pdf_oxide/${PDF_OXIDE_VERSION}/linux_${GOARCH}/libpdf_oxide.a" \
         "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" && \
-    objcopy -D --wildcard --localize-symbol='office_*' "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" && \
-    [ -z "$(nm -g --defined-only "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/')" ]
+    objcopy -D --wildcard --localize-symbol='office_*' --localize-symbol=rust_eh_personality "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" && \
+    [ -z "$(nm -g --defined-only "/pdf_oxide_lib/lib/linux_${GOARCH}/libpdf_oxide.a" 2>/dev/null | awk '$3 ~ /^office_/ || $3 == "rust_eh_personality"')" ]
 
 # Install the office_oxide static library.
 #

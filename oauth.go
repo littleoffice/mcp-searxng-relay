@@ -319,7 +319,7 @@ func (r *jwksReloader) VerifySignature(_ context.Context, token string) ([]byte,
 			ks = reloaded
 		}
 	}
-	jws, err := jose.ParseSigned(token, asymmetricAlgs)
+	jws, err := jose.ParseSignedCompact(token, asymmetricAlgs)
 	if err != nil {
 		return nil, err
 	}

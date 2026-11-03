@@ -5,11 +5,11 @@ go 1.27.3
 require (
 	github.com/andybalholm/cascadia v1.3.5
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.6
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/markusmobius/go-trafilatura v1.12.2
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/yfedoseev/office_oxide/go v0.1.13
+	github.com/yfedoseev/office_oxide/go v0.1.16
 	github.com/yfedoseev/pdf_oxide/go v0.3.78
 	golang.org/x/crypto v0.58.0
 	golang.org/x/net v0.62.0
