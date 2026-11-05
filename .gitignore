@@ -24,3 +24,7 @@ office_oxide.h
 
 # Delve's default binary name.
 __debug_bin*
+
+# Python bytecode, e.g. from importing deploy/searxng-engine/ locally.
+__pycache__/
+*.pyc

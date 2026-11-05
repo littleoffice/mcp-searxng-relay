@@ -14,6 +14,7 @@ backend, which applies that user's own permissions. The user logs in once.
 ## Contents
 
 - [How it works](#how-it-works)
+  - [Sessions are not tied to one user](#sessions-are-not-tied-to-one-user)
 - [What you need](#what-you-need)
 - [Relay settings](#relay-settings)
 - [Identity provider](#identity-provider)
@@ -83,6 +84,32 @@ Each hop gets its own token, all for the same user:
 | C | backend | your backend | the MCP client, the model |
 
 A token that leaks is good at one place only.
+
+### Sessions are not tied to one user
+
+An MCP session on the relay is **not** bound to the OAuth user who opened it.
+Any caller holding a valid token can send tool calls on any session, and the
+relay does not answer `403` when the user changes mid-session.
+
+This is deliberate. fence-gateway opens its relay sessions under its own
+credential and sends each user's token B on the tool calls, so one relay
+session carries many users. Binding the session to the user who opened it
+would refuse every one of them.
+
+What keeps users apart is the request, not the session:
+
+- **The user token comes from the HTTP request carrying the tool call**, never
+  from the session. Each search is exchanged for, and runs as, the caller of
+  that request, so a refreshed token takes effect mid-session and nobody
+  searches as the session's opener.
+- **Per-caller state is keyed by identity and session together**: the fetch
+  history `searxng_session_sources` reads back, and the set of URLs the
+  [provenance check](../provenance.go) lets the caller fetch. Two users on one
+  session never see each other's entries.
+
+So a session ID on its own is not a credential: knowing another user's session
+ID gives you nothing you would not get on a session of your own. Do not rely on
+sessions to separate users anywhere else either; rely on the token.
 
 ## What you need
 
@@ -257,7 +284,7 @@ Each of these is pinned by a test in
 | Static-token callers get no user token | They have no user identity; their searches run without the header and the private engine returns nothing |
 | A failed exchange fails the search | The caller sees a generic error and the reason goes to the log; nothing is sent under no identity or another one |
 | Each request uses its own token | The token comes from the HTTP request carrying the tool call, so a refreshed token is used mid-session |
-| Shared sessions stay per-caller | On a stateful session several callers use (fence-gateway opens its relay sessions under its own credential), each search carries the exchanged token of its own caller, never the session opener's |
+| Sessions are not tied to one user, by design | On a stateful session several callers use (fence-gateway opens its relay sessions under its own credential), each search carries the exchanged token of its own caller, never the session opener's; see [Sessions are not tied to one user](#sessions-are-not-tied-to-one-user) |
 | The token never follows a redirect | Token-bearing searches and token-endpoint calls refuse every redirect; Go would otherwise forward the header to whatever host a redirect names |
 | Tokens never reach logs, metrics or the model | Not even at debug level; the cache is keyed by a SHA-256 of the caller's token |
 | Exchanged tokens are reused for at most 10 minutes | A user removed at the provider stops reaching the backend within that window, whatever lifetime the provider issues |
