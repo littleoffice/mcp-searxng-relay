@@ -57,9 +57,10 @@ cache hits, not four fetches.
 **The key is the URL and nothing else.** There is no identity or session in it,
 so the cache is shared by every caller of the relay. That is the right default —
 the content is public web pages, and per-tenant caches would multiply upstream
-load by the tenant count for no security gain, since the relay sends no
+load by the tenant count for no security gain, since URL fetches carry no
 caller-specific credentials upstream and the origin therefore cannot
-distinguish callers anyway. But two properties follow that are worth stating:
+distinguish callers anyway. (Searches can carry a [per-user
+token](user-tokens.md); fetches never do, and search results are not cached.) But two properties follow that are worth stating:
 
 - A second caller fetching a URL a first caller already fetched is served from
   cache, so the origin never sees the second request. With

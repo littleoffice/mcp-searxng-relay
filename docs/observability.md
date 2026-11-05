@@ -59,6 +59,7 @@ Rows are shown only where they mean something, so the banner never states a sett
 
 - `address` — HTTP mode only; stdio serves no socket.
 - `searxng tokens` and `username` — only when `SEARXNG_TOKENS` / `AUTH_USERNAME` are set. The token *count* is shown, never the values.
+- `searxng user token` — only when `SEARXNG_USER_TOKEN_MODE=exchange`: the client ID, audience and header, never the secret. See [Per-user tokens](user-tokens.md).
 - `session max age` and `janitor interval` — stateful mode only; in stateless mode there are no sessions for the janitor to expire.
 - `allowed hosts`, `allowed cidrs` — only once `FETCH_ALLOWED_HOSTS` / `FETCH_ALLOWED_CIDRS` have widened the SSRF policy, in which case `fetch policy` flips from `public only` to `widened` and lists exactly what you allowed, in the order you wrote it.
 - `fetch proxy` — only when `FETCH_PROXY` is set, with any password in the URL redacted and the scope named.
@@ -177,6 +178,7 @@ The exposed series are:
 | `mcp_invisible_chars_removed_total` | — | Invisible characters (Unicode tags, zero-width, bidi controls) removed from fetched text — page bodies, metadata fields, search titles and snippets — before fencing. Counted when the text is cleaned, so a cache hit does not count twice. A host that suddenly contributes thousands is hiding a payload; the `info` log line `invisible characters removed` names the URL |
 | `mcp_hidden_elements_removed_total` | — | HTML elements a browser would not render, removed before extraction — one per hidden subtree, not per descendant. Counted at fetch, not per cache hit; the `info` log line `hidden elements removed from fetched page` names the URL. Hidden form inputs make low single digits normal on many pages |
 | `mcp_searches_degraded_total` | — | `searxng_web_search` calls that returned HTTP 200 but named unresponsive engines. **Read as a ratio against `mcp_searches_total`** — the single number that says whether backend flakiness is background noise or the thing making your agents' answers worse. **Not** an error, so `mcp_search_errors_total` deliberately does not see them |
+| `mcp_searxng_user_token_total` | `outcome` | Searches by what happened to the [per-user token](user-tokens.md): `exchanged` (fresh from the identity provider), `cached`, `no_user_token` (a static-token caller; the search ran without one), `failed` (exchange failed, search refused). Only moves with `SEARXNG_USER_TOKEN_MODE=exchange`. Alert on `failed` |
 | `mcp_searxng_engine_errors_total` | `engine=<name>` | Failures per SearXNG backend, from the upstream `unresponsive_engines` field. Answers *which* engine once the ratio above says there is a problem. Bounded to 256 distinct names; the remainder aggregates under `engine="__overflow__"` |
 | `mcp_active_sessions` | — | Gauge: current live MCP sessions (stateful mode only) |
 | `mcp_search_duration_seconds` | `le` | Histogram: SearXNG search round-trip latency. Buckets from 50ms to 30s |

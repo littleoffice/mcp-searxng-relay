@@ -25,12 +25,13 @@ import (
 // We only register tool handlers and wire transports.
 
 type Server struct {
-	config      Config
-	client      *http.Client // SearXNG requests only
-	fetchClient *http.Client // URL fetching — SSRF-safe dialer + redirect check
-	cache       *lru.Cache[string, cacheEntry]
-	cacheTTL    time.Duration
-	metrics     Metrics // in-process counters
+	config          Config
+	client          *http.Client // SearXNG requests only
+	fetchClient     *http.Client // URL fetching — SSRF-safe dialer + redirect check
+	userTokenClient *http.Client // SearXNG searches carrying a user token — never follows redirects
+	cache           *lru.Cache[string, cacheEntry]
+	cacheTTL        time.Duration
+	metrics         Metrics // in-process counters
 
 	// mcpServer owns the MCP protocol state (tools, sessions, JSON-RPC).
 	mcpServer *mcp.Server
@@ -142,6 +143,14 @@ func NewServer(cfg Config) *Server {
 		client: &http.Client{
 			Timeout:   30 * time.Second,
 			Transport: searchTransport,
+		},
+		// Searches that carry a user token (searxng_user_token.go) share the
+		// search transport but never follow a redirect: Go forwards custom
+		// headers to whatever host a redirect names.
+		userTokenClient: &http.Client{
+			Timeout:       30 * time.Second,
+			Transport:     searchTransport,
+			CheckRedirect: refuseRedirect,
 		},
 		fetchClient: &http.Client{
 			Timeout:       30 * time.Second,

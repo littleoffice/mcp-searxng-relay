@@ -120,16 +120,31 @@ func (o *oauthSettings) describe() string {
 // configured — the required scope, and finally extracts the identity claim.
 // This is the only new work requireAuth performs for an OAuth caller.
 func (o *oauthSettings) Verify(ctx context.Context, rawToken string) (string, error) {
+	id, _, err := o.verifyWithExpiry(ctx, rawToken)
+	return id, err
+}
+
+// verifyWithExpiry is Verify that also returns the token's exp, which the
+// per-user SearXNG token path hands to the MCP SDK (searxng_user_token.go).
+func (o *oauthSettings) verifyWithExpiry(ctx context.Context, rawToken string) (string, time.Time, error) {
+	id, idt, err := o.verify(ctx, rawToken)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return id, idt.Expiry, nil
+}
+
+func (o *oauthSettings) verify(ctx context.Context, rawToken string) (string, *oidc.IDToken, error) {
 	idt, err := o.verifier.Verify(ctx, rawToken)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var claims map[string]any
 	if err := idt.Claims(&claims); err != nil {
-		return "", fmt.Errorf("parse token claims: %w", err)
+		return "", nil, fmt.Errorf("parse token claims: %w", err)
 	}
 	if o.requiredScope != "" && !claimHasScope(claims, o.requiredScope) {
-		return "", fmt.Errorf("token is missing the required scope %q", o.requiredScope)
+		return "", nil, fmt.Errorf("token is missing the required scope %q", o.requiredScope)
 	}
 	id := claimString(claims, o.identityClaim)
 	if id == "" {
@@ -139,9 +154,9 @@ func (o *oauthSettings) Verify(ctx context.Context, rawToken string) (string, er
 		id = idt.Subject
 	}
 	if id == "" {
-		return "", fmt.Errorf("token carries no %q claim to use as identity", o.identityClaim)
+		return "", nil, fmt.Errorf("token carries no %q claim to use as identity", o.identityClaim)
 	}
-	return id, nil
+	return id, idt, nil
 }
 
 // metadataDocument returns the RFC 9728 protected-resource metadata as a JSON

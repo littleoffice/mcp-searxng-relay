@@ -255,9 +255,18 @@ func (s *Server) requireAuth(next http.Handler) http.Handler {
 		// client but not worth a warn line per probe) and falls through to 401.
 		if oauthOn {
 			if tok := bearerToken(authz); tok != "" {
-				identity, err := s.config.OAuth.Verify(r.Context(), tok)
+				identity, expiry, err := s.config.OAuth.verifyWithExpiry(r.Context(), tok)
 				if err == nil {
-					next.ServeHTTP(w, r.WithContext(withIdentity(r.Context(), identity)))
+					r = r.WithContext(withIdentity(r.Context(), identity))
+					// Per-user SearXNG tokens need the verified token of
+					// *this* request, which the SDK only carries per
+					// request as TokenInfo (searxng_user_token.go).
+					// Static-token secrets never take this path.
+					if s.config.UserTokenExchange.enabled() {
+						withSDKTokenInfo(expiry, tok, next).ServeHTTP(w, r)
+						return
+					}
+					next.ServeHTTP(w, r)
 					return
 				}
 				slog.Debug("oauth token rejected",
