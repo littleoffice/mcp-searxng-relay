@@ -3,12 +3,27 @@ https://searxng.domain.tld:443 {
      ca https://acme.domain.tld:9000/acme/acme/directory
    }
 
+   # /mcp is the verifying gateway, not the relay: every fence is checked
+   # before the response leaves this host.  handle_path strips the prefix, so
+   # the gateway sees "/", which is where its MCP handler is mounted.  Agents
+   # authenticate here with a bearer token; there is no SSO on this path.
+   #
+   # There is deliberately no route to the relay or to SearXNG, not even a
+   # commented one: Caddy shares no network with either (see
+   # docker-compose.yaml), so the gateway is the only way in.
    handle_path /mcp* {
-     reverse_proxy mcp-searxng-relay:3000 {
-       flush_interval -1	
+     reverse_proxy fence-gateway:3001 {
+       flush_interval -1
      }
    }
 
-   reverse_proxy searxng:8080
-}
+   # The SearXNG web UI for people, behind single sign-on, if you add the
+   # webui/ overlay (webui/README.md).  Without it this imports nothing.
+   import webui/*.caddy
 
+   # Everything else.  Up to v2.2.0 this path served the SearXNG web UI with no
+   # login; say where it went instead of a bare 404.
+   handle {
+     respond "Not found. The SearXNG web UI is not published by default since mcp-searxng-relay v2.3.0; see https://github.com/littleoffice/mcp-searxng-relay/blob/main/docs/upgrading.md" 404
+   }
+}
