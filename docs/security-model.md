@@ -14,6 +14,7 @@ The threats the relay is built against and the controls that answer them. Signed
 - [Per-user tokens for SearXNG engines](#per-user-tokens-for-searxng-engines)
 - [Cross-origin protection](#cross-origin-protection)
 - [Container hardening](#container-hardening)
+- [Deployment checklist](#deployment-checklist)
 - [PDF and Office safety](#pdf-and-office-safety)
 - [Reporting and provenance](#reporting-and-provenance)
 
@@ -138,6 +139,35 @@ The Streamable HTTP transport is wrapped in Go's `net/http.CrossOriginProtection
 ## Container hardening
 
 The Docker image runs as a non-root user (UID 1001) on a minimal `scratch` base — the runtime image contains only the statically linked binary and CA certificates, with no shell, package manager, or OS userland.
+
+## Deployment checklist
+
+The relay's controls (bearer auth, rate limits, the audit log, the source ledger, the fence) only apply to traffic that goes through it. SearXNG has no authentication of its own, so anything that can reach it can search without leaving a trace in the relay. Likewise, with a verifying [fence-gateway](https://github.com/littleoffice/fence-gateway) in front, anything that can reach the relay directly gets unverified output. Three rules close those side doors:
+
+1. **Publish only the front door.** That is the gateway, or the relay when there is no gateway. Never publish SearXNG's port, or the relay's port behind a gateway, and never route a reverse proxy to them. The SearXNG web UI is the one exception, and only on purpose (below).
+2. **Give every hop its own credential, and don't forward it further.** Each credential is checked at one hop:
+
+   | Hop | Credential | Set where |
+   |---|---|---|
+   | client → gateway | gateway token or OAuth JWT | gateway `MCP_AUTH_TOKEN*` / `MCP_OAUTH_*` |
+   | gateway → relay | the client's token (`passthrough`), or a token minted for the relay (`exchange`); the gateway's own token for startup | gateway `UPSTREAM_MCP_*`, relay `MCP_AUTH_TOKEN*` / `MCP_OAUTH_*` |
+   | relay → SearXNG | network reachability; optionally engine tokens and per-user tokens | relay `SEARXNG_TOKENS`, `SEARXNG_USER_TOKEN_*`; SearXNG `tokens:` |
+   | scraper → `/metrics` | a metrics-only token, never an MCP token | relay `MCP_METRICS_TOKEN`; through the gateway, its `MCP_METRICS_TOKEN` + `UPSTREAM_METRICS_TOKEN` |
+   | prober → `/health` | none, or `MCP_HEALTH_TOKEN` | relay |
+
+   The gateway's `passthrough` mode forwards the client's token to the relay, so that token is valid at both hops. That is only safe when rule 3 holds.
+3. **Make each service reachable only from the one in front of it.** SearXNG accepts connections only from the relay, and the relay only from the gateway (plus your scraper, if it scrapes the relay directly). In Compose, use internal networks that only those two containers share. In Kubernetes, use NetworkPolicy; a ClusterIP Service on its own is reachable from every pod in the cluster.
+
+**The SearXNG web UI is off by default** in the shipped deployments. Publishing it for people opens a second, deliberate front door: put single sign-on in front of it, and remember that searches made there do not pass through the relay and are not in its audit log.
+
+Where each shipped deployment stands:
+
+| Deployment | How the rules are met |
+|---|---|
+| stdio | No listener; nothing to reach. SearXNG exposure is up to you |
+| [`deploy/podman`](../deploy/podman/README.md) | Gateway in front; one internal network per hop; SearXNG unpublished, or behind oauth2-proxy with the [`webui/`](../deploy/podman/webui/README.md) overlay |
+| [`deploy/kubernetes`](../deploy/kubernetes/README.md) | `networkpolicy.yaml` for the relay; `networkpolicy-searxng.example.yaml` for SearXNG |
+| [searxng-helm](https://github.com/littleoffice/searxng-helm) | Default-deny NetworkPolicies. Set `allowSameNamespace: false` to narrow them to specific peers |
 
 ## PDF and Office safety
 

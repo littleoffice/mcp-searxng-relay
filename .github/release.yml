@@ -1,0 +1,10 @@
+# Sections for GitHub's generated release notes (release.yml workflow sets
+# generate_release_notes: true).  Label a PR `breaking` when upgrading needs
+# action, and add an entry to docs/upgrading.md in the same PR; those PRs are
+# then listed first.
+changelog:
+  categories:
+    - title: Breaking changes (see docs/upgrading.md)
+      labels: [breaking]
+    - title: Other changes
+      labels: ["*"]
