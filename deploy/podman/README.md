@@ -13,6 +13,12 @@ Replace `domain.tld` with the hostname you'll serve under, in both:
 - [`envs/.searxng.env`](./envs/.searxng.env) — the `SEARXNG_HOSTNAME` value
 - [`Caddyfile`](./Caddyfile) — the site address on the first line and the email in `tls admin@…`
 
+Then give SearXNG a secret key of its own. The shipped [`settings.yml`](./settings.yml) carries only the upstream placeholder, which SearXNG refuses to start with, so that no two installs of this example share a key:
+
+```bash
+echo "SEARXNG_SECRET=$(openssl rand -hex 32)" >> envs/.searxng.env
+```
+
 If you need SearXNG itself to do more (extra engines, branding, locales), the upstream reference is [docs.searxng.org](https://docs.searxng.org/admin/settings/settings.html) and the file to edit is [`settings.yml`](./settings.yml).
 
 ## 2. Pick a TLS certificate source
@@ -23,7 +29,7 @@ The shipped [`Caddyfile`](./Caddyfile) points at an internal ACME directory, whi
 - **Self-signed, local-only** — replace it with `tls internal`. The client will need the Caddy root in its trust store.
 - **Bring your own cert** — `tls /path/to/cert.pem /path/to/key.pem`, plus a bind-mount in [`docker-compose.yaml`](./docker-compose.yaml).
 
-Caddy also fronts SearXNG here, so this stack keeps it. If you only need the relay and would rather not run a reverse proxy, the relay can terminate TLS itself via `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME_DOMAINS` (including against a private step-ca) — see [TLS](../../docs/operations.md#tls).
+Caddy publishes only the relay, at `/mcp`; every other path answers 404. SearXNG runs without a login and with its limiter off, because the relay is its only intended client, so it is not routed. To publish its web UI on purpose, turn the limiter on in [`settings.yml`](./settings.yml), put access control in front of it, and follow the comment in the [`Caddyfile`](./Caddyfile). If you only need the relay and would rather not run a reverse proxy, the relay can terminate TLS itself via `MCP_TLS_CERT`/`MCP_TLS_KEY` or `MCP_TLS_ACME_DOMAINS` (including against a private step-ca) — see [TLS](../../docs/operations.md#tls).
 
 ## 3. Set the relay auth token
 
