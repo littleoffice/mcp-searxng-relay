@@ -102,7 +102,10 @@ server:
   # If your instance owns a /etc/searxng/settings.yml file, then set the following
   # values there.
 
-  secret_key: "FG8JnBBFpIP82ToxUGiE1N4kXiI1bW"  # Is overwritten by ${SEARXNG_SECRET}
+  # Deliberately the upstream placeholder: SearXNG refuses to start with it.
+  # Set SEARXNG_SECRET in envs/.searxng.env (see the README); a key committed
+  # here would be the same, public, key on every install of this example.
+  secret_key: "ultrasecretkey"  # Is overwritten by ${SEARXNG_SECRET}
   # Proxy image results through SearXNG. Is overwritten by ${SEARXNG_IMAGE_PROXY}
   image_proxy: false
   # 1.0 and 1.1 are supported

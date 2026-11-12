@@ -9,6 +9,15 @@ https://searxng.domain.tld:443 {
      }
    }
 
-   reverse_proxy searxng:8080
+   # SearXNG itself is not published. It runs here without a login and with
+   # its limiter off, because the relay is its only intended client, so
+   # routing it would hand an open search API to anyone who can reach this
+   # host. To publish the web UI on purpose, turn the limiter on in
+   # settings.yml, put access control in front (basic_auth, forward_auth or
+   # a remote_ip matcher), and then replace the `respond` below with:
+   #   reverse_proxy searxng:8080
+   handle {
+     respond 404
+   }
 }
 

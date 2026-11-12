@@ -330,7 +330,7 @@ func (s *Server) search(
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("search request failed: %w", err)
+		return nil, fmt.Errorf("search request failed: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
 
@@ -380,6 +380,23 @@ func (s *Server) search(
 	}
 
 	return searxResp.Results, nil
+}
+
+// withoutRequestURL drops the request URL from a transport error.
+//
+// http.Client.Do fails with a *url.Error whose text is
+// `Get "<the whole URL>": <cause>`, and the SearXNG URL carries SEARXNG_TOKENS
+// in its query string. The search error is returned to the caller as the tool
+// result and logged, so left as it is a SearXNG outage or timeout hands the
+// operator's engine tokens to every caller, the model behind them, and the
+// log. The cause alone (connection refused, deadline exceeded, redirect
+// refused) is what a caller can act on.
+func withoutRequestURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		return ue.Err
+	}
+	return err
 }
 
 // redactedUpstreamURL renders a SearXNG request URL for logging with the

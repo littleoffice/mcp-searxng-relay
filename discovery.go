@@ -72,7 +72,8 @@ func discoverEngines(ctx context.Context, cfg Config, client *http.Client, logge
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET /config: %w", err)
+		// The URL carries SEARXNG_TOKENS, and this error is logged at startup.
+		return nil, fmt.Errorf("GET /config: %w", withoutRequestURL(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

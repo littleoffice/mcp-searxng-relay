@@ -138,3 +138,30 @@ func TestConfigFromEnv_SearxngTokensCSV(t *testing.T) {
 		t.Errorf("tokens not trimmed as expected: %q", cfg.SearxngTokens)
 	}
 }
+
+// A transport failure must not carry the request URL back to the caller: the
+// URL holds SEARXNG_TOKENS, and the error text becomes the tool result the
+// model reads as well as a log line.
+func TestSearch_TransportErrorOmitsTokens(t *testing.T) {
+	// A listener that is closed again: the port refuses connections.
+	srv := httptest.NewServer(http.NotFoundHandler())
+	addr := srv.URL
+	srv.Close()
+
+	s := NewServer(Config{
+		SearxngURL:      addr,
+		CacheMaxEntries: 1,
+		SearxngTokens:   []string{"secret-engine-token"},
+	})
+
+	_, err := s.search(context.Background(), "hello", 1, "", "all", "", 0, "")
+	if err == nil {
+		t.Fatal("search against a closed port returned no error")
+	}
+	if msg := err.Error(); strings.Contains(msg, "secret-engine-token") || strings.Contains(msg, "tokens=") {
+		t.Fatalf("search error carries the request URL and its tokens: %q", msg)
+	}
+	if !strings.Contains(err.Error(), "search request failed") {
+		t.Errorf("error lost its context: %q", err)
+	}
+}
