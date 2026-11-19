@@ -9,11 +9,12 @@ Reference documentation for mcp-searxng-relay. The project overview, features an
 | [MCP tools](tools.md) | Parameters, output shapes and examples for each tool |
 | [Architecture](architecture.md) | One search-then-read turn, step by step |
 | [Per-user tokens](user-tokens.md) | Searching permission-aware backends as the calling user: token exchange, the SearXNG engine, deployment rules |
-| [Security model](security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening |
+| [Security model](security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening, deployment checklist |
 | [Prompt fencing](prompt-fencing.md) | Fence layout, the signed preamble, the signing key |
 | [Operations](operations.md) | Caches, health checks, graceful shutdown, HTTP timeouts, TLS |
 | [Logging and metrics](observability.md) | Startup banner, log fields, Prometheus series |
 | [Caches](caching.md) | Inventory of every cache and bounded store, and how to size them |
 | [Fence verification contract](fence-verification.md) | Normative wire format and verification procedure for verifiers |
 | [Supply-chain statement](supply-chain.md) | How the code was written, dependencies, build provenance, reproducibility, known gaps |
+| [Upgrading](upgrading.md) | Breaking changes per release and how to move a running deployment over |
 | [Security policy](SECURITY.md) | Supported versions and how to report a vulnerability |

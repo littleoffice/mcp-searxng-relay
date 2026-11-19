@@ -1,0 +1,30 @@
+# Imported into the site block of ../Caddyfile by the webui overlay
+# (webui/docker-compose.webui.yaml mounts it at /etc/caddy/webui/).
+
+# oauth2-proxy's own endpoints: sign-in, the IdP callback, sign-out.
+handle /oauth2/* {
+  reverse_proxy oauth2-proxy:4180 {
+    header_up X-Real-IP {remote_host}
+    header_up X-Forwarded-Uri {uri}
+  }
+}
+
+# Everything else is the SearXNG web UI.  The matcher matters: a handle with a
+# matcher sorts before the Caddyfile's bare catch-all 404, so this one wins
+# whenever the overlay is in.  Each request is checked with oauth2-proxy first;
+# without a session the browser is sent to sign in.  Searches made here go
+# straight to SearXNG, so they are not in the relay's audit log or source
+# ledger.
+@webui not path /mcp*
+handle @webui {
+  forward_auth oauth2-proxy:4180 {
+    uri /oauth2/auth
+    header_up X-Real-IP {remote_host}
+
+    @unauthenticated status 401
+    handle_response @unauthenticated {
+      redir * /oauth2/sign_in?rd={scheme}://{host}{uri}
+    }
+  }
+  reverse_proxy searxng:8080
+}

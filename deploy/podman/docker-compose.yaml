@@ -13,8 +13,11 @@ services:
       - caddy_config:/config:rw
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    # Caddy shares a network with the gateway only.  It has no route to the
+    # relay or to SearXNG, so no Caddyfile edit can expose either of them.
+    # (The webui/ overlay adds a `web` network to reach SearXNG's UI.)
     networks: [edge]
-    depends_on: [searxng, mcp-searxng-relay]
+    depends_on: [fence-gateway]
     logging: &log { driver: json-file, options: { max-size: 1m, max-file: "1" } }
     restart: unless-stopped
 
@@ -28,8 +31,53 @@ services:
     stdin_open: false
     volumes:
       - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
-    networks: [edge]
+    # relay:  reachable from the gateway, and from nothing else.
+    # search: its private line to SearXNG.
+    # egress: its own route out, for fetching URLs.  Shared with nobody, so
+    #         being on a non-internal network does not make it reachable.
+    networks: [relay, search, egress]
     depends_on: [searxng]
+    logging: *log
+    restart: unless-stopped
+
+  # Verifies the relay's <sec:fence> signatures before any bytes reach a model,
+  # and is what /mcp resolves to at the edge — the relay is no longer routed
+  # from outside.  Every client credential is forwarded to the relay unchanged
+  # (UPSTREAM_MCP_AUTH_MODE=passthrough), so the relay still tells its callers
+  # apart; see README step 4.
+  fence-gateway:
+    # v0.2.0
+    image: ghcr.io/littleoffice/fence-gateway@sha256:9f0cf866d678f246d20337f78fb9a9f76d537305ad83121105c7c0103ebc1186
+    container_name: fence-gateway
+    env_file: ./envs/.fence-gateway.env
+    command:
+      - -upstream=http://mcp-searxng-relay:3000/mcp
+      # reject is the only policy that stops a boundary-escape attack rather
+      # than describing it.  annotate and audit are for rollout.
+      - -policy=reject
+      # Pin the relay's fence key (README step 5).  Required: the key is
+      # fetched over plain HTTP from another container, and without a pin the
+      # gateway refuses to start rather than trust whoever answers
+      # /fence/public-key.
+      #- -pin=<16 hex chars>
+      # The relay signs its preamble by default (format 1.1), so every piece
+      # of text it returns is fenced; anything unsigned is a failure.  Drop
+      # this only while the relay runs with FENCE_PREAMBLE=prose.
+      - -require-all-fenced
+      #- -max-age=10m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    stdin_open: false
+    volumes:
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    # edge: what Caddy forwards /mcp to (and its way out to an OAuth issuer,
+    # if you configure one).  relay: its only way to the relay.  Not on
+    # `search`, and SearXNG is not on `edge`: the gateway cannot reach it.
+    networks: [edge, relay]
+    # Start ordering only.  The gateway gives the relay ~7.5s to answer before
+    # exiting; the restart policy covers a relay that takes longer.
+    depends_on: [mcp-searxng-relay]
     logging: *log
     restart: unless-stopped
 
@@ -44,7 +92,10 @@ services:
       - ./settings.yml:/etc/searxng/settings.yml
       - core_config:/etc/searxng/
       - core_data:/var/cache/searxng/
-    networks: [edge, backend]
+    # search: the relay's private line in, and its only way in.
+    # searxng-egress: its own route out to the search engines.
+    # backend: Valkey.
+    networks: [search, searxng-egress, backend]
     depends_on: [valkey]
     logging: *log
     restart: always
@@ -66,8 +117,29 @@ services:
     logging: *log
     restart: always
 
+# Each network is one trust boundary.  Who shares a network with whom is the
+# whole access-control story for this stack: a container can only connect to
+# the containers it shares a network with.
+#
+#   edge            caddy, fence-gateway          what Caddy can reach
+#   relay           fence-gateway, relay          the only way to the relay
+#   search          relay, searxng                the relay's line to SearXNG
+#   egress          relay                         the relay's own route out
+#   searxng-egress  searxng                       SearXNG's own route out
+#   backend         searxng, valkey               SearXNG's cache
+#
+# Nothing outside reaches SearXNG: it has no login of its own.  To publish its
+# web UI for people, add webui/docker-compose.webui.yaml (single sign-on).
 networks:
   edge:
+    internal: false
+  relay:
+    internal: true
+  search:
+    internal: true
+  egress:
+    internal: false
+  searxng-egress:
     internal: false
   backend:
     internal: true
