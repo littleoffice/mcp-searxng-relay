@@ -97,6 +97,12 @@ jobs:
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+          # latest=false: the raw rule above is the only thing that may add
+          # "latest". The default (latest=auto) adds it for every
+          # type=ref,event=tag, prerelease or not, which is how v2.3.0-rc1
+          # was pushed as :latest.
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=mcp-searxng-relay
             org.opencontainers.image.description=MCP relay for SearXNG with content extraction and prompt fencing
@@ -191,9 +197,15 @@ jobs:
           sbom-path: sbom.spdx.json
           push-to-registry: true
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (draft)
+        # Releases in this repository are immutable: once published, no
+        # asset can be added. So the release is created as a draft, the SBOMs
+        # are uploaded to it, and the next step publishes it. v2.3.0-rc1 was
+        # published first and the upload was refused.
+        id: release
         uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
+          draft: true
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
           # prerelease is auto-true for anything with a hyphen (rc1, beta, etc.)
@@ -220,3 +232,14 @@ jobs:
 
             See [`docs/supply-chain.md`](docs/supply-chain.md) for the full
             provenance and verification story.
+
+      - name: Publish GitHub Release
+        # Publishing makes the release, its assets and its tag immutable.
+        # Only a full release becomes "latest"; a prerelease never does.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ steps.release.outputs.id }}
+          MAKE_LATEST: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+        run: |
+          gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_ID}" \
+            -F draft=false -f make_latest="${MAKE_LATEST}" --jq '.html_url'
