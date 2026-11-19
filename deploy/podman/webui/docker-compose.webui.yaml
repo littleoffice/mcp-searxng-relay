@@ -19,10 +19,9 @@ services:
   # a valid session, and sends anyone without one to your identity provider.
   # Agents never pass through here: /mcp is bearer-only at the gateway.
   oauth2-proxy:
-    # Pin by digest like every other image here (webui/README.md step 3):
-    #   podman pull quay.io/oauth2-proxy/oauth2-proxy:v7 && \
-    #   podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7
-    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:CHANGEME
+    # v7.15.6, pinned by digest like every other image here. To move to a
+    # newer release, see webui/README.md step 3.
+    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:c3415e8660af553f5e18f5d90db050614c02493c0ac6260ac59442f6d9b12048
     container_name: oauth2-proxy
     env_file: ./webui/.oauth2-proxy.env
     cap_drop: [ALL]
