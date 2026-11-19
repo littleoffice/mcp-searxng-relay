@@ -1,6 +1,6 @@
 # mcp-searxng-relay
 
-> **Upgrading a `deploy/podman` setup to v2.3.0?** The stack now puts fence-gateway in front of `/mcp` and no longer publishes the SearXNG web UI; old env files will not start as they are. See [Upgrading](docs/upgrading.md). *(Notice added November 2026; remove after v2.5.0.)*
+> **Upgrading to v2.3.0?** `searxng_read_url` now refuses images unless `FETCH_ALLOW_IMAGES=true`, and fetching an address the relay never showed, if it carries data such as a query string, needs the user's confirmation (`FETCH_URL_PROVENANCE`, `FETCH_PROVENANCE_TRUSTED_HOSTS`). The `deploy/podman` stack now puts fence-gateway in front of `/mcp` and no longer publishes the SearXNG web UI; old env files will not start as they are. See [Upgrading](docs/upgrading.md). *(Notice added November 2026; remove after v2.5.0.)*
 
 A Model Context Protocol (MCP) server giving AI agents web search and URL fetching through your own self-hosted [SearXNG](https://github.com/searxng/searxng) instance — built for environments where search must stay on approved infrastructure and every query must be auditable. No third-party search APIs, no external data brokers; queries never leave infrastructure you control.
 

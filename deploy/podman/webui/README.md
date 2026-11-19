@@ -25,14 +25,16 @@ At your identity provider, register a confidential OIDC client with redirect URI
 
 Fill in the `CHANGEME` values in [`.oauth2-proxy.env`](./.oauth2-proxy.env): issuer URL, client ID and secret, and a cookie secret (`openssl rand -base64 32 | tr -- '+/' '-_'`). Replace `domain.tld` in the redirect URL. Narrow who may sign in with `OAUTH2_PROXY_EMAIL_DOMAINS` or `OAUTH2_PROXY_ALLOWED_GROUPS`; the shipped `*` admits every account your provider authenticates.
 
-## 3. Pin the image
+## 3. The image
+
+[`docker-compose.webui.yaml`](./docker-compose.webui.yaml) pins oauth2-proxy v7.15.6 by digest. To move to a newer release, pick one from the [releases page](https://github.com/oauth2-proxy/oauth2-proxy/releases) (quay.io publishes full versions such as `v7.15.6`, not a floating `v7` tag), then:
 
 ```bash
-podman pull quay.io/oauth2-proxy/oauth2-proxy:v7
-podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7
+podman pull quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
+podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7.15.6
 ```
 
-Put the digest in the `image:` line of [`docker-compose.webui.yaml`](./docker-compose.webui.yaml) in place of `sha256:CHANGEME`.
+Put the digest in the `image:` line, and update the version in the comment above it.
 
 ## 4. Bring it up
 
