@@ -1,5 +1,7 @@
 # mcp-searxng-relay
 
+> **Upgrading a `deploy/podman` setup to v2.3.0?** The stack now puts fence-gateway in front of `/mcp` and no longer publishes the SearXNG web UI; old env files will not start as they are. See [Upgrading](docs/upgrading.md). *(Notice added November 2026; remove after v2.5.0.)*
+
 A Model Context Protocol (MCP) server giving AI agents web search and URL fetching through your own self-hosted [SearXNG](https://github.com/searxng/searxng) instance — built for environments where search must stay on approved infrastructure and every query must be auditable. No third-party search APIs, no external data brokers; queries never leave infrastructure you control.
 
 **Who this is for.** Teams running AI agents where outbound search is restricted, monitored, or both, and where "we use a hosted search API" is not an acceptable answer. The project puts a defensible security posture and a clean audit trail ahead of breadth of features: every search and fetch is attributed to an identity and a session, and nothing that would widen a security boundary happens silently.
@@ -173,6 +175,7 @@ Every variable, with its default: [docs/configuration.md](docs/configuration.md)
 | SSRF policy | Fetches cannot reach non-public addresses unless you allow-list them | [SSRF protection](docs/security-model.md#ssrf-protection) |
 | Authentication | Every call is tied to an identity in the audit log | [Authentication](docs/security-model.md#authentication) |
 | Container | Non-root on a `scratch` base, reproducible build | [Container hardening](docs/security-model.md#container-hardening) |
+| Deployment | Only the front door is published; every hop has its own credential and network | [Deployment checklist](docs/security-model.md#deployment-checklist) |
 
 None of these makes a model ignore instructions written in content it reads; a signature proves where bytes came from, not that they are safe to act on. See [Prompt injection](docs/security-model.md#prompt-injection).
 
@@ -191,13 +194,14 @@ Report vulnerabilities privately: [docs/SECURITY.md](docs/SECURITY.md). Build pr
 | [MCP tools](docs/tools.md) | Parameters, output shapes and examples for each tool |
 | [Architecture](docs/architecture.md) | One search-then-read turn, step by step |
 | [Per-user tokens](docs/user-tokens.md) | Searching permission-aware backends as the calling user: token exchange, the SearXNG engine, deployment rules |
-| [Security model](docs/security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening |
+| [Security model](docs/security-model.md) | Prompt injection, hidden-text removal, SSRF, authentication, hardening, deployment checklist |
 | [Prompt fencing](docs/prompt-fencing.md) | Fence layout, the signed preamble, the signing key |
 | [Operations](docs/operations.md) | Caches, health checks, graceful shutdown, HTTP timeouts, TLS |
 | [Logging and metrics](docs/observability.md) | Startup banner, log fields, Prometheus series |
 | [Caches](docs/caching.md) | Inventory of every cache and bounded store, and how to size them |
 | [Fence verification contract](docs/fence-verification.md) | Normative wire format and verification procedure for verifiers |
 | [Supply-chain statement](docs/supply-chain.md) | How the code was written, dependencies, build provenance, reproducibility, known gaps |
+| [Upgrading](docs/upgrading.md) | Breaking changes per release and how to move a running deployment over |
 | [Security policy](docs/SECURITY.md) | Supported versions and how to report a vulnerability |
 
 ---

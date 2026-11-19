@@ -1,0 +1,45 @@
+# Opt-in overlay: publish the SearXNG web UI for people, behind single sign-on.
+#
+#   podman-compose -f docker-compose.yaml -f webui/docker-compose.webui.yaml up -d
+#
+# Run it from deploy/podman/; paths below are relative to that directory, as in
+# the base file.  See webui/README.md.
+#
+# This is a second front door: searches made in the web UI go straight to
+# SearXNG and are not in the relay's audit log or source ledger.
+services:
+  caddy:
+    volumes:
+      - ./webui/webui.caddy:/etc/caddy/webui/webui.caddy:ro
+    # web: Caddy's line to SearXNG's UI.  Still nothing to the relay.
+    networks: [edge, web]
+    depends_on: [fence-gateway, oauth2-proxy, searxng]
+
+  # Caddy asks it, through forward_auth, whether each browser request carries
+  # a valid session, and sends anyone without one to your identity provider.
+  # Agents never pass through here: /mcp is bearer-only at the gateway.
+  oauth2-proxy:
+    # Pin by digest like every other image here (webui/README.md step 3):
+    #   podman pull quay.io/oauth2-proxy/oauth2-proxy:v7 && \
+    #   podman image inspect --format '{{index .RepoDigests 0}}' quay.io/oauth2-proxy/oauth2-proxy:v7
+    image: quay.io/oauth2-proxy/oauth2-proxy@sha256:CHANGEME
+    container_name: oauth2-proxy
+    env_file: ./webui/.oauth2-proxy.env
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    volumes:
+      - /etc/ssl/certs/ca-certificates.crt:/etc/ssl/certs/ca-certificates.crt:ro
+    # edge only: Caddy asks it, and it reaches your identity provider.  It
+    # never proxies to SearXNG itself; Caddy does that once it says yes.
+    networks: [edge]
+    logging: { driver: json-file, options: { max-size: 1m, max-file: "1" } }
+    restart: unless-stopped
+
+  searxng:
+    networks: [search, searxng-egress, backend, web]
+
+networks:
+  # caddy and searxng only.  Internal: SearXNG goes out via searxng-egress.
+  web:
+    internal: true
