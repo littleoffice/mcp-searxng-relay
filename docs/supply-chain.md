@@ -258,7 +258,7 @@ that the result is auditable and reproducible:
       the full build environment.
     - **A Sigstore/cosign keyless signature** over the pushed image digest
       (`cosign sign --yes <image>@<digest>`).
-    - **SBOM attestations in both CycloneDX and SPDX** via `actions/attest-sbom`,
+    - **SBOM attestations in both CycloneDX and SPDX** via `actions/attest`,
       generated from the pushed image with Syft. The CycloneDX form is the one
       most downstream consumers (Dependency-Track, Grype, etc.) parse.
 
