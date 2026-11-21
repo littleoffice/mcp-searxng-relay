@@ -197,6 +197,21 @@ jobs:
           sbom-path: sbom.spdx.json
           push-to-registry: true
 
+      - name: Find the previous stable release
+        # Release notes compare against the last stable tag behind this
+        # commit, so every rc and the final release list everything since
+        # that release. Left to itself, GitHub compares against the most
+        # recent earlier release, so rc2's notes would cover only what
+        # changed since rc1, and the final release's notes only what changed
+        # since the last rc.
+        id: prev
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          prev="$(git tag --merged HEAD --list 'v*' --sort=-v:refname | grep -v -- '-' | grep -vxF "$TAG" | head -n1)"
+          echo "Release notes for ${TAG} start at ${prev:-the first commit}"
+          echo "tag=${prev}" >> "$GITHUB_OUTPUT"
+
       - name: Create GitHub Release (draft)
         # Releases in this repository are immutable: once published, no
         # asset can be added. So the release is created as a draft, the SBOMs
@@ -211,6 +226,7 @@ jobs:
           # prerelease is auto-true for anything with a hyphen (rc1, beta, etc.)
           prerelease: ${{ contains(github.ref_name, '-') }}
           generate_release_notes: true
+          previous_tag: ${{ steps.prev.outputs.tag }}
           files: |
             sbom.cyclonedx.json
             sbom.spdx.json
